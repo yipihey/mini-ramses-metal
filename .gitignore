@@ -22,3 +22,4 @@ utils/py/*
 output_[0-9][0-9][0-9][0-9][0-9]/
 *.log
 *.out
+CLAUDE.md
