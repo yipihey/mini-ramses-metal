@@ -1,7 +1,6 @@
 module cooling_fine_module
 #ifdef _CUDA
   use gpu_runner, only: gpu_cooling
-  use nvtx
 #endif
 contains
 !###########################################################

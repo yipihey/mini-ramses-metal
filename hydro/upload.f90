@@ -1,7 +1,6 @@
 module upload_module
 #ifdef _CUDA
   use gpu_runner, only: gpu_upload
-  use nvtx
 #endif
 contains
 !#########################################################################
@@ -50,9 +49,7 @@ recursive subroutine r_upload_fine(pst,ilevel,input_size)
   else
 #ifdef _CUDA
      if(pst%s%m%data_on_device)then
-        call nvtxStartRange("GPU Upload", color=6)!teal
         call gpu_upload(pst%s,ilevel)
-        call nvtxEndRange()
      else
         call upload_fine(pst%s,ilevel)
      endif

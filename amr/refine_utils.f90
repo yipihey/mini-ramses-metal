@@ -1,7 +1,6 @@
 module refine_utils
 #ifdef _CUDA
   use gpu_runner, only: gpu_refine
-  use nvtx
 #endif
   type out_refine_fine_t
     integer::make,kill

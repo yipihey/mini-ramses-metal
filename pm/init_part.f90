@@ -52,7 +52,7 @@ subroutine init_part(r,g,m,p)
   use pm_parameters, only: PART_TYPE
   use pm_commons, only: part_t
 #ifdef _CUDA
-  use gpu_part_state
+  use gpu_runner
   use part_device, only: ensure_scan_capacity_part
   use cudafor
 #endif
@@ -104,17 +104,13 @@ subroutine init_part(r,g,m,p)
 #ifdef OUTPUT_PARTICLE_POTENTIAL
   allocate(phip(1:r%npartmax))
 #endif
-  ! CIC/sort/split scratch.
-  allocate(cell_part_count(1:twotondim, 1:m%ngridmax+m%ncachemax))
-  allocate(cell_part_head (1:twotondim, 1:m%ngridmax+m%ncachemax))
-  allocate(cell_part_idx  (1:r%npartmax))
-  allocate(src_part       (1:r%npartmax))
-  ! Gather/scatter scratch (device-only).
+  ! Gather/scatter scratch (device-only). isp_swap doubles as the
+  ! gpu_cic_part source map.
   allocate(xp_swap (1:r%npartmax))
   allocate(isp_swap(1:r%npartmax))
   allocate(idp_swap(1:r%npartmax))
   ! Prefix sum arrays
-  scan_size = max(r%npartmax, twotondim*r%ngridmax)
+  scan_size = max(r%npartmax, m%ngridmax + m%ncachemax)
   call ensure_scan_capacity_part(scan_size)
 #endif
 end subroutine init_part

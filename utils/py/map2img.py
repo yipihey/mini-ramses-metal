@@ -9,8 +9,8 @@ parser.add_argument("file", help="enter filename dens.map")
 parser.add_argument("--log", help="plot log variable",action="store_true")
 parser.add_argument("--out", help="output a png image")
 parser.add_argument("--col", help="choose the color map")
-parser.add_argument("--min", help="minimum value")
-parser.add_argument("--max", help="maximum value")
+parser.add_argument("--min", help="minimum value", type=float)
+parser.add_argument("--max", help="maximum value", type=float)
 parser.add_argument("--no-display", help="suppress plot display", action="store_true")
 args = parser.parse_args()
 print("Reading "+args.file)
@@ -24,7 +24,7 @@ with FortranFile(path_to_output, 'r') as f:
     nx, ny = f.read_ints('i')
     dat = f.read_reals('f4')
 
-print(nx,ny)
+print("nx=",nx,"ny=",ny)
 # reshape the output
 dat = np.array(dat)
 dat = dat.reshape(ny, nx)
@@ -39,7 +39,9 @@ if args.log:
 col="viridis"
 if args.col:
     col=args.col
-    
+
+print("min=",np.nanmin(dat),"max=",np.nanmax(dat))
+
 vmax=None
 if args.max:
     vmax=args.max

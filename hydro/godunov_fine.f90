@@ -1,7 +1,6 @@
 module godunov_fine_module
 #ifdef _CUDA
   use gpu_runner, only: gpu_godunov, gpu_set_unew, gpu_set_uold
-  use nvtx
 #endif
 contains
 !###########################################################
@@ -25,9 +24,7 @@ recursive subroutine r_godunov_fine(pst,ilevel,input_size)
      call mdl_get_reply(pst%s%mdl,rID,0)
   else
 #ifdef _CUDA
-     call nvtxStartRange("GPU Godunov", color=6)!teal
      call gpu_godunov(pst%s, ilevel)
-     call nvtxEndRange()
 #else
      call godunov_fine(pst%s, ilevel)
 #endif
@@ -110,9 +107,7 @@ recursive subroutine r_set_unew(pst,ilevel,input_size)
      call mdl_get_reply(pst%s%mdl,rID,0)
   else
 #ifdef _CUDA
-     call nvtxStartRange("GPU set_unew", color=6)!teal
      call gpu_set_unew(pst%s, ilevel)
-     call nvtxEndRange()
 #else
      call set_unew(pst%s%r,pst%s%g,pst%s%m,ilevel)
 #endif
@@ -178,9 +173,7 @@ recursive subroutine r_set_uold(pst,ilevel,input_size)
      call mdl_get_reply(pst%s%mdl,rID,0)
   else
 #ifdef _CUDA
-     call nvtxStartRange("GPU set_uold", color=6)!teal
      call gpu_set_uold(pst%s, ilevel)
-     call nvtxEndRange()
 #else
      call set_uold(pst%s%r,pst%s%g,pst%s%m,ilevel)
 #endif

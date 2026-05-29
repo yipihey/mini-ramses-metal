@@ -1117,10 +1117,10 @@ contains
     grid(cache_idx)%hkey(1) = hkey
 
     ! Compute parent oct hash table key
-    ilevel = grid(cache_idx)%lev - 1
-    ix = int(grid(cache_idx)%ckey(1) / 2, kind=8)
-    iy = int(grid(cache_idx)%ckey(2) / 2, kind=8)
-    iz = int(grid(cache_idx)%ckey(3) / 2, kind=8)
+    ilevel = ilevel - 1
+    ix = int(ckey(1) / 2, kind=8)
+    iy = int(ckey(2) / 2, kind=8)
+    iz = int(ckey(3) / 2, kind=8)
     nx = int(ckey_max(ilevel), kind=8)
     offset = key_off(ilevel)
     parent_key = offset + ix + iy * nx + iz * nx * nx
@@ -1130,9 +1130,9 @@ contains
     father(cache_idx) = parent_idx
 
     ! Get parent cell index
-    i = grid(cache_idx)%ckey(1) - 2*ix
-    j = grid(cache_idx)%ckey(2) - 2*iy
-    k = grid(cache_idx)%ckey(3) - 2*iz
+    i = ckey(1) - 2*ix
+    j = ckey(2) - 2*iy
+    k = ckey(3) - 2*iz
     cell_idx = 1 + i + 2*j + 4*k
 
 #ifdef HYDRO

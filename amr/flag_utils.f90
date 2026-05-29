@@ -6,7 +6,6 @@ module flag_utils
 #ifdef _CUDA
   use gpu_utils, only: nsubgrid
   use gpu_runner, only: gpu_init_flag, gpu_enforce_rules, gpu_user_flag, gpu_enforce_subgrid
-  use nvtx
 #endif
 contains
 
@@ -94,9 +93,7 @@ recursive subroutine r_init_flag(pst,ilevel,input_size,noct,output_size)
   else
 #ifdef _CUDA
      if(pst%s%m%data_on_device)then
-        call nvtxStartRange("GPU Initflag", color=6)!teal
         call gpu_init_flag(pst%s, ilevel, nflag)
-        call nvtxEndRange()
      else
         call init_flag(pst%s,ilevel,nflag)
      endif
@@ -193,9 +190,7 @@ recursive subroutine r_ensure_subgrid(pst,ilevel,input_size)
   else
 #ifdef _CUDA
      if(pst%s%m%data_on_device)then
-        call nvtxStartRange("GPU Enforce subgrid", color=6)!teal
         call gpu_enforce_subgrid(pst%s, ilevel)
-        call nvtxEndRange()
      else
         call ensure_subgrid(pst%s,ilevel)
      endif
@@ -337,9 +332,7 @@ recursive subroutine r_user_flag(pst,ilevel,input_size,noct,output_size)
   else
 #ifdef _CUDA
      if(pst%s%m%data_on_device)then
-        call nvtxStartRange("GPU Userflag", color=6)!teal
         call gpu_user_flag(pst%s, ilevel, nflag)
-        call nvtxEndRange()
      else
         call user_flag(pst%s,ilevel,nflag)
      endif
@@ -415,9 +408,7 @@ recursive subroutine r_ensure_ref_rules(pst,ilevel,input_size)
   else
 #ifdef _CUDA
      if(pst%s%m%data_on_device)then
-        call nvtxStartRange("GPU enforce rules", color=6)!teal
         call gpu_enforce_rules(pst%s, ilevel)
-        call nvtxEndRange()
      else
         call ensure_ref_rules(pst%s,ilevel)
      endif

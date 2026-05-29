@@ -1,5 +1,5 @@
 module gpu_runner
-  use amr_parameters, only: ndim, twotondim, threetondim, dp
+  use amr_parameters, only: ndim, twotondim, threetondim, dp, i8b
   use hydro_parameters, only: nvar
   use oct_commons, only: oct
   use gpu_utils
@@ -28,6 +28,33 @@ module gpu_runner
   !> Arrays to hold the gravity variables on the device
   real(kind=dp), device, allocatable, dimension(:,:) :: phi, rho, nref, phi_old
   real(kind=dp), device, allocatable, dimension(:,:,:) :: f
+
+  !> Arrays to hold the dark matter particle variables on the device
+  real(kind=dp),   device, allocatable, dimension(:,:) :: xp, vp
+  real(kind=dp),   device, allocatable, dimension(:)   :: mp, phip
+  integer(kind=4), device, allocatable, dimension(:)   :: levelp
+  integer(kind=4), device, allocatable, dimension(:)   :: sortp
+  integer(i8b),    device, allocatable, dimension(:)   :: idp
+
+!!$  real(kind=dp),   device, allocatable, dimension(:,:) :: jp
+!!$  real(kind=dp),   device, allocatable, dimension(:)   :: zp, tp, tm, size_p, charge
+!!$  integer(i8b),    device, allocatable, dimension(:)   :: idm
+!!$  integer(kind=4), device, allocatable, dimension(:)   :: idt
+
+  !> xp_swap/isp_swap/idp_swap: gather/scatter scratch with disjoint lifetimes.
+  !> isp_swap carries the split-sort bucket / swap-permutation during
+  !> gpu_split_part and the packed per-particle source map during
+  !> gpu_cic_part. The source-map encoding packs (igrid, icell) into one
+  !> 32-bit word: bits 0..4 = icell (1..twotondim), bits 5..31 = igrid.
+  !> Encoded as
+  !>   isp_swap(ipart) = ior(ishft(igrid, 5), icell)
+  !> and decoded as
+  !>   combined = isp_swap(ipart)
+  !>   icell = iand(combined, 31); igrid = ishft(combined, -5)
+  !> OOD sentinel is the whole word == 0 (cheap check before unpacking).
+  real(kind=dp),   device, allocatable, dimension(:) :: xp_swap
+  integer(kind=8), device, allocatable, dimension(:) :: idp_swap
+  integer(kind=4), device, allocatable, dimension(:) :: isp_swap
 
   !> Arrays to hold the hash table on the device
   integer(kind=8), device, allocatable, dimension(:) :: hash_key
@@ -2035,7 +2062,7 @@ contains
     ! Compute residual norm
     if (num_octs > 0) then
        call nvtxStartRange("GPU epot", color=1)!blue
-       call cmp_epot<<<num_blocks, num_threads>>>(f, head_idx, num_octs, epot_tot)
+       call cmp_epot<<<num_blocks, num_threads>>>(grid, f, head_idx, num_octs, epot_tot)
        epot_tot_host = epot_tot ! device to host
        call nvtxEndRange()
        epot = fact * epot_tot_host

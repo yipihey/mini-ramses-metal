@@ -529,6 +529,11 @@ contains
        print *, '                 [-typ type] '
        print *, '                 [-fil filetype] '
        print *, '                 [-max maxi] '
+       print *, '                 [-gra read_grav] '
+       print *, '                 [-pk  read_pk] '
+       print *, '                 [-rt  read_rt] '
+       print *, '                 [-nx  nx] '
+       print *, '                 [-ny  ny] '
        print *, 'ex: amr2map -inp output_00001 -out map.dat'// &
             &   ' -dir z -xmi 0.1 -xma 0.7 -lma 12'
        print *, ' '

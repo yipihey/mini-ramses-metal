@@ -998,7 +998,8 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine cmp_epot(f, head_idx, num_octs, epot_tot)
+  attributes(global) subroutine cmp_epot(grid, f, head_idx, num_octs, epot_tot)
+    type(oct), device :: grid(*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
@@ -1026,10 +1027,14 @@ contains
        ! Compute the cell idx
        cell_idx = mod(tid, twotondim) + 1
 
-       ! Compute square of force norm
-       epot_loc = f(cell_idx, 1, oct_idx)*f(cell_idx, 1, oct_idx) + &
-            &     f(cell_idx, 2, oct_idx)*f(cell_idx, 2, oct_idx) + &
-            &     f(cell_idx, 3, oct_idx)*f(cell_idx, 3, oct_idx)
+       ! CPU compute_epot skips refined parent cells.
+       if (.not. grid(oct_idx)%refined(cell_idx)) then
+          epot_loc = f(cell_idx, 1, oct_idx)*f(cell_idx, 1, oct_idx) + &
+               &     f(cell_idx, 2, oct_idx)*f(cell_idx, 2, oct_idx) + &
+               &     f(cell_idx, 3, oct_idx)*f(cell_idx, 3, oct_idx)
+       else
+          epot_loc = 0d0
+       endif
 
     endif
 

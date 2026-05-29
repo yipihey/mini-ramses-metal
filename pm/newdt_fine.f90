@@ -1,4 +1,7 @@
 module newdt_fine_module
+#ifdef _CUDA
+  use part_device, only: gpu_newdt_part
+#endif
 
 type :: out_newdt_part_t
   real(kind=8)::ekin,vmax
@@ -207,6 +210,9 @@ recursive subroutine r_newdt_part(pst,ilevel,input_size,output,output_size)
   use mdl_module
   use ramses_commons, only: pst_t
   use mdl_parameters
+#ifdef _CUDA
+  use pm_parameters, only: PART_TYPE
+#endif
   implicit none
   type(pst_t)::pst
   integer,VALUE::input_size
@@ -225,6 +231,23 @@ recursive subroutine r_newdt_part(pst,ilevel,input_size,output,output_size)
   else
      output%vmax=0.0d0
      output%ekin=0.0d0
+#ifdef _CUDA
+     if(pst%s%m%data_on_device)then
+        if(pst%s%r%part)then
+           if(pst%s%p%type/=PART_TYPE)then
+              write(*,*)'r_newdt_part: GPU path supports DM PART_TYPE only.'
+              call abort
+           endif
+           call gpu_newdt_part(pst%s, ilevel, output%vmax, output%ekin)
+        endif
+        if(pst%s%r%star .or. pst%s%r%sink .or. pst%s%r%tree .or. &
+           pst%s%r%trac .or. pst%s%r%dust)then
+           write(*,*)'r_newdt_part: star/sink/tree/trac/dust not supported on GPU.'
+           call abort
+        endif
+        return
+     endif
+#endif
      if(pst%s%r%part)then
         call newdt_part(pst%s%r,pst%s%g,pst%s%p   ,ilevel,output%ekin,output%vmax)
      endif

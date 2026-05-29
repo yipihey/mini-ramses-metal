@@ -1,7 +1,6 @@
 module smooth_module
 #ifdef _CUDA
   use gpu_runner, only: gpu_smooth_flag
-  use nvtx
 #endif
 contains
 !################################################################
@@ -30,9 +29,7 @@ recursive subroutine r_smooth_fine(pst,ilevel,input_size,noct,output_size)
   else
 #ifdef _CUDA
      if(pst%s%m%data_on_device)then
-        call nvtxStartRange("GPU Smoothflag", color=6)!teal
         call gpu_smooth_flag(pst%s, ilevel, nflag)
-        call nvtxEndRange()
      else
         call smooth_fine(pst%s,ilevel,nflag)
      endif

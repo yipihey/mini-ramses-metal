@@ -3,7 +3,6 @@ module gpu_manager
   use nvtx
   use gpu_utils
   use gpu_runner
-  use gpu_part_state
 contains
 !###########################################################
 !###########################################################
