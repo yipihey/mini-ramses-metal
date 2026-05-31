@@ -653,10 +653,25 @@ subroutine gpu_sort_part(sim, ilevel)
 end subroutine gpu_sort_part
 
 !> Build the per-particle source map consumed by gpu_cic_part.
-!> Threads walk sortp in Hilbert order, hash each particle's parent oct, and
-!> pack the resulting (igrid, icell) pair into isp_swap(ipart). A hash miss
-!> writes the whole-word zero sentinel, which the deposit kernel treats as
-!> out-of-domain.
+!>
+!> One thread per particle. Threads walk sortp(head_idx..head_idx+num_parts-1)
+!> in Hilbert order; for each particle we find the level-ilevel cell that
+!> contains it (cell side dx_loc = boxlen/2**ilevel, exactly as in the host
+!> cic_part), split that cell into its parent oct plus an in-oct child index
+!> (icell), hash the parent oct, and pack the resulting (igrid, icell) pair
+!> into a single 32-bit word in isp_swap(ipart).
+!>
+!> The pack layout (see gpu_runner.cuf) is:
+!>   bits  0..4  : icell  (1..twotondim, i.e. 1..8 in 3D)
+!>   bits  5..31 : igrid  (1-based oct index, up to 2^27)
+!> A hash miss is recorded as the whole-word zero sentinel: real (igrid, icell)
+!> pairs can never produce zero because igrid is 1-based, so combined == 0
+!> unambiguously means "out of domain" and the deposit kernel skips that lane.
+!>
+!> Note on indexing: although the kernel walks particles through sortp, the
+!> output array isp_swap is addressed by the *particle id* ipart, not by the
+!> sorted slot. The Hilbert traversal is only here to warm L1/L2 with the same
+!> xp access pattern the deposit kernel will use a moment later.
 attributes(global) subroutine build_src_part_kernel(xp_d, &
      & sortp_d, isp_swap_d, &
      & hash_key_d, hash_val_d, hash_size_d, ckey_max_d, key_off_d, &
@@ -678,11 +693,13 @@ attributes(global) subroutine build_src_part_kernel(xp_d, &
   integer(kind=8) :: nx, offset, key, ix8, iy8, iz8
   real(kind=8) :: skip(1:3), xs, inv_dx_loc
 
+  ! Map this CUDA thread to a slot in the Hilbert-sorted window.
   thread_idx = threadIdx%x - 1
   block_idx  = blockIdx%x  - 1
 
   idx = thread_idx + block_idx * blockDim%x
   if (idx >= num_parts) return
+  ! One indirection through sortp -> physical particle index.
   ipart = sortp_d(head_idx + idx)
 
   skip(1) = skip1
@@ -690,14 +707,22 @@ attributes(global) subroutine build_src_part_kernel(xp_d, &
   skip(3) = skip3
   inv_dx_loc = 1d0 / dx_loc
 
-  ! Particle Cartesian key at the deposit level.
+  ! 1) Particle Cartesian key at the deposit level (level ilevel).
+  !    dx_loc = boxlen / 2**ilevel is the deposit CELL side (the host's
+  !    "mesh spacing at level ilevel"); the parent oct spans 2*dx_loc. The
+  !    skip vector recentres the box on this rank's tile, and floor() picks
+  !    the level-ilevel cell index in each dimension.
   host_ckey = 0
   do idim = 1, ndim
      xs = (xp_d(ipart + (idim-1)*leading) + skip(idim)) * inv_dx_loc
      host_ckey(idim) = floor(xs)
   end do
 
-  ! Decompose the deposit-level key into a parent-oct key and in-oct cell.
+  ! 2) Split the level-ilevel cell key into (parent oct key, in-oct cell
+  !    index 1..twotondim). father_ckey is the integer-divide by 2 (the oct
+  !    ckey is one level coarser in resolution); ii(idim) in {0, 1} is the
+  !    corresponding 0/1 bit per axis, which is exactly the in-oct offset
+  !    along that axis.
   father_ckey = host_ckey / 2
   ii = host_ckey - 2 * father_ckey
   icell = 1
@@ -705,7 +730,10 @@ attributes(global) subroutine build_src_part_kernel(xp_d, &
      icell = icell + ii(idim) * (2**(idim-1))
   end do
 
-  ! Hash the parent oct. Misses are left as the zero source-map sentinel.
+  ! 3) Hash the parent oct. hash_get returns 0 on a miss, meaning the parent
+  !    is not materialised on this rank (off-rank or ghost-only). We carry the
+  !    miss forward as the zero source-map sentinel so the deposit kernel can
+  !    mask the lane out cheaply without a second hash lookup.
   ix8 = int(father_ckey(1), kind=8)
   iy8 = int(father_ckey(2), kind=8)
   iz8 = int(father_ckey(3), kind=8)
@@ -719,7 +747,11 @@ attributes(global) subroutine build_src_part_kernel(xp_d, &
      return
   endif
 
-  ! Pack (igrid, icell) into one 32-bit word.
+  ! 4) Pack (igrid, icell) -> one 32-bit word.
+  !    ishft(igrid, 5) shifts igrid up by 5 bits leaving zeros below; icell
+  !    occupies exactly those 5 bits (icell <= twotondim <= 8 < 32), so
+  !    ior() merges the two fields without overlap. Decoding (in the deposit
+  !    kernel) is iand(.,31) for icell and ishft(.,-5) for igrid.
   isp_swap_d(ipart) = ior(ishft(igrid, 5), icell)
 
 end subroutine build_src_part_kernel
@@ -802,11 +834,32 @@ attributes(global) subroutine gpu_newdt_part_kernel(vp_d, mp_d, &
 end subroutine gpu_newdt_part_kernel
 
 !> CIC mass deposit over sortp(head_idx:head_idx+num_parts-1).
-!> gpu_sort_part has sorted this range at depth ilevel, so particles
-!> sharing a source cell appear in contiguous runs. Each warp treats those runs
-!> as source-cell segments, accumulates each segment with an inclusive
-!> Hillis-Steele scan (parallel prefix sum), and emits one atomicAdd from the segment tail for each
-!> stencil destination.
+!>
+!> gpu_sort_part has sorted this range at depth ilevel, so particles sharing a
+!> source cell appear in contiguous runs of sortp. The kernel is launched at
+!> 256 threads/block = 8 warps/block, so each warp owns 32 consecutive slots
+!> of the sorted window. Inside a warp, lanes split into "segments" -- maximal
+!> runs of adjacent lanes whose source-cell key (the packed combined word from
+!> build_src_part_kernel) agrees. A uniform warp is one 32-lane segment; a
+!> warp straddling a cell boundary contains two; OOD/OOB lanes (combined == 0)
+!> cluster into a zero-segment that contributes nothing.
+!>
+!> For each of the threetondim = 3^ndim stencil offsets k:
+!>   1) each lane independently hashes its destination cell and forms its CIC
+!>      contribution (mp * w / vol_loc for rho; w for nref);
+!>   2) an inclusive segmented Hillis-Steele scan along the warp accumulates
+!>      each segment's contributions so the tail lane holds the segment sum;
+!>   3) the tail lane emits one atomicAdd per segment with non-zero, in-domain
+!>      contribution.
+!>
+!> The result: one atomic per (warp, segment, stencil-offset) -- typically
+!> just one atomic per warp per offset, because most warps are uniform.
+!>
+!> Note on the stencil width. The host's CIC uses a 2-cell stencil per axis
+!> (left or right neighbour depending on the fractional position). The GPU
+!> expresses it as a 3-cell stencil per axis with the "wrong-side" cell
+!> carrying weight zero. That removes per-lane branching and lets the
+!> zero-weight lanes drop out of the segmented scan silently.
 attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
      & isp_swap_d, head_idx, num_parts, &
      & grid_d, hash_key_d, hash_val_d, hash_size_d, ckey_max_d, key_off_d, &
@@ -847,8 +900,13 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
   real(kind=8) :: skip(1:3), xs, frac(1:3)
   real(kind=8) :: wx(0:2), wy(0:2), wz(0:2), w
 
+  ! ------------------------------------------------------------------
+  ! Lane bookkeeping: map (block, thread) -> (warp, lane, slot_global).
+  ! slot_global is 1-based into the sortp(head_idx..) window (Fortran
+  ! convention). valid_lane is .false. for lanes past num_parts.
+  ! ------------------------------------------------------------------
   tid_local       = threadIdx%x - 1
-  warps_per_block = blockDim%x / warpsize
+  warps_per_block = blockDim%x / warpsize        ! 256 / 32 = 8
   warp_local      = tid_local / warpsize
   lane            = mod(tid_local, warpsize)
   warp_global     = (blockIdx%x - 1) * warps_per_block + warp_local
@@ -856,6 +914,12 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
 
   valid_lane = (slot_global <= num_parts)
 
+  ! ------------------------------------------------------------------
+  ! Unpack the per-lane source-cell map written by build_src_part_kernel.
+  ! combined == 0 marks an out-of-domain particle (hash miss). OOD lanes
+  ! and out-of-bounds (OOB) tail lanes carry the same zero word and so
+  ! group together as a single zero-segment during boundary detection.
+  ! ------------------------------------------------------------------
   ipart          = 0
   combined       = 0
   icell_src_lane = 0
@@ -863,8 +927,6 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
   if (valid_lane) then
      ipart    = sortp_d(head_idx + slot_global - 1)
      combined = isp_swap_d(ipart)
-     ! OOD particles use the same zero word as OOB lanes. They form zero
-     ! segments during boundary detection and never emit atomics.
      if (combined == 0) then
         valid_lane = .false.
      else
@@ -877,6 +939,10 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
   skip(2) = skip2
   skip(3) = skip3
 
+  ! ------------------------------------------------------------------
+  ! Per-lane fractional position inside the home cell. Invalid lanes keep
+  ! mp_i = 0 so any weight they later form contributes nothing.
+  ! ------------------------------------------------------------------
   mp_i = 0d0
   frac = 0d0
   if (valid_lane) then
@@ -887,8 +953,16 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
      end do
   endif
 
-  ! 1D CIC weights for offsets -1, 0, +1. Unused dimensions keep unit
-  ! weight in the central slot so the product below also covers 1D/2D.
+  ! ------------------------------------------------------------------
+  ! 1D CIC weights expressed on a 3-cell stencil per axis. For f in [0, 1):
+  !   f < 1/2:  w(-1) = 1/2 - f,  w(0) = 1/2 + f,  w(+1) = 0
+  !   f >= 1/2: w(-1) = 0,        w(0) = 3/2 - f,  w(+1) = f - 1/2
+  ! This is the textbook 2-cell CIC with the "wrong-side" cell zero-padded,
+  ! so we can loop over all 3^ndim offsets unconditionally and let zero
+  ! weights silently drop those lanes from the segmented scan.
+  ! Unused dimensions keep wy(1) = wz(1) = 1 so the 3D product also works
+  ! correctly for ndim = 1 or 2.
+  ! ------------------------------------------------------------------
   wx(0) = max(0d0, 0.5d0 - frac(1))
   wx(1) = 1d0 - abs(frac(1) - 0.5d0)
   wx(2) = max(0d0, frac(1) - 0.5d0)
@@ -907,8 +981,13 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
      wz(2) = max(0d0, frac(3) - 0.5d0)
   endif
 
-  ! Box bounds live at the deposit level (ilevel+1), while hash keys below
-  ! address parent octs at ilevel.
+  ! ------------------------------------------------------------------
+  ! Per-level metadata. box_min/box_max bound the local tile at the deposit
+  ! level (level ilevel) and drive periodic wrap / OOB rejection below. Note
+  ! the box arrays store these level-ilevel cell coordinates in slot ilevel+1
+  ! -- an array-indexing convention, not a finer AMR level. The oct hash is
+  ! indexed at ilevel because grid(:) stores the parent octs there.
+  ! ------------------------------------------------------------------
   box_min = 0
   box_max = 0
   do idim = 1, ndim
@@ -918,7 +997,14 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
   nx          = int(ckey_max_d(ilevel), kind=8)
   hkey_offset = key_off_d(ilevel)
 
-  ! Reconstruct each lane's full source-cell key at the deposit level.
+  ! ------------------------------------------------------------------
+  ! Reconstruct each lane's full source-cell Cartesian key at level ilevel.
+  ! The packed (igrid, icell) only carries the parent oct's index and the
+  ! in-oct child id; we recover the level-ilevel cell ckey as
+  !   2 * (parent oct ckey) + (in-oct bit per axis).
+  ! Lanes that share `combined` produce the same src_full_ckey, hence the
+  ! same destination at any fixed stencil offset k below.
+  ! ------------------------------------------------------------------
   src_full_ckey = 0
   if (valid_lane) then
      ii_src = 0
@@ -930,33 +1016,52 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
      end do
   endif
 
-  ! Adjacent lanes are in the same source segment iff the packed source words
-  ! match. A zero segment may contain OOD/OOB lanes, but contributes zero.
+  ! ------------------------------------------------------------------
+  ! Segment boundary detection. Adjacent-lane equality of `combined` is
+  ! enough: lane L is a segment head iff its left neighbour disagrees (or
+  ! it is lane 0); lane L is a tail iff its right neighbour disagrees (or
+  ! it is lane warpsize-1). The detection is done once per warp because
+  ! `combined` does not depend on the stencil offset k.
+  ! __shfl_up / __shfl_down read from lane L-1 / L+1 within the warp;
+  ! the explicit (lane == 0) / (lane == warpsize-1) clauses cover the
+  ! out-of-range boundaries.
+  ! ------------------------------------------------------------------
   prev_combined = __shfl_up  (combined, 1)
   next_combined = __shfl_down(combined, 1)
   is_head = (lane == 0)              .or. (combined /= prev_combined)
   is_tail = (lane == warpsize - 1)   .or. (combined /= next_combined)
 
+  ! ------------------------------------------------------------------
+  ! Stencil loop: iterate over the 3^ndim offsets (ox, oy, oz) in {-1, 0, +1}.
+  ! Per offset: each lane computes its own destination + contribution, the
+  ! warp runs a segmented inclusive scan, and each segment's tail emits at
+  ! most one atomicAdd into rho (and one into nref, if gated).
+  ! ------------------------------------------------------------------
   do k = 1, threetondim
+     ! Decode the linear index k = 1..27 into mixed-radix-3 offsets.
      ox = mod(k - 1, 3) - 1
      oy = mod((k - 1) / 3, 3) - 1
      oz = (k - 1) / 9 - 1
 
      ! Per-lane destination and contribution for this stencil offset.
-     ! Lanes in the same source segment compute the same destination, so the
-     ! tail lane carries the segment's final atomic target.
+     ! Lanes in the same source segment share src_full_ckey, hence (at
+     ! fixed k) share dst_igrid_lane and dst_icell_lane -- so the tail lane
+     ! carries the segment's atomic target after the scan below.
      dst_igrid_lane = 0
      dst_icell_lane = 0
      my_rho  = 0d0
      my_nref = 0d0
      if (valid_lane) then
+        ! Target cell key at level ilevel = source key + stencil offset.
         target_ckey = 0
         target_ckey(1) = src_full_ckey(1) + ox
         if (ndim >= 2) target_ckey(2) = src_full_ckey(2) + oy
         if (ndim >= 3) target_ckey(3) = src_full_ckey(3) + oz
 
-        ! Periodic axes wrap within the deposit-level box; non-periodic
-        ! misses are skipped by leaving dst_igrid_lane at zero.
+        ! Boundary handling. Periodic axes wrap within the deposit-level box.
+        ! Non-periodic out-of-bounds lanes skip the lookup (in_domain=false)
+        ! and leave dst_igrid_lane = 0, which suppresses the tail atomic
+        ! later via the dst_igrid_lane /= 0 guard.
         in_domain = .true.
         do idim = 1, ndim
            if (periodic_d(idim)) then
@@ -968,7 +1073,9 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
            endif
         end do
         if (in_domain) then
-           ! Decompose the destination cell into parent oct and in-oct cell.
+           ! Same decomposition as in build_src_part_kernel: pull the parent
+           ! oct's ckey and the in-oct child index out of the level-ilevel
+           ! target ckey, then hash the parent oct.
            father_ckey = target_ckey / 2
            ii = target_ckey - 2 * father_ckey
            dst_icell_lane = 1
@@ -979,15 +1086,23 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
            iy8 = int(father_ckey(2), kind=8)
            iz8 = int(father_ckey(3), kind=8)
            key = hkey_offset + ix8 + iy8*nx + iz8*nx*nx
+           ! hash_get returns 0 if the destination oct is not present on this
+           ! rank, which again suppresses the tail atomic for this lane.
            dst_igrid_lane = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
         endif
         if (dst_igrid_lane /= 0) then
+           ! CIC weight = product of 1D weights at offset (ox, oy, oz).
+           ! Only 2**ndim of the 3**ndim offsets are non-zero for a given
+           ! particle (8 of 27 in 3D); the rest are "wrong-side" cells of the
+           ! 3-cell stencil whose lanes join the segmented scan with zero
+           ! contribution and drop out.
            w = wx(ox+1) * wy(oy+1) * wz(oz+1)
            if (w > 0d0) then
               my_rho = mp_i * w / vol_loc
               if (m_refine_at_level >= 0d0) then
                  ! nref follows the host refinement gate: either all masses
-                 ! count, or only particles below mass_cut_refine count.
+                 ! count (mass_cut_refine <= 0), or only particles below
+                 ! mass_cut_refine count toward the refinement criterion.
                  if (mass_cut_refine > 0d0) then
                     if (mp_i < mass_cut_refine) then
                        my_nref = w
@@ -1000,9 +1115,23 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
         endif
      endif
 
-     ! Segmented inclusive Hillis-Steele scan. head_acc records whether the
-     ! lookback window has crossed a segment head; only same-segment values
-     ! are folded into the lane-local partial sums.
+     ! ---------------------------------------------------------------
+     ! Segmented inclusive Hillis-Steele scan along the warp.
+     !
+     ! head_acc starts at 1 on segment heads, 0 elsewhere, and is OR'd up
+     ! the warp via __shfl_up in lock-step with the values. At iteration s
+     ! (scan_offset = 2^s), each lane looks back 2^s positions:
+     !   - if its lookback has not yet crossed a head (head_acc == 0), the
+     !     value 2^s back is still inside this segment -- fold it in;
+     !   - once a head is encountered (head_acc flips to 1), further
+     !     additions are skipped: the lane has summed from its segment's
+     !     head through itself and is done.
+     ! After 5 iterations (covering offsets 1, 2, 4, 8, 16) every lane in
+     ! a warp holds the inclusive segment sum from its segment's head up
+     ! through itself; in particular, the segment tail holds the total.
+     ! The (lane >= scan_offset) guard handles low-lane positions whose
+     ! __shfl_up source would be out of warp range.
+     ! ---------------------------------------------------------------
      if (is_head) then
         head_acc = 1
      else
@@ -1022,7 +1151,16 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
         endif
      end do
 
-     ! The segment tail now holds the segment sum for this stencil offset.
+     ! ---------------------------------------------------------------
+     ! Tail emission: one atomicAdd per segment per stencil offset.
+     ! The triple guard is sharp:
+     !   is_tail            -- exactly one lane per segment;
+     !   valid_lane         -- skip OOD / OOB zero-segments;
+     !   dst_igrid_lane /= 0 -- skip off-rank destinations.
+     ! The my_rho / my_nref != 0 checks save no-op atomics on segments
+     ! whose total at this k is identically zero (e.g. an entire segment
+     ! sitting on the wrong side of the stencil).
+     ! ---------------------------------------------------------------
      if (is_tail .and. valid_lane .and. dst_igrid_lane /= 0) then
         if (my_rho /= 0d0) then
            info = atomicadd(rho_d(dst_icell_lane, dst_igrid_lane), real(my_rho, kind=dp))
@@ -1035,7 +1173,31 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
 
 end subroutine cic_part_warp_kernel
 
-!> Source-map build + multipole_q + warp-segmented CIC deposit.
+!> Host dispatcher for the GPU CIC mass deposit at level ilevel.
+!>
+!> Pipeline:
+!>   1. If rtype is not 0 or 1, bail out (matches the host's deposition guard).
+!>   2. On the coarsest active level only, launch multipole_q_kernel to
+!>      accumulate the global monopole and dipole (q_0 = sum mp, q_alpha =
+!>      sum mp * xp_alpha) over the full particle table.
+!>   3. Launch build_src_part_kernel over sortp(head_idx..head_idx+num_parts-1)
+!>      to hash each particle's parent oct and pack (igrid, icell) into
+!>      isp_swap.
+!>   4. Launch cic_part_warp_kernel over the same window to deposit into
+!>      rho and nref via a per-warp segmented Hillis-Steele scan.
+!>
+!> Preconditions:
+!>   - gpu_sort_part has just run at depth ilevel, so sortp groups particles
+!>     that share a source cell into contiguous runs. The deposit kernel does
+!>     not re-sort -- it relies on this grouping to keep most warps uniform
+!>     (one segment, one atomic per stencil offset).
+!>   - The deposit cells are at level ilevel (side dx_loc = boxlen/2**ilevel),
+!>     where the CIC weights are formed -- the same level the host cic_part
+!>     uses. (The per-level box arrays index these cell coordinates at slot
+!>     ilevel+1, an array convention only.) Particle ownership runs from
+!>     head_idx = p%headp(ilevel) through p%tailp(nlevelmax), so the range
+!>     covers every particle at or below ilevel (matching the host cic_part
+!>     loop bounds).
 subroutine gpu_cic_part(sim, ilevel, rtype)
   use nvtx
   use ramses_commons, only: ramses_t
@@ -1050,6 +1212,7 @@ subroutine gpu_cic_part(sim, ilevel, rtype)
   real(kind=8) :: q_h(1:ndim+1)
   real(kind=8), device :: q_d(1:ndim+1)
 
+  ! rtype gate: matches the host's "deposit DM into rho" branch.
   if (rtype /= 0 .and. rtype /= 1) then
      return
   endif
@@ -1073,20 +1236,28 @@ subroutine gpu_cic_part(sim, ilevel, rtype)
 
   endif
 
+  ! Particle index range for the deposit: everything at or below ilevel.
   head_idx = sim%p%headp(ilevel)
   tail_idx = sim%p%tailp(sim%r%nlevelmax)
   num_parts = tail_idx - head_idx + 1
 
   if (num_parts <= 0) return
 
+  ! Geometry. dx_loc = boxlen/2**ilevel is the deposit CELL side at level
+  ! ilevel (the host's "mesh spacing at level ilevel"); the parent oct spans
+  ! 2*dx_loc. vol_loc = dx_loc**ndim is the level-ilevel cell volume used to
+  ! convert mass to density. skip(:) recentres positions on this rank's tile.
   dx_loc  = sim%r%boxlen/2**ilevel
   vol_loc = dx_loc**ndim
   skip1 = sim%m%skip(1)
   skip2 = sim%m%skip(2)
   skip3 = sim%m%skip(3)
 
-  ! Build source map in Hilbert order. The following deposit pass walks the
-  ! same sorted range, using contiguous same-source runs as warp segments.
+  ! Pass 1: build the per-particle source map in Hilbert order. The deposit
+  ! pass will walk the same sorted range, using contiguous same-source runs
+  ! as warp segments to coalesce contributions into a single atomicAdd per
+  ! segment. 128 threads/block here -- moderate occupancy, no warp reduction
+  ! needed inside this pass.
   num_threads = 128
   num_blocks  = (num_parts + num_threads - 1) / num_threads
   call nvtxStartRange("gpu_cic_part", color=4) ! purple
@@ -1096,6 +1267,9 @@ subroutine gpu_cic_part(sim, ilevel, rtype)
        & skip1, skip2, skip3, dx_loc, ilevel, head_idx, num_parts, sim%r%npartmax)
   call nvtxEndRange()
 
+  ! Pass 2: warp-segmented CIC deposit. 256 threads/block = 8 warps/block;
+  ! each warp owns 32 contiguous slots of sortp and emits roughly one
+  ! atomicAdd per stencil offset (more on cell boundaries).
   deposit_block_size = 256
   deposit_num_blocks = (num_parts + deposit_block_size - 1) / deposit_block_size
   call nvtxStartRange("gpu_cic_part", color=4) ! purple
