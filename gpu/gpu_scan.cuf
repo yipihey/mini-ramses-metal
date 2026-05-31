@@ -270,3 +270,17 @@ attributes(global) subroutine uniform_add_dp(data, offset, size, partial_sums, t
 
 end subroutine uniform_add_dp
 ! =========================================================================
+
+! =========================================================================
+attributes(global) subroutine get_total_sum(prefix_sum, head_idx, num_octs, total_sum)
+  implicit none
+  integer(kind=4), device :: prefix_sum(*)
+  integer(kind=4), device :: total_sum
+  integer(kind=4), value :: head_idx, num_octs
+
+  if ((1 == blockIdx%x) .AND. (1 == threadIdx%x)) then
+    total_sum = prefix_sum(head_idx + num_octs - 1)
+  endif
+
+end subroutine get_total_sum
+! =========================================================================
