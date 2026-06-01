@@ -55,6 +55,7 @@ echo "=== rho / part ==="
 runtest test_newdt      1 "$TMP/test_part1d.metallib"  part.metal
 runtest test_cicdeposit 1 "$TMP/test_rho1d.metallib"   rho.metal hash.metal
 runtest test_gatherkick 1 "$TMP/test_pk1d.metallib"    part.metal hash.metal
+runtest test_adjoint_boundary 1 "$TMP/test_adj1d.metallib" rho.metal part.metal hash.metal
 
 echo "=== flag / refine ==="
 runtest test_flag        1 "$TMP/test_flag1d.metallib"   flag.metal
