@@ -261,7 +261,7 @@ write_gitinfo.o: FORCE
                 -DGITREPO=\'"$(GITREPO)"\' -DBUILDDATE=\'"$(BUILDDATE)"\' -DBUILDCOMMAND=\'"$(BUILDCOMMAND)"\' -c ../amr/write_gitinfo.f90 -o $@
 #############################################################################
 cub_inclusive_scan_c.o: cub_inclusive_scan.h cub_inclusive_scan.cu
-	nvcc -arch $(CUDA_ARCH) -O3 -lineinfo -c $(GPU_PATH)/cub_inclusive_scan.cu -o cub_inclusive_scan_c.o
+	nvcc -arch=sm_90 -O3 -lineinfo -c $(GPU_PATH)/cub_inclusive_scan.cu -o cub_inclusive_scan_c.o
 #############################################################################
 cub_inclusive_scan_f.o: cub_inclusive_scan.cuf cub_inclusive_scan_c.o
 	nvfortran $(FFLAGS) -c cub_inclusive_scan_c.o $(GPU_PATH)/cub_inclusive_scan.cuf -o cub_inclusive_scan_f.o
