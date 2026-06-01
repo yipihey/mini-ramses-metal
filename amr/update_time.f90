@@ -145,14 +145,25 @@ subroutine m_update_time(pst,ilevel,done)
   if(mod(g%nstep,r%ncontrol)==0)then
      if(itest==0)then
         if(r%part)then
+#ifdef _CUDA
+           write(*,888)g%nstep,g%t,dt,g%aexp,real(100.0D0*dble(m%noct_used_max)/dble(m%ngridmax)),&
+                & real(100.0D0*dble(m%ifree_cache)/dble(r%ncachemax)),&
+                & real(100.0D0*dble(p%npart_max)/dble(r%npartmax+1))
+#else
            write(*,888)g%nstep,g%t,dt,g%aexp,real(100.0D0*dble(m%noct_used_max)/dble(m%ngridmax)),&
                 & real(100.0D0*dble(p%npart_max)/dble(r%npartmax+1))
+#endif
         else
-           write(*,888)g%nstep,g%t,dt,g%aexp,real(100.0D0*dble(m%noct_used_max)/dble(m%ngridmax))
+#ifdef _CUDA
+           write(*,888)g%nstep,g%t,dt,g%aexp,real(100.0D0*dble(m%noct_used_max)/dble(m%ngridmax)),&
+                & real(100.0D0*dble(m%ifree_cache)/dble(r%ncachemax))
+#else
+                write(*,888)g%nstep,g%t,dt,g%aexp,real(100.0D0*dble(m%noct_used_max)/dble(m%ngridmax))
+#endif
         endif
      end if
   end if
-888 format(' Fine step=',i7,' t=',1pe12.5,' dt=',1pe10.3,' a=',1pe10.3,' mem=',0pF4.1,'% ',0pF4.1,'%')
+888 format(' Fine step=',i7,' t=',1pe12.5,' dt=',1pe10.3,' a=',1pe10.3,' mem=',0pF4.1,'% ',0pF4.1,'%',0pF4.1,'%')
  
   !------------------------
   ! Update time variables
