@@ -55,7 +55,14 @@ module metal_gravity_module
   ! bit-identical trajectory to 10 cycles for 40 steps (the V-cycle converges to
   ! the fp32 force floor by ~3 cycles given the warm/interpolated initial guess),
   ! ~10% faster overall.
-  integer :: g_ncyc_fine = 5, g_ncyc_base = 4
+  ! Fixed MG V-cycle counts (Stage 2): the solve reaches its fp32 residual floor by ~5
+  ! cycles and then plateaus dead-flat, so a fixed count replaces the per-iteration
+  ! convergence readback (which serialised the async kernel pipeline).  6 covers the
+  ! plateau onset with margin; tune via RAMSES_NCYC_FINE / RAMSES_NCYC_BASE.
+  integer :: g_ncyc_fine = 6, g_ncyc_base = 6
+  ! RAMSES_MG_CHECK_EVERY=N: re-enable a residual-norm readback at the END of each level
+  ! solve every N coarse steps as a convergence monitor (0 = off, the production default).
+  integer :: g_mg_check_every = 0
   ! CUDA-style multigrid: run the Fortran multigrid()/recursive_multigrid mirror
   ! (m_metal_multigrid) calling per-leaf mtl_mg_* kernels, instead of the
   ! monolithic hand-coded V-cycle in mtl_poisson_level.  Set RAMSES_METAL_MG=1.
@@ -515,9 +522,10 @@ contains
     real(dp), intent(in) :: fourpi, offset, vol_loc, dx, tfrac
     integer, parameter :: MAXITER = 20
     real(dp), parameter :: SAFE_FACTOR = 0.5_dp
-    integer :: ifine, iter, i, allmasked, levelmin_mg, bnd, isafe, is_base
+    integer :: ifine, iter, i, allmasked, levelmin_mg, bnd, isafe, is_base, ncyc
     real(dp) :: err, last_err, i_res, res, rho_tot, eps
     character(len=8) :: probe
+    logical :: mg_monitor
     associate(r=>pst%s%r, g=>pst%s%g)
     bnd = r%bound_levelmin
     rho_tot = g%rho_tot
@@ -577,84 +585,62 @@ contains
        end if
     end do
 
-    ! --- main_iteration_loop ---
-    iter = 0; err = 1.0_dp
-    do
-       iter = iter + 1
-       isafe = merge(1, 0, g_mg_safe_f(ilevel))
-
+    ! --- fixed-cycle V-cycle loop (Stage 2) ---
+    ! The convergence-gated loop read the residual norm back to the host EVERY iteration
+    ! (mtl_mg_residual_norm2 -> mtl_drain), serialising the otherwise-async kernel pipeline
+    ! and forcing ~0% GPU occupancy.  Measurement (RAMSES_MG_VERBOSE) showed the solve
+    ! reaches its fp32 residual floor by ~5 cycles then PLATEAUS dead-flat: the periodic
+    ! base hovers at ~1.1e-4 (just above eps=1e-4) and ground all 20 MAXITER iterations for
+    ! a bit-flat residual.  A fixed g_ncyc count (default 6) gives the SAME plateaued
+    ! solution with NO host readback -> GS/residual/restrict/interpolate all submit_async
+    ! and pipeline.  RAMSES_MG_CHECK_EVERY=N re-enables one end-of-solve readback every N
+    ! coarse steps as a convergence monitor.  Safe-mode (residual-driven escalation) is
+    ! dropped: it can no longer trigger without the per-iteration norm, and the measured
+    ! convergence is uniform.
+    ncyc = merge(g_ncyc_fine, g_ncyc_base, ilevel > r%levelmin)
+    mg_monitor = (g_mg_check_every > 0)
+    if (mg_monitor) mg_monitor = (mod(g%nstep_coarse, g_mg_check_every) == 0)
+    i_res = 0.0_dp
+    do iter = 1, ncyc
        ! Pre-smoothing (ngs_fine red+black sweeps)
        do i = 1, ngs_fine
-          call mtl_mg_gauss_seidel(ilevel, ilevel, isafe, 1)
-          call mtl_mg_gauss_seidel(ilevel, ilevel, isafe, 0)
+          call mtl_mg_gauss_seidel(ilevel, ilevel, 0, 1)
+          call mtl_mg_gauss_seidel(ilevel, ilevel, 0, 0)
        end do
-       call mtl_mg_cmp_residual(ilevel, ilevel)
-       if (iter == 1) i_res = mtl_mg_residual_norm2(ilevel)
-
-       ! PROBE (RAMSES_MG_PROBE=1): one-shot per-level residual walk on the first
-       ! base solve -> localises where the V-cycle coarse correction stalls.
-       call get_environment_variable('RAMSES_MG_PROBE', probe)
-       if (len_trim(probe) > 0 .and. is_base == 1 .and. iter == 1 .and. g_mg_probe_done == 0 &
-           .and. i_res > 1.0d-12) then
-          block
-            real(dp) :: r0, r1
-            g_mg_probe_done = 1
-            write(0,'(A,I3,A,1pE12.4)') '[PROBE] L', ilevel, ' fine i_res2=', i_res
-            call mtl_mg_restrict_residual(ilevel, ilevel)       ! fine resid -> L(ilevel-1) RHS
-            do ifine = ilevel-1, levelmin_mg, -1
-               call mtl_mg_reset_corr(ilevel, ifine)            ! phi=0 -> residual == RHS
-               call mtl_mg_cmp_residual(ilevel, ifine)
-               r0 = mtl_mg_norm_at(ilevel, ifine)               ! residual before smoothing
-               do i = 1, 2
-                  call mtl_mg_gauss_seidel(ilevel, ifine, 0, 1)
-                  call mtl_mg_gauss_seidel(ilevel, ifine, 0, 0)
-               end do
-               call mtl_mg_cmp_residual(ilevel, ifine)
-               r1 = mtl_mg_norm_at(ilevel, ifine)               ! residual after 2 GS sweeps
-               write(0,'(A,I3,A,1pE11.3,A,1pE11.3,A,0pF6.3)') '[PROBE]  L', ifine, &
-                    ' resid2 before=', r0, ' after2GS=', r1, ' ratio=', sqrt(r1/max(r0,1d-300))
-               if (ifine > levelmin_mg) call mtl_mg_restrict_residual(ilevel, ifine)
-            end do
-            call mtl_mg_cmp_residual(ilevel, ilevel)            ! restore fine residual
-          end block
-       end if
 
        ! Coarse-grid correction (one recursive V-cycle)
        if (ilevel > levelmin_mg) then
+          call mtl_mg_cmp_residual(ilevel, ilevel)       ! residual feeds restrict_residual
+          if (mg_monitor .and. iter == 1) i_res = mtl_mg_residual_norm2(ilevel)
           call mtl_mg_restrict_residual(ilevel, ilevel)
           ! Periodic base (is_base): project the constant null space out of the
           ! coarse RHS so the singular periodic operator stays consistent and GS
           ! does not amplify the constant mode (fp32 mean leak -> over-energize).
           if (is_base == 1) call mtl_mg_zeromean_rhs(ilevel, ilevel-1)
           call mtl_mg_reset_corr(ilevel, ilevel-1)
-          call metal_recursive_mg(pst, ilevel, ilevel-1, isafe, levelmin_mg, is_base)
+          call metal_recursive_mg(pst, ilevel, ilevel-1, 0, levelmin_mg, is_base)
           call mtl_mg_interpolate_correct(ilevel, ilevel)
-          if (len_trim(probe) > 0 .and. is_base == 1 .and. g_mg_probe_done == 1 .and. iter == 1) then
-             block
-               real(dp) :: rc
-               call mtl_mg_cmp_residual(ilevel, ilevel)
-               rc = mtl_mg_residual_norm2(ilevel)
-               write(0,'(A,1pE11.3,A,1pE11.3,A,0pF6.3)') '[PROBE] fine resid2 before corr=', i_res, &
-                    ' after coarse-corr=', rc, ' ratio=', sqrt(rc/max(i_res,1d-300))
-             end block
-          end if
+       else if (mg_monitor .and. iter == 1) then
+          call mtl_mg_cmp_residual(ilevel, ilevel)
+          i_res = mtl_mg_residual_norm2(ilevel)
        end if
 
        ! Post-smoothing
        do i = 1, ngs_fine
-          call mtl_mg_gauss_seidel(ilevel, ilevel, isafe, 1)
-          call mtl_mg_gauss_seidel(ilevel, ilevel, isafe, 0)
+          call mtl_mg_gauss_seidel(ilevel, ilevel, 0, 1)
+          call mtl_mg_gauss_seidel(ilevel, ilevel, 0, 0)
        end do
+    end do
 
+    ! Optional convergence monitor (RAMSES_MG_CHECK_EVERY): one residual readback at the
+    ! end of the solve, every N coarse steps -- spot-check that the fixed count still
+    ! reaches the fp32 floor.  Off (and zero readbacks) by default.
+    if (mg_monitor) then
        call mtl_mg_cmp_residual(ilevel, ilevel)
        res = mtl_mg_residual_norm2(ilevel)
-       last_err = err
        err = sqrt(res / (i_res + 1.0d-20*rho_tot**2))
-       if (len_trim(get_mg_verbose()) > 0) &
-            write(0,'(A,I5,A,I5,A,1pE10.3)') '   ==> Level=', ilevel, ' Step=', iter, ' Error=', err
-       if (err < eps .or. iter >= MAXITER) exit
-       if (err > last_err*SAFE_FACTOR .and. .not. g_mg_safe_f(ilevel)) g_mg_safe_f(ilevel) = .true.
-    end do
+       write(0,'(A,I5,A,I5,A,1pE10.3)') '   ==> [MG-MON] Level=', ilevel, ' ncyc=', ncyc, ' err=', err
+    end if
 
     ! Zero-mean gauge pin for the periodic base (null-space drift control); the
     ! monolithic mtl_poisson_level does this too.  Refined levels are Dirichlet.

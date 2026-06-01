@@ -24,7 +24,7 @@ subroutine adaptive_loop(pst)
 #endif
 #ifdef _METAL
   use metal_bridge_iface
-  use metal_gravity_module, only: metal_enabled, metal_flag_on, metal_refine_on, refine_rehash, refine_hostflag1, refine_hostmed, m_metal_prof_report, g_ncyc_fine, g_ncyc_base, g_sort_every, metal_mg_driver_on, metal_mg_all_levels, m_metal_part_to_host, m_metal_grid_to_host
+  use metal_gravity_module, only: metal_enabled, metal_flag_on, metal_refine_on, refine_rehash, refine_hostflag1, refine_hostmed, m_metal_prof_report, g_ncyc_fine, g_ncyc_base, g_mg_check_every, g_sort_every, metal_mg_driver_on, metal_mg_all_levels, m_metal_part_to_host, m_metal_grid_to_host
   use iso_c_binding
   use amr_parameters, only: ndim
 #endif
@@ -148,6 +148,9 @@ subroutine adaptive_loop(pst)
      if (len_trim(m_mlib) > 0) read(m_mlib,*) g_ncyc_base
      call get_environment_variable('RAMSES_SORT_EVERY', m_mlib)
      if (len_trim(m_mlib) > 0) read(m_mlib,*) g_sort_every
+     ! Stage 2: convergence-monitor cadence for the fixed-cycle MG (0 = off).
+     call get_environment_variable('RAMSES_MG_CHECK_EVERY', m_mlib)
+     if (len_trim(m_mlib) > 0) read(m_mlib,*) g_mg_check_every
      ! CUDA-style multigrid driver (Fortran V-cycle + per-leaf Metal kernels).
      call get_environment_variable('RAMSES_METAL_MG', m_mlib)
      if (trim(m_mlib) == '1') metal_mg_driver_on = .true.
