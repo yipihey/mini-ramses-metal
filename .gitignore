@@ -14,6 +14,7 @@ utils/py/*
 
 # ignore editor settings
 .vscode
+*.sw[a-z]
 
 # Mac stuff
 .DS_Store
@@ -23,3 +24,6 @@ output_[0-9][0-9][0-9][0-9][0-9]/
 *.log
 *.out
 CLAUDE.md
+*.nsys-rep
+*.ncu-rep
+*.sqlite

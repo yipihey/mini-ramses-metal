@@ -41,17 +41,7 @@ module gpu_runner
 !!$  integer(i8b),    device, allocatable, dimension(:)   :: idm
 !!$  integer(kind=4), device, allocatable, dimension(:)   :: idt
 
-  !> xp_swap/isp_swap/idp_swap: gather/scatter scratch with disjoint lifetimes.
-  !> isp_swap carries the split-sort bucket / swap-permutation during
-  !> gpu_split_part and the packed per-particle source map during
-  !> gpu_cic_part. The source-map encoding packs (igrid, icell) into one
-  !> 32-bit word: bits 0..4 = icell (1..twotondim), bits 5..31 = igrid.
-  !> Encoded as
-  !>   isp_swap(ipart) = ior(ishft(igrid, 5), icell)
-  !> and decoded as
-  !>   combined = isp_swap(ipart)
-  !>   icell = iand(combined, 31); igrid = ishft(combined, -5)
-  !> OOD sentinel is the whole word == 0 (cheap check before unpacking).
+  !> xp_swap/isp_swap/idp_swap: gather/scatter scratch and other tasks.
   real(kind=dp),   device, allocatable, dimension(:) :: xp_swap
   integer(kind=8), device, allocatable, dimension(:) :: idp_swap
   integer(kind=4), device, allocatable, dimension(:) :: isp_swap
@@ -390,6 +380,15 @@ contains
 
   end subroutine gpu_cooling
 
+! gpu_refine
+! fused kernels and cub inclusive sum
+! undefine these to go back to the original implementation
+#define FUSE_LEVEL
+#define FUSE_HILBERT
+#define FUSE_CACHE
+#define FUSE_SCATTER_GATHER
+#define CUB_SCAN
+
   !> @brief
   !> This routine deals with AMR refinements and de-refinements on the GPU.
   !>
@@ -401,11 +400,13 @@ contains
   !> @param[in] ilevel : The refinement level to update
   !>
   subroutine gpu_refine(sim, ilevel, nmake, nkill)
+    use cudafor
     use nvtx
     use refine_device
     use ramses_commons, only: ramses_t
     use cache_commons
     use cache
+    use cub_inclusive_scan_mod
     type(ramses_t), intent(inout) :: sim
     integer, intent(in) :: ilevel
     integer, intent(out) :: nmake, nkill
@@ -526,19 +527,26 @@ contains
                & head_idx, num_octs, ilev)
 
           ! Compute prefix sum
+#if defined(CUB_SCAN)
+          call cub_inclusive_sum(c_loc(prefix_sum), head_idx, num_octs)
+#else
           call gpu_scan(head_idx, num_octs, new_noct_d)
-
-          ! Compute new noct
-          new_noct = new_noct_d
-          new_noct = num_octs - new_noct
-
+#endif
           ! Compute local swap table
+          ! Update global swap table
+#if defined(FUSE_LEVEL)
+          call compute_and_update_swap_table<<<num_blocks, num_threads>>>(swap_local, swap_global, prefix_sum, &
+               & head_idx, num_octs, new_noct_d)
+#else
           call compute_local_swap_table<<<num_blocks, num_threads>>>(swap_local, swap_global, prefix_sum, &
                & head_idx, num_octs)
 
-          ! Update global swap table
           call update_global_swap_table<<<num_blocks, num_threads>>>(swap_global, swap_local, &
                & head_idx, num_octs)
+#endif
+          ! Compute new noct. note: this results in D-to-H memcpy
+          new_noct = new_noct_d
+          new_noct = num_octs - new_noct
 
           call nvtxEndRange()
        endif
@@ -578,16 +586,23 @@ contains
                   & head_idx, num_octs, ibit)
 
              ! Compute prefix sum
+#if defined(CUB_SCAN)
+             call cub_inclusive_sum(c_loc(prefix_sum), head_idx, num_octs)
+#else
              call gpu_scan(head_idx, num_octs)
-
+#endif
              ! Compute local swap table
+             ! Update global swap table
+#if defined(FUSE_HILBERT)
+             call compute_and_update_swap_table<<<num_blocks, num_threads>>>(swap_local, swap_global, prefix_sum, &
+                  & head_idx, num_octs)
+#else
              call compute_local_swap_table<<<num_blocks, num_threads>>>(swap_local, swap_global, prefix_sum, &
                   & head_idx, num_octs)
 
-             ! Update global swap table
              call update_global_swap_table<<<num_blocks, num_threads>>>(swap_global, swap_local, &
                   & head_idx, num_octs)
-
+#endif
              call nvtxEndRange()
           end do
 
@@ -608,18 +623,24 @@ contains
 
     ! Out-of-place sort of grid, flag1, uold and grav variables using swap table
     if (num_octs > 0) then
-       call nvtxStartRange("sort_grid", color=2)!yellow
-
+       call nvtxStartRange("scatter_gather", color=2)!yellow
+#if defined(FUSE_SCATTER_GATHER)
+       call sort_gather_scatter_grid_flag<<<num_blocks, num_threads>>>(grid, flag1, flag2, swap_global, head_idx, num_octs)
+#else
        call sort_gather_grid<<<num_blocks, num_threads>>>(flag2, grid, swap_global, head_idx, num_octs)
        call sort_scatter_grid<<<num_blocks, num_threads>>>(grid, flag2, head_idx, num_octs)
        call sort_gather_flag<<<num_blocks, num_threads>>>(flag2, flag1, swap_global, head_idx, num_octs)
        call sort_scatter_flag<<<num_blocks, num_threads>>>(flag1, flag2, head_idx, num_octs)
+#endif
 #ifdef HYDRO
        call sort_gather_hydro<<<num_blocks_2, dim3(threadsX_per_block,threadsY_per_block,1)>>>(unew, uold, &
             & swap_global, head_idx, num_octs)
        info = cudaMemcpy(uold(1,1,head_idx), unew(1,1,head_idx), twotondim*nvar*num_octs)
 #endif
 #ifdef GRAV
+#if defined(FUSE_SCATTER_GATHER)
+       call sort_gather_scatter_force_phi<<<num_blocks, num_threads>>>(f, phi, phi_old, nref, swap_global, head_idx, num_octs)
+#else
        call sort_gather_force<<<num_blocks, num_threads>>>(nref, f, 1, swap_global, head_idx, num_octs)
        call sort_scatter_force<<<num_blocks, num_threads>>>(f, nref, 1, head_idx, num_octs)
        call sort_gather_force<<<num_blocks, num_threads>>>(nref, f, 2, swap_global, head_idx, num_octs)
@@ -631,22 +652,27 @@ contains
        call sort_gather_phi<<<num_blocks, num_threads>>>(nref, phi_old, swap_global, head_idx, num_octs)
        call sort_scatter_phi<<<num_blocks, num_threads>>>(phi_old, nref, head_idx, num_octs)
 #endif
+#endif
        call nvtxEndRange()
     endif
 
-    ! Update hash table
     if (num_octs > 0) then
+
+       ! Update hash table
        call update_hash_kernel<<<num_blocks, num_threads>>>(grid, hash_key, hash_val, sim%m%hash_size, &
             & ckey_max, key_off, head_idx, num_octs)
-    end if
+
+    endif
 
     info = cudaDeviceSynchronize()
     call m_timer('cache','start')
 
-    ! Update father index array (they should always exist without MPI)
     if (num_octs > 0) then
+
+       ! Update father index array (they should always exist without MPI)
        call update_father_array<<<num_blocks, num_threads>>>(grid, father, hash_key, hash_val, sim%m%hash_size, &
             & ckey_max, key_off, head_idx, num_octs)
+
     endif
 
     ! Update nbor index array level by level
@@ -682,26 +708,39 @@ contains
                   & head_idx, num_subgrids, ind, prefix_sum = prefix_sum)
 
              ! Compute prefix sum
+#if defined(CUB_SCAN)
+             call cub_inclusive_sum(c_loc(prefix_sum), head_idx, num_subgrids)
+#else
              call gpu_scan(head_idx, num_subgrids, new_noct_d)
-
+#endif
              ! Compute cache swap table
+             ! Make new ghost octs in cache
+             ! Insert new octs in hash table
+             ! Increment ifree_cache on device
+#if defined(FUSE_CACHE)
+             call make_cache_insert_ghost_octs<<<num_blocks, num_threads>>>(grid, flag1, &
+                  & uold, f, phi, phi_old, swap_local, prefix_sum, father, nbor, hash_key, &
+                  & hash_val, sim%m%hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, &
+                  & periodic, sim%m%ngridmax, ifree_cache_d, ind, head_idx, num_subgrids)
+#else
+#if defined(CUB_SCAN)
+             call get_total_sum(prefix_sum, head_idx, num_subgrids, new_noct_d)
+#endif
              call compute_cache_swap_table<<<num_blocks, num_threads>>>(swap_local, prefix_sum, &
                   & head_idx, num_subgrids)
 
-             ! Make new ghost octs in cache
              call make_cache_octs<<<num_blocks, num_threads>>>(grid, flag1, &
                   & uold, f, phi, phi_old, swap_local, father, nbor, &
                   & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
                   & sim%m%ngridmax, ifree_cache_d, new_noct_d, ind)
 
-             ! Insert new octs in hash table
              call insert_hash_cache<<<num_blocks, num_threads>>>(grid, hash_key, hash_val, sim%m%hash_size, &
                   & ckey_max, key_off, sim%m%ngridmax, ifree_cache_d, new_noct_d)
 
-             ! Increment ifree_cache on device
              call advance_ifree_cache<<<1,1>>>(ifree_cache_d, new_noct_d)
-
+#endif
              call nvtxEndRange()
+
           end do
           ! End loop over 27 nbors
 
