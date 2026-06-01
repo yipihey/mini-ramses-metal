@@ -68,6 +68,11 @@ module metal_bridge_iface
        integer(c_int), value :: ilevel, ifine, safe, redstep
      end subroutine mtl_mg_gauss_seidel
 
+     subroutine mtl_mg_smooth(ilevel, ifine, safe, nsweep) bind(C, name="mtl_mg_smooth")
+       import :: c_int
+       integer(c_int), value :: ilevel, ifine, safe, nsweep
+     end subroutine mtl_mg_smooth
+
      subroutine mtl_mg_cmp_residual(ilevel, ifine) bind(C, name="mtl_mg_cmp_residual")
        import :: c_int
        integer(c_int), value :: ilevel, ifine

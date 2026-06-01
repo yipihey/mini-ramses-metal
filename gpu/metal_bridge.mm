@@ -1715,6 +1715,39 @@ void mtl_mg_gauss_seidel(int ilevel, int ifine, int safe, int redstep) {
     }
 }
 
+// Batched smoothing (Stage 3): encode nsweep red+black Gauss-Seidel sweeps into ONE
+// command buffer / encoder instead of 2*nsweep separate command buffers.  Numerically
+// IDENTICAL to calling mtl_mg_gauss_seidel 2*nsweep times: same kernel, same red-then-
+// black order; the default compute encoder is serial with automatic hazard tracking, so
+// each black sweep correctly sees the phi the preceding red sweep wrote.  Removes the
+// per-sweep [g_queue commandBuffer]/commit overhead from the hot smoothing path.
+void mtl_mg_smooth(int ilevel, int ifine, int safe, int nsweep) {
+    if (MGNUM(ifine) <= 0 || nsweep <= 0) return;
+    @autoreleasepool {
+        const int HALF = TWOTONDIM/2;
+        MgParams P{}; P.head_idx=MGHEAD(ifine); P.num_octs=MGNUM(ifine); P.ngridmax=MGNGM(ifine);
+        P.use_ghost = (ifine==ilevel)?g_mgc.has_coarse:0; P.tfrac=(ifine==ilevel)?g_mgc.tfrac:0.0f;
+        P.dx = MGDX(ifine);
+        id<MTLCommandBuffer> cb=[g_queue commandBuffer];
+        id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
+        [e setComputePipelineState:pso("gauss_seidel")];
+        [e setBuffer:MGPHI(ifine) offset:0 atIndex:0]; [e setBuffer:MGF(ifine) offset:0 atIndex:1];
+        [e setBuffer:MGNB(ifine) offset:0 atIndex:2];
+        [e setBytes:&safe length:4 atIndex:4];
+        [e setBuffer:B.grid offset:0 atIndex:5]; [e setBuffer:B.father offset:0 atIndex:6];
+        [e setBuffer:B.phi_old offset:0 atIndex:7];
+        for (int s=0; s<nsweep; ++s) {
+            for (int red=1; red>=0; --red) {
+                P.redstep = red;
+                [e setBytes:&P length:sizeof(P) atIndex:3];
+                [e dispatchThreads:MTLSizeMake(HALF,MGNUM(ifine),1)
+                    threadsPerThreadgroup:MTLSizeMake(HALF,16,1)];
+            }
+        }
+        [e endEncoding]; submit_async(cb);
+    }
+}
+
 // Residual at level ifine -> f(:,1).
 void mtl_mg_cmp_residual(int ilevel, int ifine) {
     if (MGNUM(ifine) <= 0) return;

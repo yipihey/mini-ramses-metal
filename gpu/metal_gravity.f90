@@ -604,11 +604,8 @@ contains
     if (mg_monitor) mg_monitor = (mod(g%nstep_coarse, g_mg_check_every) == 0)
     i_res = 0.0_dp
     do iter = 1, ncyc
-       ! Pre-smoothing (ngs_fine red+black sweeps)
-       do i = 1, ngs_fine
-          call mtl_mg_gauss_seidel(ilevel, ilevel, 0, 1)
-          call mtl_mg_gauss_seidel(ilevel, ilevel, 0, 0)
-       end do
+       ! Pre-smoothing (ngs_fine red+black sweeps, batched into one command buffer)
+       call mtl_mg_smooth(ilevel, ilevel, 0, ngs_fine)
 
        ! Coarse-grid correction (one recursive V-cycle)
        if (ilevel > levelmin_mg) then
@@ -628,10 +625,7 @@ contains
        end if
 
        ! Post-smoothing
-       do i = 1, ngs_fine
-          call mtl_mg_gauss_seidel(ilevel, ilevel, 0, 1)
-          call mtl_mg_gauss_seidel(ilevel, ilevel, 0, 0)
-       end do
+       call mtl_mg_smooth(ilevel, ilevel, 0, ngs_fine)
     end do
 
     ! Optional convergence monitor (RAMSES_MG_CHECK_EVERY): one residual readback at the
@@ -659,11 +653,8 @@ contains
     integer :: i, icycle, ncycle
 
     if (ifine <= levelmin_mg) then
-       ! Coarsest level: solve 'directly' with 2*ngs_coarse sweeps
-       do i = 1, 2*ngs_coarse
-          call mtl_mg_gauss_seidel(ilevel, ifine, isafe, 1)
-          call mtl_mg_gauss_seidel(ilevel, ifine, isafe, 0)
-       end do
+       ! Coarsest level: solve 'directly' with 2*ngs_coarse sweeps (batched)
+       call mtl_mg_smooth(ilevel, ifine, isafe, 2*ngs_coarse)
        return
     end if
 
@@ -672,10 +663,7 @@ contains
 
     do icycle = 1, ncycle
        ! Pre-smoothing
-       do i = 1, ngs_coarse
-          call mtl_mg_gauss_seidel(ilevel, ifine, isafe, 1)
-          call mtl_mg_gauss_seidel(ilevel, ifine, isafe, 0)
-       end do
+       call mtl_mg_smooth(ilevel, ifine, isafe, ngs_coarse)
        ! Residual + restrict to coarser level
        call mtl_mg_cmp_residual(ilevel, ifine)
        call mtl_mg_restrict_residual(ilevel, ifine)
@@ -685,10 +673,7 @@ contains
        call metal_recursive_mg(pst, ilevel, ifine-1, isafe, levelmin_mg, is_base)
        call mtl_mg_interpolate_correct(ilevel, ifine)
        ! Post-smoothing
-       do i = 1, ngs_coarse
-          call mtl_mg_gauss_seidel(ilevel, ifine, isafe, 1)
-          call mtl_mg_gauss_seidel(ilevel, ifine, isafe, 0)
-       end do
+       call mtl_mg_smooth(ilevel, ifine, isafe, ngs_coarse)
     end do
   end subroutine metal_recursive_mg
 
