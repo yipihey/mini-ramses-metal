@@ -55,11 +55,13 @@ module metal_gravity_module
   ! bit-identical trajectory to 10 cycles for 40 steps (the V-cycle converges to
   ! the fp32 force floor by ~3 cycles given the warm/interpolated initial guess),
   ! ~10% faster overall.
-  ! Fixed MG V-cycle counts (Stage 2): the solve reaches its fp32 residual floor by ~5
-  ! cycles and then plateaus dead-flat, so a fixed count replaces the per-iteration
-  ! convergence readback (which serialised the async kernel pipeline).  6 covers the
-  ! plateau onset with margin; tune via RAMSES_NCYC_FINE / RAMSES_NCYC_BASE.
-  integer :: g_ncyc_fine = 6, g_ncyc_base = 6
+  ! Fixed MG V-cycle counts (Stage 2): the solve reaches its fp32 residual floor then
+  ! plateaus dead-flat, so a fixed count replaces the per-iteration convergence readback
+  ! (which serialised the async kernel pipeline).  Measured optima: refined levels hit
+  ! eps=1e-4 at ~4 cycles (matching the original loop's exit point); the periodic base
+  ! plateaus at its floor by ~6 (verified: base ncyc=6 and ncyc=12 give an identical
+  ! residual + ekin).  Tune via RAMSES_NCYC_FINE / RAMSES_NCYC_BASE.
+  integer :: g_ncyc_fine = 4, g_ncyc_base = 6
   ! RAMSES_MG_CHECK_EVERY=N: re-enable a residual-norm readback at the END of each level
   ! solve every N coarse steps as a convergence monitor (0 = off, the production default).
   integer :: g_mg_check_every = 0
