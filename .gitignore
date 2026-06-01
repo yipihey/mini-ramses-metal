@@ -23,3 +23,14 @@ output_[0-9][0-9][0-9][0-9][0-9]/
 *.log
 *.out
 CLAUDE.md
+
+# Metal/extra build dirs (parallel to bin/, build outputs only)
+bin1d*/
+bin_mpi*/
+
+# run directories (ICs + large simulation outputs/data)
+runs/
+
+# local agent/session files + python env lock
+.claude/
+uv.lock

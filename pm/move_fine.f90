@@ -45,6 +45,9 @@ recursive subroutine r_kick_drift_part(pst,input_array,input_size,output_array,o
 #ifdef _CUDA
   use pm_parameters, only: PART_TYPE
 #endif
+#ifdef _METAL
+  use metal_gravity_module, only: m_metal_kick_drift, metal_enabled
+#endif
   implicit none
   type(pst_t)::pst
   integer,VALUE::input_size
@@ -84,9 +87,18 @@ recursive subroutine r_kick_drift_part(pst,input_array,input_size,output_array,o
      ! Force interpolation for various components (DM particles, star, sink, tree)
      ! based on their respective deposition schemes (CIC 1, TSC 2 or PCS 3)
      if(pst%s%r%part)then
+#ifdef _METAL
+        if(metal_enabled)then
+           ! GPU leapfrog kick/drift (force gather from the resident f-field)
+           call m_metal_kick_drift(pst, ilevel, action_part)
+        else if(pst%s%r%part_force_interpolation_scheme==1)then
+           call cic_kick_drift_part(pst%s,pst%s%p   ,ilevel,action_part)
+        elseif(pst%s%r%part_force_interpolation_scheme==2)then
+#else
         if(pst%s%r%part_force_interpolation_scheme==1)then
            call cic_kick_drift_part(pst%s,pst%s%p   ,ilevel,action_part)
         elseif(pst%s%r%part_force_interpolation_scheme==2)then
+#endif
            call tsc_kick_drift_part(pst%s,pst%s%p   ,ilevel,action_part)
         elseif(pst%s%r%part_force_interpolation_scheme==3)then
            call pcs_kick_drift_part(pst%s,pst%s%p   ,ilevel,action_part)

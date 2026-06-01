@@ -185,6 +185,29 @@ ifeq ($(COMPILER),NVHPC)
    endif
 endif
 #############################################################################
+# Metal (Apple Silicon) compiler branch: gfortran host + Obj-C++ Metal bridge.
+# The Fortran host builds exactly like GNU; GPU kernels live in a .metallib and
+# are driven through metal_bridge.mm (extern "C") declared in metal_bridge_iface.
+ifeq ($(COMPILER),METAL)
+   FFLAGS = -cpp $(DEFINES) -DWITHOUTMPI -D_METAL
+   F90 = gfortran -ffree-line-length-none -fimplicit-none
+   FC  = gfortran -ffree-line-length-none -fimplicit-none
+   ifeq ($(DEBUG),1)
+      F90 += -O0 -fcheck=bounds -g -fbacktrace
+   else
+      F90 += -O3
+   endif
+   GPU_PATH    = ../gpu
+   CXX         = clang++
+   CXXFLAGS    = -std=c++17 -ObjC++ -fobjc-arc -O2 -DNDIM=$(NDIM) -I../gpu
+   METAL       = xcrun -sdk macosx metal
+   METALLIB    = xcrun -sdk macosx metallib
+   METALFLAGS  = -std=metal3.1 -DNDIM=$(NDIM) -I../gpu -I../gpu/metal
+   METAL_KERNELS = scan primitives sort hash nbor reduce rho mg part flag refine
+   EXTRADEP    = ramses_kernels.metallib
+   LIBS += -framework Metal -framework Foundation -framework QuartzCore -lc++ -lobjc
+endif
+#############################################################################
 C = ifort
 CFLAGS = -g -O3
 #############################################################################
@@ -228,6 +251,9 @@ MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 ifeq ($(COMPILER),NVHPC)
 MODOBJ += gpu_utils.o gpu_hydro.o gpu_cooling.o gpu_rho.o gpu_mg.o gpu_refine.o gpu_flag.o gpu_runner.o gpu_part.o gpu_manager.o
 endif
+ifeq ($(COMPILER),METAL)
+MODOBJ += metal_bridge_iface.o metal_bridge.o metal_gravity.o
+endif
 MODOBJ +=  multigrid_fine_coarse.o rho_fine.o upload.o init_xion.o \
 	 rt_flux_module.o rt_godunov_fine.o rt_input_condinit.o rt_init_flow_fine.o rt_units.o  \
 	 rt_condinit.o rt_flag.o rt_upload.o interpol_rt.o rt_godunov_utils.o read_rt_params.o \
@@ -248,8 +274,23 @@ MODOBJ +=  multigrid_fine_coarse.o rho_fine.o upload.o init_xion.o \
 	 sink_evolution.o sink_merger.o task_manager.o rt_step.o amr_step.o adaptive_loop.o \
 	 write_gitinfo.o
 #############################################################################
-ramses:	$(MODOBJ) ramses.o
+ramses:	$(MODOBJ) ramses.o $(EXTRADEP)
 	$(F90) $(FFLAGS) $(MODOBJ) ramses.o -o $(EXEC)$(NDIM)d $(LIBS)
+#############################################################################
+# Metal kernel library (Apple Silicon).  Compiles gpu/metal/*.metal -> .metallib.
+# Depend on the sources + shared headers so an edit to any kernel (or header)
+# forces a rebuild (otherwise a stale .metallib silently ships old kernels).
+ramses_kernels.metallib: $(addprefix ../gpu/metal/,$(addsuffix .metal,$(METAL_KERNELS))) \
+                         ../gpu/metal/ramses_msl.h ../gpu/ramses_metal.h \
+                         ../gpu/metal/hash.h ../gpu/metal/hilbert.h ../gpu/metal/utils.h \
+                         ../gpu/metal/reduce.h ../gpu/metal/nbor.h
+	@for k in $(METAL_KERNELS); do \
+	   echo "$(METAL) -c ../gpu/metal/$$k.metal"; \
+	   $(METAL) $(METALFLAGS) -c ../gpu/metal/$$k.metal -o $$k.air || exit 1; \
+	done
+	$(METALLIB) $(addsuffix .air,$(METAL_KERNELS)) -o $@
+%.o:%.mm
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 #############################################################################
 test_cooling:	$(MODOBJ) test_cooling.o
 	$(F90) $(FFLAGS) $(MODOBJ) test_cooling.o -o test_cooling $(LIBS)

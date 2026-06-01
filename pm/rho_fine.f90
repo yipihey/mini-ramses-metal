@@ -3,6 +3,10 @@ module rho_fine_module
   use gpu_runner, only: gpu_multipole_leaf, gpu_multipole_split, gpu_reset_rho, gpu_cic_multipole, gpu_cic_multipole2
   use part_device, only: gpu_split_part, gpu_sort_part, gpu_cic_part
 #endif
+#ifdef _METAL
+  use metal_gravity_module, only: m_metal_rho_zero, m_metal_deposit, m_metal_rho_finish, &
+       m_metal_gpu_sort, m_metal_gpu_split, metal_enabled
+#endif
 contains
 !###############################################
 !###############################################
@@ -98,6 +102,12 @@ subroutine m_rho_fine(pst,ilevel,rtype)
         call r_split_part(pst,ilevel-1,1)
      endif
 
+#ifdef _METAL
+     ! Build the multi-level monopole rho RESIDENT on the GPU: zero the
+     ! accumulators once before the level loop, deposit each level inside it.
+     if(metal_enabled)call m_metal_rho_zero(pst,ilevel)
+#endif
+
      ! Loop over all finer levels from coarse to fine
      do i=ilevel,r%nlevelmax
 
@@ -111,9 +121,17 @@ subroutine m_rho_fine(pst,ilevel,rtype)
 #ifdef GRAV
         if(m%noct_tot(i)>0 .and. r%poisson)then
            if(r%verbose)write(*,'(" Compute rho from particles for level ",I2)')i
+#ifdef _METAL
+           if(metal_enabled)then
+              call m_metal_deposit(pst,i,rtype)        ! GPU CIC deposit (accumulate)
+           else
+#endif
            input_array(1)=i
            input_array(2)=rtype
            call r_cic_part(pst,input_array,2)
+#ifdef _METAL
+           endif
+#endif
         endif
 #endif
 
@@ -124,12 +142,21 @@ subroutine m_rho_fine(pst,ilevel,rtype)
         endif
 
      end do
+#ifdef _METAL
+     ! Recombine the resident accumulators into rho/nref, set the mean density.
+     if(metal_enabled)call m_metal_rho_finish(pst,ilevel)
+#endif
   endif
 
   !---------------------------------------------------------------------
   ! Collect multipole contribution from all CPU and broadcast rho_tot
   !---------------------------------------------------------------------
 #ifdef GRAV
+  ! (Metal sets g%rho_tot directly in m_metal_rho_finish; the multipole reduction
+  ! below is bypassed since the CPU deposit/multipole_tot accumulation is skipped.)
+#ifdef _METAL
+  if(.not.metal_enabled)then
+#endif
   if(ilevel==r%levelmin .and. r%poisson)then
 
      ! Collect local multipole from all CPU
@@ -139,7 +166,10 @@ subroutine m_rho_fine(pst,ilevel,rtype)
      call r_broadcast_multipole(pst,multipole_tot,storage_size(multipole_tot)/32)
 
      if(r%verbose)write(*,*)'rho_average=',g%rho_tot
-  endif  
+  endif
+#ifdef _METAL
+  endif
+#endif
 #endif
 
   end associate
@@ -1232,6 +1262,12 @@ recursive subroutine r_split_part(pst,ilevel,input_size)
         return
      endif
 #endif
+#ifdef _METAL
+     if(metal_enabled .and. pst%s%r%part .and. ilevel>=pst%s%r%levelmin)then
+        call m_metal_gpu_split(pst, ilevel)     ! GPU split: reorder resident + set headp/tailp
+        return
+     endif
+#endif
      if(pst%s%r%part)call split_part(pst%s,pst%s%p   ,ilevel)
      if(pst%s%r%star)call split_part(pst%s,pst%s%star,ilevel)
      if(pst%s%r%sink)call split_part(pst%s,pst%s%sink,ilevel)
@@ -1987,6 +2023,12 @@ recursive subroutine r_sort_part(pst,ilevel,input_size)
            write(*,*)'ERROR: r_sort_part: non-DM not supported on GPU.'
            call abort
         endif
+        return
+     endif
+#endif
+#ifdef _METAL
+     if(metal_enabled .and. pst%s%r%part)then
+        call m_metal_gpu_sort(pst, ilevel)      ! GPU Hilbert sort of resident particles
         return
      endif
 #endif

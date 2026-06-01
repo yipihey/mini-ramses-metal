@@ -41,6 +41,9 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
 #ifdef _CUDA
   use gpu_manager, only: r_transfer_grid_host
 #endif
+#ifdef _METAL
+  use metal_gravity_module, only: m_metal_poisson, metal_enabled, m_metal_grid_to_host, m_metal_part_to_host
+#endif
 
   implicit none
 
@@ -112,6 +115,10 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
 #ifdef _CUDA
            call r_transfer_grid_host(pst)
 #endif
+#ifdef _METAL
+           call m_metal_grid_to_host(pst)
+           call m_metal_part_to_host(pst)
+#endif
            call m_dump_all(pst,.false.)
         endif
      endif
@@ -124,6 +131,10 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
 #ifdef _CUDA
            call r_transfer_grid_host(pst)
 #endif
+#ifdef _METAL
+           call m_metal_grid_to_host(pst)
+           call m_metal_part_to_host(pst)
+#endif
         call m_dump_all(pst,.true.)
         tprev=tcurr
      endif
@@ -132,6 +143,10 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
            call m_timer('backup','start')
 #ifdef _CUDA
            call r_transfer_grid_host(pst)
+#endif
+#ifdef _METAL
+           call m_metal_grid_to_host(pst)
+           call m_metal_part_to_host(pst)
 #endif
            call m_dump_all(pst,.true.)
            bkp_last_done=.true.
@@ -184,6 +199,16 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
      call r_save_phi_old(pst,ilevel,1)
 
      ! Compute new gravitational potential
+#ifdef _METAL
+     ! Hybrid: GPU computes this level's potential AND force.  The whole mesh is
+     ! mirrored on the GPU (AMR father + same-level nbor); the level consumes the
+     ! CPU density rho, takes the coarser level's phi (resident from its earlier
+     ! solve) as the coarse-fine boundary, runs the grouped multigrid V-cycle and
+     ! the 4th-order gradient.  CPU keeps managing the AMR mesh.
+     if(metal_enabled)then
+        call m_metal_poisson(pst, ilevel, icount)
+     else
+#endif
      if(ilevel > r%levelmin)then
         if(ilevel >= r%cg_levelmin) then
            call m_phi_fine_cg(pst,ilevel,icount)
@@ -193,6 +218,9 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
      else
         call multigrid(pst,r%levelmin,icount)
      end if
+#ifdef _METAL
+     endif
+#endif
 
      ! Initial old potential
      if (g%nstep==0)call r_save_phi_old(pst,ilevel,1)
@@ -201,7 +229,12 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   ! Compute gravitational acceleration
   if(r%poisson)then
      call m_timer('grav force','start')
+#ifdef _METAL
+     ! force already filled by m_metal_poisson above (GPU gradient)
+     if(.not.metal_enabled) call m_force_fine(pst,ilevel,icount)
+#else
      call m_force_fine(pst,ilevel,icount)
+#endif
   end if
 #endif
 

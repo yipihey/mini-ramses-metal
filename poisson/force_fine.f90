@@ -339,6 +339,55 @@ subroutine gradient_phi(s,ilevel,icount)
 
   call close_cache(mdl)
 
+  ! STAGE-GATE DIAG (RAMSES_DIAG): per-level max|phi|, max|force|, max|rho| -- the
+  ! SAME metric the Metal port prints, for apples-to-apples comparison of the
+  ! refined-level solve.  Single-rank only (no MPI reduction here).
+  block
+    character(len=8)::diag
+    real(kind=8)::pmax,fmax,rmx,netfx,absfr
+    integer::ig2,id2,idm
+    call get_environment_variable("RAMSES_DIAG",diag)
+    if (len_trim(diag)>0) then
+       pmax=0d0; fmax=0d0; rmx=0d0; netfx=0d0; absfr=0d0
+       do ig2=m%head(ilevel),m%tail(ilevel)
+          do id2=1,twotondim
+             pmax=max(pmax,abs(m%phi(id2,ig2)))
+             rmx =max(rmx, abs(m%rho(id2,ig2)))
+             ! net force dim 1 = sum f(:,1)*rho (should be ~0); absfr = scale.
+             netfx=netfx + m%f(id2,1,ig2)*m%rho(id2,ig2)
+             absfr=absfr + abs(m%f(id2,1,ig2)*m%rho(id2,ig2))
+             do idm=1,ndim
+                fmax=max(fmax,abs(m%f(id2,idm,ig2)))
+             end do
+          end do
+       end do
+       write(*,'(A,I3,A,I8,A,ES11.3,A,ES11.3,A,ES11.3,A,ES11.3,A,ES10.2)') &
+         ' [DIAG] L',ilevel,' noct=',m%tail(ilevel)-m%head(ilevel)+1, &
+         ' maxphi=',pmax,' maxf=',fmax,' maxrho=',rmx,' NETfx=',netfx,' rel=',netfx/max(absfr,1d-30)
+    end if
+    ! Per-cell leaf dump (RAMSES_DUMP1D) at the FIRST base-level solve -> dump_cpu.txt.
+    ! Columns: idx  rho_density  phi  fx.  rho is DENSITY here (Metal dumps monopole).
+    block
+      character(len=8)::d1
+      character(len=32)::fn
+      integer::ig3,id3,idx
+      logical,save::done_lv(64)=.false.
+      call get_environment_variable("RAMSES_DUMP1D",d1)
+      if (len_trim(d1)>0 .and. ilevel<=64 .and. .not.done_lv(ilevel)) then
+         write(fn,'(A,I0,A)') 'dump_cpu_L', ilevel, '.txt'
+         open(unit=88,file=trim(fn),status='replace',action='write')
+         do ig3=m%head(ilevel),m%tail(ilevel)
+            do id3=1,twotondim
+               idx=m%grid(ig3)%ckey(1)*2+(id3-1)
+               write(88,'(I8,3ES18.9)') idx, m%rho(id3,ig3), m%phi(id3,ig3), m%f(id3,1,ig3)
+            end do
+         end do
+         close(88)
+         done_lv(ilevel)=.true.
+      end if
+    end block
+  end block
+
   end associate
 
 end subroutine gradient_phi

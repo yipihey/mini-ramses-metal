@@ -1,0 +1,298 @@
+!============================================================================
+! metal_bridge_iface.f90 — ISO_C_BINDING interfaces to the Obj-C++ Metal bridge
+! (metal_bridge.mm).  bind(C, name=...) pins the symbol names so there is no
+! gfortran/clang name-mangling mismatch.  The Fortran gpu_*.f90 modules call
+! these; the big arrays live as MTLBuffers on the bridge side and are reached
+! from Fortran via the mtl_ptr_* accessors + c_f_pointer (unified memory).
+!============================================================================
+module metal_bridge_iface
+  use iso_c_binding
+  implicit none
+
+  interface
+     function mtl_init(path) bind(C, name="mtl_init") result(ierr)
+       import :: c_char, c_int
+       character(kind=c_char), dimension(*), intent(in) :: path
+       integer(c_int) :: ierr
+     end function mtl_init
+
+     subroutine mtl_alloc_buffers(ncell, npartmax, hash_size, nlevelmax) &
+          bind(C, name="mtl_alloc_buffers")
+       import :: c_int
+       integer(c_int), value :: ncell, npartmax, hash_size, nlevelmax
+     end subroutine mtl_alloc_buffers
+
+     subroutine mtl_sort_part(ilevel, head_idx, num_parts, npartmax) &
+          bind(C, name="mtl_sort_part")
+       import :: c_int
+       integer(c_int), value :: ilevel, head_idx, num_parts, npartmax
+     end subroutine mtl_sort_part
+
+     ! --- CUDA-style per-leaf multigrid ops (driven by a Fortran mirror of the
+     !     CPU multigrid() driver; see m_metal_multigrid in metal_gravity.f90) ---
+     subroutine mtl_mg_build(ilevel, ifine, head_idx, n_fine, mg_cap, box_min, box_max, &
+          per0, per1, per2, is_base, dx_fine, has_coarse, tfrac) bind(C, name="mtl_mg_build")
+       import :: c_int, c_float
+       integer(c_int), value :: ilevel, ifine, head_idx, n_fine, mg_cap, per0, per1, per2, is_base, has_coarse
+       integer(c_int), dimension(*), intent(in) :: box_min, box_max
+       real(c_float), value :: dx_fine, tfrac
+     end subroutine mtl_mg_build
+
+     subroutine mtl_mg_make_mask(ilevel) bind(C, name="mtl_mg_make_mask")
+       import :: c_int
+       integer(c_int), value :: ilevel
+     end subroutine mtl_mg_make_mask
+
+     subroutine mtl_mg_make_initial_phi(ilevel, dx_fine, tfrac, has_coarse) &
+          bind(C, name="mtl_mg_make_initial_phi")
+       import :: c_int, c_float
+       integer(c_int), value :: ilevel, has_coarse
+       real(c_float), value :: dx_fine, tfrac
+     end subroutine mtl_mg_make_initial_phi
+
+     subroutine mtl_mg_make_rhs(ilevel, fourpi, offset, vol_loc, dx_fine, has_coarse, tfrac) &
+          bind(C, name="mtl_mg_make_rhs")
+       import :: c_int, c_float
+       integer(c_int), value :: ilevel, has_coarse
+       real(c_float), value :: fourpi, offset, vol_loc, dx_fine, tfrac
+     end subroutine mtl_mg_make_rhs
+
+     function mtl_mg_restrict_mask(ilevel, ifine) bind(C, name="mtl_mg_restrict_mask") result(allmasked)
+       import :: c_int
+       integer(c_int), value :: ilevel, ifine
+       integer(c_int) :: allmasked
+     end function mtl_mg_restrict_mask
+
+     subroutine mtl_mg_gauss_seidel(ilevel, ifine, safe, redstep) bind(C, name="mtl_mg_gauss_seidel")
+       import :: c_int
+       integer(c_int), value :: ilevel, ifine, safe, redstep
+     end subroutine mtl_mg_gauss_seidel
+
+     subroutine mtl_mg_cmp_residual(ilevel, ifine) bind(C, name="mtl_mg_cmp_residual")
+       import :: c_int
+       integer(c_int), value :: ilevel, ifine
+     end subroutine mtl_mg_cmp_residual
+
+     subroutine mtl_mg_restrict_residual(ilevel, ifine) bind(C, name="mtl_mg_restrict_residual")
+       import :: c_int
+       integer(c_int), value :: ilevel, ifine
+     end subroutine mtl_mg_restrict_residual
+
+     subroutine mtl_mg_reset_corr(ilevel, ifine) bind(C, name="mtl_mg_reset_corr")
+       import :: c_int
+       integer(c_int), value :: ilevel, ifine
+     end subroutine mtl_mg_reset_corr
+
+     subroutine mtl_mg_interpolate_correct(ilevel, ifine) bind(C, name="mtl_mg_interpolate_correct")
+       import :: c_int
+       integer(c_int), value :: ilevel, ifine
+     end subroutine mtl_mg_interpolate_correct
+
+     function mtl_mg_residual_norm2(ilevel) bind(C, name="mtl_mg_residual_norm2") result(norm2)
+       import :: c_int, c_double
+       integer(c_int), value :: ilevel
+       real(c_double) :: norm2
+     end function mtl_mg_residual_norm2
+
+     function mtl_mg_norm_at(ilevel, ifine) bind(C, name="mtl_mg_norm_at") result(norm2)
+       import :: c_int, c_double
+       integer(c_int), value :: ilevel, ifine
+       real(c_double) :: norm2
+     end function mtl_mg_norm_at
+
+     subroutine mtl_mg_gauge_pin(ilevel) bind(C, name="mtl_mg_gauge_pin")
+       import :: c_int
+       integer(c_int), value :: ilevel
+     end subroutine mtl_mg_gauge_pin
+
+     subroutine mtl_mg_zeromean_rhs(ilevel, ifine) bind(C, name="mtl_mg_zeromean_rhs")
+       import :: c_int
+       integer(c_int), value :: ilevel, ifine
+     end subroutine mtl_mg_zeromean_rhs
+
+     subroutine mtl_cic_part(ilevel, head_idx, num_parts, npartmax, hash_size, &
+          ckey_max, key_off, m_refine, mass_cut, refine_on, per0, per1, per2) &
+          bind(C, name="mtl_cic_part")
+       import :: c_int, c_long, c_float
+       integer(c_int),  value :: ilevel, head_idx, num_parts, npartmax, hash_size
+       integer(c_int),  value :: ckey_max, refine_on, per0, per1, per2
+       integer(c_long), value :: key_off
+       real(c_float),   value :: m_refine, mass_cut
+     end subroutine mtl_cic_part
+
+     subroutine mtl_gpu_sort_part(ilevel, head_idx, num_parts) bind(C, name="mtl_gpu_sort_part")
+       import :: c_int
+       integer(c_int), value :: ilevel, head_idx, num_parts
+     end subroutine mtl_gpu_sort_part
+
+     function mtl_gpu_split_part(ilevel, head_idx, num_parts, hash_size, ckey_max, key_off) &
+          bind(C, name="mtl_gpu_split_part") result(n_stay)
+       import :: c_int, c_long
+       integer(c_int), value :: ilevel, head_idx, num_parts, hash_size, ckey_max
+       integer(c_long), value :: key_off
+       integer(c_int) :: n_stay
+     end function mtl_gpu_split_part
+
+     subroutine mtl_flag(head, num, head1, num1, ngridmax, m_refine, nexpand, do_rules) &
+          bind(C, name="mtl_flag")
+       import :: c_int, c_float
+       integer(c_int), value :: head, num, head1, num1, ngridmax, nexpand, do_rules
+       real(c_float),  value :: m_refine
+     end subroutine mtl_flag
+
+     function mtl_ptr_flag1() bind(C, name="mtl_ptr_flag1") result(p)
+       import :: c_ptr; type(c_ptr) :: p
+     end function mtl_ptr_flag1
+
+     subroutine mtl_cic_zero(cell_base, ncells) bind(C, name="mtl_cic_zero")
+       import :: c_int
+       integer(c_int), value :: cell_base, ncells
+     end subroutine mtl_cic_zero
+
+     subroutine mtl_cic_finalize(cell_base, ncells) bind(C, name="mtl_cic_finalize")
+       import :: c_int
+       integer(c_int), value :: cell_base, ncells
+     end subroutine mtl_cic_finalize
+
+     subroutine mtl_cic_deposit(ilevel, head_idx, num_parts, npartmax, hash_size, &
+          ckey_max, key_off, m_refine, mass_cut, refine_on, per0, per1, per2) &
+          bind(C, name="mtl_cic_deposit")
+       import :: c_int, c_long, c_float
+       integer(c_int),  value :: ilevel, head_idx, num_parts, npartmax, hash_size
+       integer(c_int),  value :: ckey_max, refine_on, per0, per1, per2
+       integer(c_long), value :: key_off
+       real(c_float),   value :: m_refine, mass_cut
+     end subroutine mtl_cic_deposit
+
+     subroutine mtl_gauss_seidel(head_idx, num_octs, nsweep, safe) bind(C, name="mtl_gauss_seidel")
+       import :: c_int
+       integer(c_int), value :: head_idx, num_octs, nsweep, safe
+     end subroutine mtl_gauss_seidel
+
+     subroutine mtl_gradient_phi(head_idx, num_octs, dx, tfrac) bind(C, name="mtl_gradient_phi")
+       import :: c_int, c_float
+       integer(c_int), value :: head_idx, num_octs
+       real(c_float),  value :: dx, tfrac
+     end subroutine mtl_gradient_phi
+     subroutine mtl_save_phi_old(head_idx, num_octs) bind(C, name="mtl_save_phi_old")
+       import :: c_int
+       integer(c_int), value :: head_idx, num_octs
+     end subroutine mtl_save_phi_old
+
+     subroutine mtl_kick_drift_part(ilevel, head_idx, num_parts, npartmax, hash_size, &
+          action_part, dtnew, dtold, box0, box1, box2, per0, per1, per2) &
+          bind(C, name="mtl_kick_drift_part")
+       import :: c_int, c_float
+       integer(c_int), value :: ilevel, head_idx, num_parts, npartmax, hash_size, action_part
+       integer(c_int), value :: per0, per1, per2
+       real(c_float),  value :: dtnew, dtold, box0, box1, box2
+     end subroutine mtl_kick_drift_part
+
+     subroutine mtl_finalize() bind(C, name="mtl_finalize")
+     end subroutine mtl_finalize
+
+     ! H1 connectivity: build flat hash/father/nbor from B.grid (already filled).
+     subroutine mtl_build_connectivity(num_octs, levelmin, nlevelmax, &
+          box_min, box_max, per0, per1, per2) bind(C, name="mtl_build_connectivity")
+       import :: c_int
+       integer(c_int), value :: num_octs, levelmin, nlevelmax, per0, per1, per2
+       integer(c_int), intent(in) :: box_min(*), box_max(*)
+     end subroutine mtl_build_connectivity
+
+     ! Full GPU hash rebuild (parallel atomicCAS insert) + box bounds (no nbor).
+     subroutine mtl_conn_rebuild_hash(num_octs, nlevelmax, box_min, box_max) &
+          bind(C, name="mtl_conn_rebuild_hash")
+       import :: c_int
+       integer(c_int), value :: num_octs, nlevelmax
+       integer(c_int), intent(in) :: box_min(*), box_max(*)
+     end subroutine mtl_conn_rebuild_hash
+
+     ! Rebuild nbor for octs [nbor_head, nbor_head+nbor_num) and father for octs
+     ! [father_head, father_head+father_num) on the GPU (per-level, cheap).
+     subroutine mtl_conn_build_range(nbor_head, nbor_num, father_head, father_num, nlevelmax) &
+          bind(C, name="mtl_conn_build_range")
+       import :: c_int
+       integer(c_int), value :: nbor_head, nbor_num, father_head, father_num, nlevelmax
+     end subroutine mtl_conn_build_range
+
+     ! Declare the real-oct bound: octs 1..ngridmax real, (ngridmax,ncell] = cache region.
+     subroutine mtl_set_cache_region(ngridmax) bind(C, name="mtl_set_cache_region")
+       import :: c_int
+       integer(c_int), value :: ngridmax
+     end subroutine mtl_set_cache_region
+
+     ! Materialise coarse-fine boundary cache (ghost) octs for the octs
+     ! [head_idx, head_idx+num_octs) at level ilevel; returns #cache octs created.
+     function mtl_make_cache(ilevel, head_idx, num_octs, nlevelmax, per0, per1, per2) &
+          bind(C, name="mtl_make_cache") result(ncache)
+       import :: c_int
+       integer(c_int), value :: ilevel, head_idx, num_octs, nlevelmax, per0, per1, per2
+       integer(c_int) :: ncache
+     end function mtl_make_cache
+
+     ! Raw byte copy of host type(oct) array into B.grid at 1-based dst_head.
+     subroutine mtl_copy_grid_in(host_grid, dst_head, n) bind(C, name="mtl_copy_grid_in")
+       import :: c_ptr, c_int
+       type(c_ptr), value    :: host_grid
+       integer(c_int), value :: dst_head, n
+     end subroutine mtl_copy_grid_in
+
+     ! Block until all submitted GPU work completes (call before a host read of a
+     ! GPU buffer, or a host write to a buffer an in-flight cmd buffer may use).
+     subroutine mtl_drain() bind(C, name="mtl_drain")
+     end subroutine mtl_drain
+
+     subroutine mtl_newdt_part(ilevel, head, num, npartmax, vmax, ekin) bind(C, name="mtl_newdt_part")
+       import :: c_int, c_double
+       integer(c_int), value :: ilevel, head, num, npartmax
+       real(c_double) :: vmax, ekin
+     end subroutine mtl_newdt_part
+
+     subroutine mtl_get_mg_times(h, v) bind(C, name="mtl_get_mg_times")
+       import :: c_double
+       real(c_double) :: h, v
+     end subroutine mtl_get_mg_times
+
+     subroutine mtl_copy_grid_out(host_grid, src_head, n) bind(C, name="mtl_copy_grid_out")
+       import :: c_ptr, c_int
+       type(c_ptr), value    :: host_grid
+       integer(c_int), value :: src_head, n
+     end subroutine mtl_copy_grid_out
+
+     ! GPU AMR refine: create/derefine/compact + rebuild connectivity.  head/noct
+     ! are the host per-level arrays (m%head(levelmin)/m%noct(levelmin)); updated
+     ! in place.  noct_used/ifree updated.  box_* are the per-level ckey bounds.
+     subroutine mtl_refine(ilevel, levelmin, nlevelmax, head, noct, noct_used, ifree, &
+          box_min, box_max, ncreate, nkill) bind(C, name="mtl_refine")
+       import :: c_int
+       integer(c_int), value :: ilevel, levelmin, nlevelmax
+       integer(c_int) :: head(*), noct(*), noct_used, ifree, ncreate, nkill
+       integer(c_int), intent(in) :: box_min(*), box_max(*)
+     end subroutine mtl_refine
+
+     function mtl_ptr_father()  bind(C, name="mtl_ptr_father")  result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_nbor()    bind(C, name="mtl_ptr_nbor")    result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_nref()    bind(C, name="mtl_ptr_nref")    result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_father_mg() bind(C, name="mtl_ptr_father_mg") result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_nbor_mg()   bind(C, name="mtl_ptr_nbor_mg")   result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_phi_old()   bind(C, name="mtl_ptr_phi_old")   result(p); import::c_ptr; type(c_ptr)::p; end function
+
+     ! Buffer pointer accessors (return raw contents pointers for c_f_pointer).
+     function mtl_ptr_ipos()      bind(C, name="mtl_ptr_ipos")      result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_vp()        bind(C, name="mtl_ptr_vp")        result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_mp()        bind(C, name="mtl_ptr_mp")        result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_levelp()    bind(C, name="mtl_ptr_levelp")    result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_idp()       bind(C, name="mtl_ptr_idp")       result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_sortp()     bind(C, name="mtl_ptr_sortp")     result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_hkey_part() bind(C, name="mtl_ptr_hkey_part") result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_grid()      bind(C, name="mtl_ptr_grid")      result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_hash_key()  bind(C, name="mtl_ptr_hash_key")  result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_hash_val()  bind(C, name="mtl_ptr_hash_val")  result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_ckey_max()  bind(C, name="mtl_ptr_ckey_max")  result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_key_off()   bind(C, name="mtl_ptr_key_off")   result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_rho()       bind(C, name="mtl_ptr_rho")       result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_phi()       bind(C, name="mtl_ptr_phi")       result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_f()         bind(C, name="mtl_ptr_f")         result(p); import::c_ptr; type(c_ptr)::p; end function
+  end interface
+
+end module metal_bridge_iface

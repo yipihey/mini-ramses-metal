@@ -2,6 +2,9 @@ module refine_utils
 #ifdef _CUDA
   use gpu_runner, only: gpu_refine
 #endif
+#ifdef _METAL
+  use metal_gravity_module, only: metal_enabled, metal_refine_on, m_metal_refine
+#endif
   type out_refine_fine_t
     integer::make,kill
   end type out_refine_fine_t
@@ -35,7 +38,18 @@ subroutine m_refine_fine(pst,ilevel)
 111 format('   Entering refine_fine for level ',I2)
 
   ! Create new octs and destroy unecessary octs
+#ifdef _METAL
+  if(metal_enabled .and. metal_refine_on)then
+     ! GPU AMR refine (create/derefine/compact on device + grid_dict rebuild);
+     ! replaces the CPU recursive refine for levels ilevel..nlevelmax.
+     call m_metal_refine(pst,ilevel)
+     out_refine_fine%make=0; out_refine_fine%kill=0
+  else
+     call r_refine_fine(pst,ilevel,1,out_refine_fine,2)
+  endif
+#else
   call r_refine_fine(pst,ilevel,1,out_refine_fine,2)
+#endif
 
   if(s%r%verbose)write(*,112)out_refine_fine%make
 112 format('   ==> Make ',i7,' sub-grids')
