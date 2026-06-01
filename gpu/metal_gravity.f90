@@ -332,7 +332,7 @@ contains
        block
          integer :: ncache
          ncache = mtl_make_cache(ilevel, head, n, r%nlevelmax, &
-              merge(1,0,per0), merge(1,0,per1), merge(1,0,per2))
+              merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), real(tfrac,c_float))
        end block
     end if
     ! FAITHFUL path (sole path): m_metal_multigrid mirrors multigrid_fine_commons.f90

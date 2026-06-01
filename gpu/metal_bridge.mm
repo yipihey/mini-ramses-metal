@@ -940,7 +940,7 @@ void mtl_conn_build_range(int nbor_head, int nbor_num, int father_head, int fath
 // is "real" so there is nothing to materialise and the early return keeps the
 // pre-cache behaviour bit-identical.
 int mtl_make_cache(int ilevel, int head_idx, int num_octs, int nlevelmax,
-                   int per0, int per1, int per2) {
+                   int per0, int per1, int per2, float tfrac) {
     if (num_octs <= 0 || B.ncell <= B.ngridmax) return 0;   // no cache region -> inert
     const int CENTER = THREETONDIM/2 + 1;                   // self direction (off=0)
     B.ifree_cache = 0;                                      // rebuild this level's cache from scratch
@@ -978,7 +978,7 @@ int mtl_make_cache(int ilevel, int head_idx, int num_octs, int nlevelmax,
             dispatch1d(e, pso("compute_cache_swap_table"), num_octs);
             CacheParams P{}; P.num_octs=count; P.ngridmax=B.ngridmax; P.ifree_cache=B.ifree_cache;
             P.input_ind=input_ind; P.hash_size=B.hash_size; P.nlevelmax=nlevelmax;
-            P.per[0]=per0; P.per[1]=per1; P.per[2]=per2;
+            P.per[0]=per0; P.per[1]=per1; P.per[2]=per2; P.tfrac=tfrac;
             [e setComputePipelineState:pso("make_cache_octs")];
             [e setBuffer:B.grid offset:0 atIndex:0]; [e setBuffer:B.flag1 offset:0 atIndex:1];
             [e setBuffer:B.f offset:0 atIndex:2]; [e setBuffer:B.phi offset:0 atIndex:3];

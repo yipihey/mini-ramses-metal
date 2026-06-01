@@ -228,10 +228,11 @@ module metal_bridge_iface
 
      ! Materialise coarse-fine boundary cache (ghost) octs for the octs
      ! [head_idx, head_idx+num_octs) at level ilevel; returns #cache octs created.
-     function mtl_make_cache(ilevel, head_idx, num_octs, nlevelmax, per0, per1, per2) &
+     function mtl_make_cache(ilevel, head_idx, num_octs, nlevelmax, per0, per1, per2, tfrac) &
           bind(C, name="mtl_make_cache") result(ncache)
-       import :: c_int
+       import :: c_int, c_float
        integer(c_int), value :: ilevel, head_idx, num_octs, nlevelmax, per0, per1, per2
+       real(c_float), value :: tfrac
        integer(c_int) :: ncache
      end function mtl_make_cache
 

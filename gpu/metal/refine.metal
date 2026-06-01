@@ -221,17 +221,21 @@ kernel void make_cache_octs(
     int igc[THREETONDIM], icc[THREETONDIM];
     nbor_father_cells_mg(grid, father, nbor, cache, cache, igc, icc);
     for (int c=1; c<=TWOTONDIM; ++c) {
-        float corr = 0.0f;
+        float corr = 0.0f, corr_old = 0.0f;
         for (int ia=1; ia<=TWOTONDIM; ++ia) {
             int indf = mg_cic_father_index(c, ia);
             int igr = igc[indf-1], inr = icc[indf-1];
             if (igr <= 0 || igr > P.ngridmax) { igr = igc[MG_CUBE_CENTER]; inr = icc[MG_CUBE_CENTER]; }
-            corr += mg_cic_weight(ia) * phi[IDX2(inr, igr)];
+            float w = mg_cic_weight(ia);
+            corr     += w * phi[IDX2(inr, igr)];
+            corr_old += w * phi_old[IDX2(inr, igr)];        // same CIC over the OLD coarse phi
         }
-        phi[IDX2(c,cache)]     = corr;                      // CIC-refined boundary phi
-        f[IDX3(c,1,cache)]     = f[IDX3(cell,1,parent)];    // f/phi_old: straight inject (not read
-        f[IDX3(c,2,cache)]     = f[IDX3(cell,2,parent)];    // by the solve boundary; gather rejects
-        f[IDX3(c,3,cache)]     = f[IDX3(cell,3,parent)];    // cache octs)
+        // interpol_phi: phi_b = corr + (corr - corr_old)*tfrac (time-extrapolation across the
+        // subcycle, IDENTICAL to the CPU force_fine/make_bc_rhs boundary).  tfrac=0 at icount=1.
+        phi[IDX2(c,cache)]     = corr + (corr - corr_old) * P.tfrac;
+        f[IDX3(c,1,cache)]     = f[IDX3(cell,1,parent)];    // f straight-inject (gather rejects cache)
+        f[IDX3(c,2,cache)]     = f[IDX3(cell,2,parent)];
+        f[IDX3(c,3,cache)]     = f[IDX3(cell,3,parent)];
         phi_old[IDX2(c,cache)] = phi_old[IDX2(cell,parent)];
     }
 }

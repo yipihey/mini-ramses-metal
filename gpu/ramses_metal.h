@@ -234,7 +234,8 @@ typedef struct {
     int hash_size;
     int nlevelmax;
     int per[3];        // periodic(1:3)
-    int _pad[3];
+    float tfrac;       // time-extrapolation factor: phi_b = corr + (corr - corr_old)*tfrac
+    int _pad[2];
 } CacheParams;
 
 // Generic per-bit radix-sort / scan / elementwise launch params
