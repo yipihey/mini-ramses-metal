@@ -76,6 +76,12 @@ module metal_gravity_module
   logical, private :: part_resident = .false.   ! particles uploaded & owned by the GPU
   integer, private :: g_synced_ifree = -1        ! ifree the GPU hash is current for
   integer, private :: g_nbor_synced  = -1        ! ifree the FULL nbor/father is current for
+  ! Mesh-mutation version counter (bumped by m_metal_refine on any create/derefine,
+  ! INCLUDING net-zero compaction that leaves ifree unchanged).  The GPU flag uses it
+  ! to rebuild connectivity only when the mesh actually changed since the last flag,
+  ! instead of forcing a full hash+nbor rebuild on EVERY call (~19% of wall-clock).
+  integer, private :: g_mesh_version        = 0
+  integer, private :: g_flag_synced_version = -1
   integer, private :: g_ncell, g_hash, g_npm, g_ngridmax
   real(8), private :: g_tpois = 0.0d0, g_tsync = 0.0d0   ! cumulative GPU-gravity / sync wall (s)
   ! Fine-grained profiling accumulators (printed by m_metal_prof_report).
@@ -1037,19 +1043,28 @@ contains
     ! re-sync was ~19% of the full-run wall-clock and entirely redundant here.
     ! The flag's kernels read only B.father (init_flag) and B.nbor (smooth +
     ! enforce_rules); metal_sync_mesh's full build covers both for all levels.
-    ! With CPU refine the mesh can change with NO net ifree change (kill+make),
-    ! which the ifree guard misses, so force the full rebuild for that path only.
-    ! Force a full hash + nbor/father rebuild before the GPU flag.  The flag reads
-    ! father (init_flag) and nbor (smooth / enforce_rules); sharing the gravity's
-    ! cached connectivity is UNSAFE here -- a finer-level refine between the gravity
-    ! solve and this flag pass can change the mesh with NO net ifree change (kill+make),
-    ! which the sync guard misses, so the cache holds STALE father/nbor.  In the
-    ! both-GPU path that fed the flag stale connectivity -> wrong refinement flags at
-    ! coarse-fine boundaries -> the dominant metal-vs-CPU divergence (rms 2.2e-3 -> 1.8e-5
-    ! at the chaos floor once forced).  Correctness over the ~19% resync cost.
-    g_synced_ifree = -1
-    g_nbor_synced  = -1
+    ! Decide whether to force a full hash + nbor/father rebuild before the flag.  The
+    ! flag reads father (init_flag) and nbor (smooth / enforce_rules); feeding it STALE
+    ! connectivity gives wrong refinement flags at coarse-fine boundaries -- the dominant
+    ! metal-vs-CPU divergence the flag-connectivity fix removed (rms 2.2e-3 -> 1.8e-5).
+    ! The hazard is a refine between the gravity solve and this flag pass changing the
+    ! mesh with NO net ifree change (kill+make), which the ifree guard misses.
+    !   * GPU refine (default): m_metal_refine bumps g_mesh_version on ANY create/derefine
+    !     (keyed off ncreate+nkill, so net-zero compaction is caught too).  Rebuild the
+    !     connectivity only when the mesh actually mutated since the last flag -- otherwise
+    !     the flag SHARES the gravity solve's already-current hash+nbor (was forcing a full
+    !     rebuild on EVERY call, ~19% of wall-clock, entirely redundant once settled).
+    !   * CPU refine (RAMSES_GPU_REFINE=0): the CPU mesh mutation does NOT bump the version
+    !     or invalidate the cache, so keep forcing the full rebuild for that path.
+    if (.not. metal_refine_on) then
+       g_synced_ifree = -1
+       g_nbor_synced  = -1
+    else if (g_mesh_version /= g_flag_synced_version) then
+       g_synced_ifree = -1
+       g_nbor_synced  = -1
+    end if
     call metal_sync_mesh(pst)
+    g_flag_synced_version = g_mesh_version
     head  = m%head(ilevel);   num  = m%noct(ilevel)
     head1 = m%head(ilevel+1); num1 = m%noct(ilevel+1)
     ! Upload the host's CURRENT-layout flag1 + nref into the resident buffers.
@@ -1253,6 +1268,7 @@ contains
        ! B.grid (mtl_refine skips the final connectivity rebuild to stay cheap).
        g_synced_ifree = -1
        g_nbor_synced  = -1
+       g_mesh_version = g_mesh_version + 1   ! signal the flag that the mesh mutated
     end if
     end associate
   end subroutine m_metal_refine
