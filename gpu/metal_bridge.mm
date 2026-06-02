@@ -1508,15 +1508,21 @@ void mtl_save_phi_old(int head_idx, int num_octs) {
 
 void mtl_gradient_phi(int head_idx, int num_octs, float dx, float tfrac) {
     @autoreleasepool {
-        // gradient_phi is the faithful CUDA form (phi, f, nbor, P): it reads the
-        // materialised cache-oct phi directly (oct_nbr > ngridmax -> boundary), so it
-        // needs neither grid/father nor phi_old (no inline ghost synthesis).
-        MgParams P{}; P.head_idx=head_idx; P.num_octs=num_octs; P.ngridmax=B.ngridmax; P.dx=dx; P.tfrac=tfrac;
+        // gradient_phi: with cache octs ON the boundary neighbour is a materialised cache
+        // oct (read directly); with cache OFF the neighbour index is 0 and gradient_phi
+        // reconstructs it inline via mg_interpol_ghost -> needs grid/hash/ckey_max/key_off/
+        // box/phi_old.  These are bound unconditionally (unused on the cache path).
+        MgParams P{}; P.head_idx=head_idx; P.num_octs=num_octs; P.ngridmax=B.ngridmax;
+        P.dx=dx; P.tfrac=tfrac; P.hash_size=B.hash_size;
         id<MTLCommandBuffer> cb=[g_queue commandBuffer];
         id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
         [e setComputePipelineState:pso("gradient_phi")];
         [e setBuffer:B.phi offset:0 atIndex:0];    [e setBuffer:B.f offset:0 atIndex:1];
         [e setBuffer:B.nbor offset:0 atIndex:2];   [e setBytes:&P length:sizeof(P) atIndex:3];
+        [e setBuffer:B.grid offset:0 atIndex:4];   [e setBuffer:B.hash_key offset:0 atIndex:5];
+        [e setBuffer:B.hash_val offset:0 atIndex:6];[e setBuffer:B.ckey_max offset:0 atIndex:7];
+        [e setBuffer:B.key_off offset:0 atIndex:8];[e setBuffer:B.box_min offset:0 atIndex:9];
+        [e setBuffer:B.box_max offset:0 atIndex:10];[e setBuffer:B.phi_old offset:0 atIndex:11];
         [e dispatchThreads:MTLSizeMake(num_octs,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
         [e endEncoding]; submit_async(cb);
     }

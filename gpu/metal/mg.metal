@@ -278,37 +278,91 @@ kernel void cmp_residual(
 // exact transliteration of force_fine.f90 gradient_phi + interpol_phi.f90 — NOT an
 // approximation.  Per-oct (one thread builds phi_nbor[0..6][1..8] once, like the CPU
 // loop over the 6 face octs, then runs the 4-node stencil for all 8 cells).
-// gradient_phi (gpu_mg.cuf:1094): force = 4th-order central difference of phi.
-// Gather the neighbour oct indices nbor_idx[0..2*NDIM] (0=self, 1=-x 2=+x ...) -- the
-// MATERIALISED neighbours (a coarse-fine boundary neighbour is a cache oct > ngridmax
-// filled by make_initial_phi), then read phi(hh, nbor_idx[gg]) DIRECTLY (no inline
-// ghost).  f(:,idim) = a*(p1-p2) - b*(p3-p4), a=1/2*4/3/dx, b=1/4*1/3/dx.
+// INLINE interpol_phi ghost (the RESTORED faithful method, no cache octs): compute the
+// TWOTONDIM cell potentials of a MISSING coarse-fine boundary neighbour of `oct` in face
+// direction (idim1, sgn) by 3rd-order CIC of its 27 coarse (lev-1) parent cells +
+// time-extrapolation -- IDENTICAL to make_cache_octs / the CPU interpol_phi.  Used by
+// gradient_phi / gauss_seidel / cmp_residual when a neighbour oct index is 0 (cache OFF).
+inline void mg_interpol_ghost(
+    device const Oct* grid, device const int* nbor, device const long* hkey,
+    device const int* hval, device const int* ckey_max, device const long* key_off,
+    device const int* box_min, device const int* box_max, device const float* phi,
+    device const float* phi_old, int hash_size, int ngridmax, float tfrac,
+    int oct, int idim1, int sgn, thread float* out /* TWOTONDIM */)
+{
+    int lev = grid[oct-1].lev;
+    int nck[3] = {0,0,0};
+    for (int d=0; d<NDIM; ++d) nck[d] = grid[oct-1].ckey[d];
+    nck[idim1-1] += sgn;                                  // step to the missing neighbour
+    for (int d=0; d<NDIM; ++d) {                          // periodic wrap at this level
+        int bmn = box_min[(lev-1)*3+d], bmx = box_max[(lev-1)*3+d];
+        if (nck[d] <  bmn) nck[d] = bmx-1;
+        if (nck[d] >= bmx) nck[d] = bmn;
+    }
+    int pl = lev-1, pck[3] = {0,0,0}, p[3] = {0,0,0};
+    for (int d=0; d<NDIM; ++d) { pck[d] = floor_div2(nck[d]); p[d] = nck[d] & 1; }
+    long pkey  = mg_oct_key(ckey_max[pl], key_off[pl], pck);
+    int father = hash_get(hkey, hval, hash_size, pkey);   // coarse parent of the neighbour
+    int igc[THREETONDIM], icc[THREETONDIM];
+    if (father > 0) nbor_father_cells_at(father, p, nbor, igc, icc);
+    for (int c=1; c<=TWOTONDIM; ++c) {
+        float corr = 0.0f, corr_old = 0.0f;
+        if (father > 0) {
+            for (int ia=1; ia<=TWOTONDIM; ++ia) {
+                int indf = mg_cic_father_index(c, ia);
+                int igr = igc[indf-1], inr = icc[indf-1];
+                if (igr <= 0 || igr > ngridmax) { igr = igc[MG_CUBE_CENTER]; inr = icc[MG_CUBE_CENTER]; }
+                float w = mg_cic_weight(ia);
+                corr     += w * phi[IDX2(inr, igr)];
+                corr_old += w * phi_old[IDX2(inr, igr)];
+            }
+        }
+        out[c-1] = corr + (corr - corr_old) * tfrac;
+    }
+}
+
+// gradient_phi (gpu_mg.cuf:1094): force = 4th-order central difference of phi.  With cache
+// octs ON the boundary neighbour is a materialised cache oct (index>0, read directly);
+// with cache OFF it is 0 -> reconstruct it inline via mg_interpol_ghost (the faithful CPU
+// method).  Same kernel serves both boundary paths.  f(:,idim)=a*(p1-p2)-b*(p3-p4).
 kernel void gradient_phi(
     device const float* phi  [[buffer(0)]],
     device float*       f    [[buffer(1)]],
     device const int*   nbor [[buffer(2)]],
     constant MgParams&  P    [[buffer(3)]],
+    device const Oct*   grid     [[buffer(4)]],
+    device const long*  hkey     [[buffer(5)]],
+    device const int*   hval     [[buffer(6)]],
+    device const int*   ckey_max [[buffer(7)]],
+    device const long*  key_off  [[buffer(8)]],
+    device const int*   box_min  [[buffer(9)]],
+    device const int*   box_max  [[buffer(10)]],
+    device const float* phi_old  [[buffer(11)]],
     uint gid [[thread_position_in_grid]])
 {
     if ((int)gid >= P.num_octs) return;
     int oct = P.head_idx + (int)gid;
-    int noct[7];
-    noct[0] = oct;                                       // self
+    float phinb[7][TWOTONDIM];                            // self + 6 face neighbours' cells
+    for (int c=1; c<=TWOTONDIM; ++c) phinb[0][c-1] = phi[IDX2(c,oct)];
     for (int idim=1; idim<=NDIM; ++idim)
         for (int inbor=1; inbor<=2; ++inbor) {
             int s = -1 + 2*(inbor-1);
             int in=0,jn=0,kn=0;
             if (idim==1) in=s; else if (idim==2) jn=s; else kn=s;
-            noct[2*(idim-1)+inbor] = mg_nbor(nbor, oct, in, jn, kn);   // materialised neighbour
+            int k = 2*(idim-1)+inbor;
+            int o = mg_nbor(nbor, oct, in, jn, kn);
+            if (o > 0) { for (int c=1; c<=TWOTONDIM; ++c) phinb[k][c-1] = phi[IDX2(c,o)]; }
+            else mg_interpol_ghost(grid, nbor, hkey, hval, ckey_max, key_off, box_min, box_max,
+                                   phi, phi_old, P.hash_size, P.ngridmax, P.tfrac, oct, idim, s, phinb[k]);
         }
     float a = (0.5f*4.0f/3.0f)/P.dx, b = (0.25f*1.0f/3.0f)/P.dx;
     for (int cell=1; cell<=TWOTONDIM; ++cell)
         for (int idim=1; idim<=NDIM; ++idim) {
-            int o1=noct[MG_gg1[idim-1][cell-1]], o2=noct[MG_gg2[idim-1][cell-1]];
-            int o3=noct[MG_gg3[idim-1][cell-1]], o4=noct[MG_gg4[idim-1][cell-1]];
+            int g1=MG_gg1[idim-1][cell-1], g2=MG_gg2[idim-1][cell-1];
+            int g3=MG_gg3[idim-1][cell-1], g4=MG_gg4[idim-1][cell-1];
             int h1=MG_hh1[idim-1][cell-1], h3=MG_hh3[idim-1][cell-1];
-            float p1=phi[IDX2(h1,o1)], p2=phi[IDX2(h1,o2)];
-            float p3=phi[IDX2(h3,o3)], p4=phi[IDX2(h3,o4)];
+            float p1=phinb[g1][h1-1], p2=phinb[g2][h1-1];
+            float p3=phinb[g3][h3-1], p4=phinb[g4][h3-1];
             f[IDX3(cell, idim, oct)] = a*(p1-p2) - b*(p3-p4);
         }
 }

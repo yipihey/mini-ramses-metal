@@ -43,6 +43,27 @@ inline void nbor_father_cells_mg(device const Oct* grid, device const int* fathe
     }
 }
 
+// Like nbor_father_cells_mg but for a (possibly NON-EXISTENT) oct given directly by
+// its coarse parent oct index `father_idx` and its parity `p[d]=ckey[d]&1` within that
+// parent.  Used by the inline interpol_phi ghost (no cache octs) to gather the 3^NDIM
+// coarse cells around a MISSING coarse-fine boundary neighbour.
+inline void nbor_father_cells_at(int father_idx, thread const int* p,
+        device const int* nbor_c, thread int* igrid_nbor, thread int* icell_nbor) {
+    for (int q=0; q<THREETONDIM; ++q) {
+        int octoff = 1, cell = 1, rem = q;
+        for (int d=0; d<NDIM; ++d) {
+            int o_d = (rem % 3) - 1; rem /= 3;
+            int s   = p[d] + o_d;
+            int oo  = floor_div2(s);
+            int cc  = s - 2*oo;
+            octoff += (oo+1) * POW3[d];
+            cell   += cc << d;
+        }
+        igrid_nbor[q] = nbor_c[(father_idx-1)*SUBGRIDSIZE + (octoff-1)];
+        icell_nbor[q] = cell;
+    }
+}
+
 // 3^NDIM-neighbour oct (1-based value) for offset (in,jn,kn) in {-1,0,1} (jn/kn
 // ignored for NDIM<their dim).
 inline int mg_nbor(device const int* nbor, int oct, int in, int jn, int kn) {
