@@ -110,9 +110,13 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
            !---------------------------
            call m_timer('output','start')
 #ifdef _CUDA
+           write(*,'("[DBG amr_step] Before r_transfer_grid_host nstep=",I6)')g%nstep; flush(6)
            call r_transfer_grid_host(pst)
+           write(*,'("[DBG amr_step] After  r_transfer_grid_host")'); flush(6)
 #endif
+           write(*,'("[DBG amr_step] Before m_dump_all")'); flush(6)
            call m_dump_all(pst,.false.)
+           write(*,'("[DBG amr_step] After  m_dump_all")'); flush(6)
         endif
      endif
      !----------------------------
@@ -161,8 +165,10 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   ! just for particle list for pic only
   !------------------------------------
   if(ilevel==r%levelmin.or.icount>1)then
+     write(*,'("[DBG amr_step] Before m_rho_fine ilevel=",I2," nstep=",I6)')ilevel,g%nstep; flush(6)
      call m_timer('rho','start')
      call m_rho_fine(pst,ilevel,0)
+     write(*,'("[DBG amr_step] After  m_rho_fine ilevel=",I2)')ilevel; flush(6)
   endif
 
   ! Remove gravity source term with half time step and old force
@@ -181,17 +187,25 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
      call m_timer('poisson','start')
 
      ! Save old potential for time-extrapolation at level boundaries
+     write(*,'("[DBG amr_step] Before r_save_phi_old ilevel=",I2)')ilevel; flush(6)
      call r_save_phi_old(pst,ilevel,1)
+     write(*,'("[DBG amr_step] After  r_save_phi_old ilevel=",I2)')ilevel; flush(6)
 
      ! Compute new gravitational potential
      if(ilevel > r%levelmin)then
         if(ilevel >= r%cg_levelmin) then
+           write(*,'("[DBG amr_step] Before m_phi_fine_cg ilevel=",I2)')ilevel; flush(6)
            call m_phi_fine_cg(pst,ilevel,icount)
+           write(*,'("[DBG amr_step] After  m_phi_fine_cg ilevel=",I2)')ilevel; flush(6)
         else
+           write(*,'("[DBG amr_step] Before multigrid ilevel=",I2)')ilevel; flush(6)
            call multigrid(pst,ilevel,icount)
+           write(*,'("[DBG amr_step] After  multigrid ilevel=",I2)')ilevel; flush(6)
         end if
      else
+        write(*,'("[DBG amr_step] Before multigrid(levelmin) ilevel=",I2)')ilevel; flush(6)
         call multigrid(pst,r%levelmin,icount)
+        write(*,'("[DBG amr_step] After  multigrid(levelmin) ilevel=",I2)')ilevel; flush(6)
      end if
 
      ! Initial old potential
@@ -201,7 +215,9 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   ! Compute gravitational acceleration
   if(r%poisson)then
      call m_timer('grav force','start')
+     write(*,'("[DBG amr_step] Before m_force_fine ilevel=",I2)')ilevel; flush(6)
      call m_force_fine(pst,ilevel,icount)
+     write(*,'("[DBG amr_step] After  m_force_fine ilevel=",I2)')ilevel; flush(6)
   end if
 #endif
 

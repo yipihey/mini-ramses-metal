@@ -599,6 +599,10 @@ subroutine gpu_sort_part(sim, ilevel)
   tail_idx = sim%p%tailp(sim%r%nlevelmax)
   num_parts = tail_idx - head_idx + 1
 
+  write(*,'("[DBG gpu] gpu_sort_part ilevel=",I2," head=",I8," tail=",I8," nparts=",I8)')  &
+       &ilevel,head_idx,tail_idx,num_parts
+  flush(6)
+
   if (num_parts <= 0) return
 
   num_threads = 128
@@ -649,6 +653,7 @@ subroutine gpu_sort_part(sim, ilevel)
   end do
 
   call nvtxEndRange()
+  write(*,'("[DBG gpu] gpu_sort_part done ilevel=",I2)')ilevel; flush(6)
 
 end subroutine gpu_sort_part
 
@@ -1212,6 +1217,7 @@ subroutine gpu_cic_part(sim, ilevel, rtype)
   real(kind=8) :: q_h(1:ndim+1)
   real(kind=8), device :: q_d(1:ndim+1)
 
+  write(*,'("[DBG gpu] gpu_cic_part ilevel=",I2," rtype=",I2)')ilevel,rtype; flush(6)
   ! rtype gate: matches the host's "deposit DM into rho" branch.
   if (rtype /= 0 .and. rtype /= 1) then
      return
@@ -1260,18 +1266,24 @@ subroutine gpu_cic_part(sim, ilevel, rtype)
   ! needed inside this pass.
   num_threads = 128
   num_blocks  = (num_parts + num_threads - 1) / num_threads
+  write(*,'("[DBG gpu] gpu_cic_part pass1: head=",I8," nparts=",I8," hash_size=",I8)')&
+       &head_idx,num_parts,sim%m%hash_size; flush(6)
   call nvtxStartRange("gpu_cic_part", color=4) ! purple
   call build_src_part_kernel<<<num_blocks, num_threads>>>(xp, &
        & sortp, isp_swap, &
        & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
        & skip1, skip2, skip3, dx_loc, ilevel, head_idx, num_parts, sim%r%npartmax)
+  call GPU_Error_Check(__FILE__, __LINE__)
   call nvtxEndRange()
+  write(*,'("[DBG gpu] gpu_cic_part after pass1 (build_src)")'); flush(6)
 
   ! Pass 2: warp-segmented CIC deposit. 256 threads/block = 8 warps/block;
   ! each warp owns 32 contiguous slots of sortp and emits roughly one
   ! atomicAdd per stencil offset (more on cell boundaries).
   deposit_block_size = 256
   deposit_num_blocks = (num_parts + deposit_block_size - 1) / deposit_block_size
+  write(*,'("[DBG gpu] gpu_cic_part pass2: deposit blocks=",I8," m_refine=",G0)')&
+       &deposit_num_blocks,sim%r%m_refine(ilevel); flush(6)
   call nvtxStartRange("gpu_cic_part", color=4) ! purple
   call cic_part_warp_kernel<<<deposit_num_blocks, deposit_block_size>>>(&
        & sortp, isp_swap, head_idx, num_parts, &
@@ -1280,7 +1292,9 @@ subroutine gpu_cic_part(sim, ilevel, rtype)
        & xp, mp, rho, nref, &
        & skip1, skip2, skip3, dx_loc, vol_loc, &
        & sim%r%m_refine(ilevel), sim%r%mass_cut_refine, ilevel, sim%r%npartmax)
+  call GPU_Error_Check(__FILE__, __LINE__)
   call nvtxEndRange()
+  write(*,'("[DBG gpu] gpu_cic_part done ilevel=",I2)')ilevel; flush(6)
 
 end subroutine gpu_cic_part
 
