@@ -888,22 +888,25 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
   ! Unused dimensions keep wy(1) = wz(1) = 1 so the 3D product also works
   ! correctly for ndim = 1 or 2.
   ! ------------------------------------------------------------------
-  wx(0) = max(0.0_dp, 0.5_dp - frac(1))
-  wx(1) = 1.0_dp - abs(frac(1) - 0.5_dp)
-  wx(2) = max(0.0_dp, frac(1) - 0.5_dp)
-  wy = 0.0_dp
-  wz = 0.0_dp
-  wy(1) = 1.0_dp
-  wz(1) = 1.0_dp
+  ! Literals are kind-8 (d0) to match the real(kind=8) weight/frac variables:
+  ! dp can be single precision (NPRE==4), and mixing a real*4 _dp literal with
+  ! these real*8 expressions otherwise triggers a type-conversion warning.
+  wx(0) = max(0.0d0, 0.5d0 - frac(1))
+  wx(1) = 1.0d0 - abs(frac(1) - 0.5d0)
+  wx(2) = max(0.0d0, frac(1) - 0.5d0)
+  wy = 0.0d0
+  wz = 0.0d0
+  wy(1) = 1.0d0
+  wz(1) = 1.0d0
   if (ndim >= 2) then
-     wy(0) = max(0.0_dp, 0.5_dp - frac(2))
-     wy(1) = 1.0_dp - abs(frac(2) - 0.5_dp)
-     wy(2) = max(0.0_dp, frac(2) - 0.5_dp)
+     wy(0) = max(0.0d0, 0.5d0 - frac(2))
+     wy(1) = 1.0d0 - abs(frac(2) - 0.5d0)
+     wy(2) = max(0.0d0, frac(2) - 0.5d0)
   endif
   if (ndim >= 3) then
-     wz(0) = max(0.0_dp, 0.5_dp - frac(3))
-     wz(1) = 1.0_dp - abs(frac(3) - 0.5_dp)
-     wz(2) = max(0.0_dp, frac(3) - 0.5_dp)
+     wz(0) = max(0.0d0, 0.5d0 - frac(3))
+     wz(1) = 1.0d0 - abs(frac(3) - 0.5d0)
+     wz(2) = max(0.0d0, frac(3) - 0.5d0)
   endif
 
   ! ------------------------------------------------------------------
