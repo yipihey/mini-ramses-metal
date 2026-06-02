@@ -36,6 +36,7 @@ NHILBERT = 1
 NVECTOR = 32
 NPRE = 8
 PATCH =
+PAPER = 0
 DEBUG = 0
 HDF5 = 0
 MPIF90 = mpif90
@@ -105,6 +106,9 @@ ifneq ($(NPRE),8)
 endif
 ifneq ($(NHILBERT),1)
    DEFINES += -DNHILBERT=$(NHILBERT)
+endif
+ifeq ($(PAPER),1)
+   DEFINES += -DPAPER
 endif
 #############################################################################
 # Set proper units and initial conditions
