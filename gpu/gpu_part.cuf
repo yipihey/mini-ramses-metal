@@ -901,6 +901,16 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
   real(kind=8) :: skip(1:3), xs, frac(1:3)
   real(kind=8) :: wx(0:2), wy(0:2), wz(0:2), w
 
+  ! Per-segment destination-oct hash cache (see the stencil loop below). The
+  ! 3^ndim stencil offsets resolve to at most twotondim distinct parent octs
+  ! in the domain interior, so a small thread-local table lets the tail lane
+  ! hash each oct once and reuse it across offsets.
+  integer(kind=4), parameter :: oct_cache_max = twotondim
+  integer(kind=8) :: oct_cache_key(1:oct_cache_max)
+  integer(kind=4) :: oct_cache_igrid(1:oct_cache_max)
+  integer :: n_oct_cache, c
+  logical :: cache_hit
+
   ! ------------------------------------------------------------------
   ! Lane bookkeeping: map (block, thread) -> (warp, lane, slot_global).
   ! slot_global is 1-based into the sortp(head_idx..) window (Fortran
@@ -1038,6 +1048,10 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
   ! warp runs a segmented inclusive scan, and each segment's tail emits at
   ! most one atomicAdd into rho (and one into nref, if gated).
   ! ------------------------------------------------------------------
+  ! Reset the tail lane's destination-oct hash cache once per segment, before
+  ! the offsets are swept. Only tail lanes populate it (they alone hash), but
+  ! resetting unconditionally is harmless for the other lanes.
+  n_oct_cache = 0
   do k = 1, threetondim
      ! Decode the linear index k = 1..27 into mixed-radix-3 offsets.
      ox = mod(k - 1, 3) - 1
@@ -1114,9 +1128,36 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
            iy8 = int(father_ckey(2), kind=8)
            iz8 = int(father_ckey(3), kind=8)
            key = hkey_offset + ix8 + iy8*nx + iz8*nx*nx
-           ! hash_get returns 0 if the destination oct is not present on this
-           ! rank, which again suppresses the atomic for this segment.
-           dst_igrid_lane = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
+
+           ! Memoised destination-oct lookup. The 3^ndim offsets sample a
+           ! 3x3x3 block of level-ilevel cells around the source, but
+           ! father_ckey = ckey/2 collapses that block to only a handful of
+           ! distinct parent octs (at most 2 per axis -> twotondim in the
+           ! interior; a few more on a periodic boundary). Rather than re-probe
+           ! the hash for every k, cache each distinct oct key the first time
+           ! it is seen and reuse the stored igrid on later offsets, cutting
+           ! hash_get from threetondim probes per segment to roughly twotondim.
+           ! A cache overflow (rare boundary corners with more than twotondim
+           ! distinct octs) falls back to a direct probe left uncached -- still
+           ! correct, just not memoised.
+           cache_hit = .false.
+           do c = 1, n_oct_cache
+              if (oct_cache_key(c) == key) then
+                 dst_igrid_lane = oct_cache_igrid(c)
+                 cache_hit = .true.
+                 exit
+              endif
+           end do
+           if (.not. cache_hit) then
+              ! hash_get returns 0 if the destination oct is not present on this
+              ! rank, which again suppresses the atomic for this segment.
+              dst_igrid_lane = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
+              if (n_oct_cache < oct_cache_max) then
+                 n_oct_cache = n_oct_cache + 1
+                 oct_cache_key(n_oct_cache)   = key
+                 oct_cache_igrid(n_oct_cache) = dst_igrid_lane
+              endif
+           endif
         endif
      endif
 
