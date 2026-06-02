@@ -114,7 +114,7 @@ attributes(global) subroutine bucket_part_kernel(xp, bucket_part_d, &
   skip(1) = skip1
   skip(2) = skip2
   skip(3) = skip3
-  inv_dx_loc  = 1_dp / dx_loc
+  inv_dx_loc  = 1.0_dp / dx_loc
   inv_2dx_loc = 0.5_dp * inv_dx_loc
 
   ix = 0
@@ -606,7 +606,7 @@ subroutine gpu_sort_part(sim, ilevel)
 
   level = ilevel
   dx = sim%r%boxlen/2**level
-  dx_inv = 1_dp / dx
+  dx_inv = 1.0_dp / dx
   skip1 = sim%m%skip(1)
   skip2 = sim%m%skip(2)
   skip3 = sim%m%skip(3)
@@ -705,7 +705,7 @@ attributes(global) subroutine build_src_part_kernel(xp_d, &
   skip(1) = skip1
   skip(2) = skip2
   skip(3) = skip3
-  inv_dx_loc = 1_dp / dx_loc
+  inv_dx_loc = 1.0_dp / dx_loc
 
   ! 1) Particle Cartesian key at the deposit level (level ilevel).
   !    dx_loc = boxlen / 2**ilevel is the deposit CELL side (the host's
@@ -771,7 +771,7 @@ attributes(global) subroutine multipole_q_kernel(xp_d, mp_d, multipole_q_d, &
   block_idx  = blockIdx%x  - 1
   ipart = head_idx + thread_idx + block_idx * blockDim%x
 
-  q_loc = 0_dp
+  q_loc = 0.0_dp
   if (ipart <= num_parts) then
      q_loc(1) = mp_d(ipart)
      do idim = 1, ndim
@@ -808,8 +808,8 @@ attributes(global) subroutine gpu_newdt_part_kernel(vp_d, mp_d, &
   block_idx  = blockIdx%x  - 1
   ipart = head_idx + thread_idx + block_idx * blockDim%x
 
-  vmax_local = 0_dp
-  ekin_local = 0_dp
+  vmax_local = 0.0_dp
+  ekin_local = 0.0_dp
   if (ipart <= head_idx + num_parts - 1) then
      mi = mp_d(ipart)
      do idim = 1, ndim
@@ -822,7 +822,7 @@ attributes(global) subroutine gpu_newdt_part_kernel(vp_d, mp_d, &
 
   ! Block reductions: every thread in the block must reach these calls
   ! (they call syncthreads() internally). Threads past num_parts have
-  ! contributed the neutral elements (0_dp) above and don't read OOB.
+  ! contributed the neutral elements (0.0_dp) above and don't read OOB.
   vmax_local = block_reduce_max(vmax_local)
   ekin_local = block_reduce_sum(ekin_local)
 
@@ -944,8 +944,8 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
   ! Per-lane fractional position inside the home cell. Invalid lanes keep
   ! mp_i = 0 so any weight they later form contributes nothing.
   ! ------------------------------------------------------------------
-  mp_i = 0_dp
-  frac = 0_dp
+  mp_i = 0.0_dp
+  frac = 0.0_dp
   if (valid_lane) then
      mp_i = mp_d(ipart)
      do idim = 1, ndim
@@ -964,22 +964,22 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
   ! Unused dimensions keep wy(1) = wz(1) = 1 so the 3D product also works
   ! correctly for ndim = 1 or 2.
   ! ------------------------------------------------------------------
-  wx(0) = max(0_dp, 0.5_dp - frac(1))
-  wx(1) = 1_dp - abs(frac(1) - 0.5_dp)
-  wx(2) = max(0_dp, frac(1) - 0.5_dp)
-  wy = 0_dp
-  wz = 0_dp
-  wy(1) = 1_dp
-  wz(1) = 1_dp
+  wx(0) = max(0.0_dp, 0.5_dp - frac(1))
+  wx(1) = 1.0_dp - abs(frac(1) - 0.5_dp)
+  wx(2) = max(0.0_dp, frac(1) - 0.5_dp)
+  wy = 0.0_dp
+  wz = 0.0_dp
+  wy(1) = 1.0_dp
+  wz(1) = 1.0_dp
   if (ndim >= 2) then
-     wy(0) = max(0_dp, 0.5_dp - frac(2))
-     wy(1) = 1_dp - abs(frac(2) - 0.5_dp)
-     wy(2) = max(0_dp, frac(2) - 0.5_dp)
+     wy(0) = max(0.0_dp, 0.5_dp - frac(2))
+     wy(1) = 1.0_dp - abs(frac(2) - 0.5_dp)
+     wy(2) = max(0.0_dp, frac(2) - 0.5_dp)
   endif
   if (ndim >= 3) then
-     wz(0) = max(0_dp, 0.5_dp - frac(3))
-     wz(1) = 1_dp - abs(frac(3) - 0.5_dp)
-     wz(2) = max(0_dp, frac(3) - 0.5_dp)
+     wz(0) = max(0.0_dp, 0.5_dp - frac(3))
+     wz(1) = 1.0_dp - abs(frac(3) - 0.5_dp)
+     wz(2) = max(0.0_dp, frac(3) - 0.5_dp)
   endif
 
   ! ------------------------------------------------------------------
@@ -1050,19 +1050,19 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
      ! No destination gate here: if a lane's segment lands on an off-rank or
      ! out-of-domain cell, its accumulated contribution is simply never
      ! emitted, because emission is gated on the (segment-uniform) tail lookup.
-     my_rho  = 0_dp
-     my_nref = 0_dp
+     my_rho  = 0.0_dp
+     my_nref = 0.0_dp
      if (valid_lane) then
         ! CIC weight = product of 1D weights at offset (ox, oy, oz). Only
         ! 2**ndim of the 3**ndim offsets are non-zero for a given particle
         ! (8 of 27 in 3D); zero-weight lanes join the scan contributing nothing.
         w = wx(ox+1) * wy(oy+1) * wz(oz+1)
-        if (w > 0_dp) then
+        if (w > 0.0_dp) then
            my_rho = mp_i * w / vol_loc
-           if (m_refine_at_level >= 0_dp) then
+           if (m_refine_at_level >= 0.0_dp) then
               ! nref follows the host refinement gate: either all masses count
               ! (mass_cut_refine <= 0), or only particles below mass_cut_refine.
-              if (mass_cut_refine > 0_dp) then
+              if (mass_cut_refine > 0.0_dp) then
                  if (mp_i < mass_cut_refine) then
                     my_nref = w
                  endif
@@ -1167,10 +1167,10 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
      ! sitting on the wrong side of the stencil).
      ! ---------------------------------------------------------------
      if (is_tail .and. valid_lane .and. dst_igrid_lane /= 0) then
-        if (my_rho /= 0_dp) then
+        if (my_rho /= 0.0_dp) then
            info = atomicadd(rho_d(dst_icell_lane, dst_igrid_lane), real(my_rho, kind=dp))
         endif
-        if (m_refine_at_level >= 0_dp .and. my_nref /= 0_dp) then
+        if (m_refine_at_level >= 0.0_dp .and. my_nref /= 0.0_dp) then
            info = atomicadd(nref_d(dst_icell_lane, dst_igrid_lane), real(my_nref, kind=dp))
         endif
      endif
@@ -1228,7 +1228,7 @@ subroutine gpu_cic_part(sim, ilevel, rtype)
      num_threads = 256
      num_blocks  = (sim%p%npart + num_threads - 1) / num_threads
 
-     q_d = 0_dp
+     q_d = 0.0_dp
      call nvtxStartRange("gpu_cic_part", color=4) ! purple
      call multipole_q_kernel<<<num_blocks, num_threads>>>(xp, mp, q_d, &
           & 1, sim%p%npart, sim%r%npartmax)
@@ -1311,8 +1311,8 @@ subroutine gpu_newdt_part(sim, ilevel, vmax, ekin)
   if (num_parts <= 0) return
 
   leading = sim%r%npartmax
-  vmax_dev = 0_dp
-  ekin_dev = 0_dp
+  vmax_dev = 0.0_dp
+  ekin_dev = 0.0_dp
 
   num_threads = 256
   num_blocks  = (num_parts + num_threads - 1) / num_threads
@@ -1356,7 +1356,7 @@ attributes(device) subroutine gather_cic_force_part(f_d, hash_key_d, hash_val_d,
   logical :: in_domain
 
   ok_level = .true.
-  ff = 0_dp
+  ff = 0.0_dp
   if (grid_level < 1) then
      ok_level = .false.
      return
@@ -1364,8 +1364,8 @@ attributes(device) subroutine gather_cic_force_part(f_d, hash_key_d, hash_val_d,
 
   il = 0
   ir = 0
-  dr = 0_dp
-  dl = 1_dp
+  dr = 0.0_dp
+  dl = 1.0_dp
   box_min = 0
   box_max = 0
 
@@ -1373,7 +1373,7 @@ attributes(device) subroutine gather_cic_force_part(f_d, hash_key_d, hash_val_d,
      dr(idim) = x_in(idim) + 0.5_dp
      ir(idim) = int(dr(idim))
      dr(idim) = dr(idim) - ir(idim)
-     dl(idim) = 1_dp - dr(idim)
+     dl(idim) = 1.0_dp - dr(idim)
      il(idim) = ir(idim) - 1
      box_min(idim) = box_ckey_min_d(idim, cell_level)
      box_max(idim) = box_ckey_max_d(idim, cell_level)
@@ -1440,7 +1440,7 @@ attributes(device) subroutine gather_cic_force_part(f_d, hash_key_d, hash_val_d,
   end do
 
   if (.not. ok_level) then
-     ff = 0_dp
+     ff = 0.0_dp
   endif
 
 end subroutine gather_cic_force_part
@@ -1485,13 +1485,13 @@ attributes(global) subroutine kick_drift_part_kernel(xp_d, vp_d, levelp_d, &
   if (idx >= num_parts) return
   ipart = head_idx + idx
 
-  ff = 0_dp
+  ff = 0.0_dp
 
   skip(1) = skip1
   skip(2) = skip2
   skip(3) = skip3
 
-  x = 0_dp
+  x = 0.0_dp
   do idim = 1, ndim
      x(idim) = (xp_d(ipart + (idim-1)*leading) + skip(idim)) / dx_loc
   end do
@@ -1502,7 +1502,7 @@ attributes(global) subroutine kick_drift_part_kernel(xp_d, vp_d, levelp_d, &
 
   if (.not. ok_level) then
 
-     x_coarse = x / 2_dp
+     x_coarse = x / 2.0_dp
      call gather_cic_force_part(f_d, hash_key_d, hash_val_d, hash_size_d, &
           & ckey_max_d, key_off_d, box_ckey_min_d, box_ckey_max_d, periodic_d, &
           & ngridmax, x_coarse, ilevel, ilevel-1, ff, ok_level)
@@ -1520,7 +1520,7 @@ attributes(global) subroutine kick_drift_part_kernel(xp_d, vp_d, levelp_d, &
              & + vp_d(ipart + (idim-1)*leading) * dtnew_d(ilevel)
 
         if (periodic_d(idim)) then
-           if (xnew < 0_dp)              xnew = xnew + box_size_d(idim)
+           if (xnew < 0.0_dp)              xnew = xnew + box_size_d(idim)
            if (xnew >= box_size_d(idim)) xnew = xnew - box_size_d(idim)
         endif
 
