@@ -1574,8 +1574,12 @@ contains
        num_threads_2 = 128
        num_blocks_2 = (new_noct + num_threads_2 - 1) / num_threads_2
 
-       ! Check we have enough memory
-       if ((head_mg + new_noct) > sim%m_mg%ngridmax) then
+       ! Check we have enough memory. The new octs occupy indices
+       ! head_mg .. head_mg+new_noct-1, so the last index used is
+       ! head_mg+new_noct-1; the previous test (without -1) false-positived
+       ! when the hierarchy fits exactly (e.g. power-of-two unigrids, where
+       ! ngridmax/7 equals the MG oct count exactly).
+       if ((head_mg + new_noct - 1) > sim%m_mg%ngridmax) then
           write(*,*)'No more grid memory, increase ngridmax for MG'
           write(*,*)'New multigrid octs:', new_noct
           stop

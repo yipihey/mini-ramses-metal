@@ -155,7 +155,10 @@ subroutine init_amr(r,g,m,type)
 #ifdef GRAV
      allocate(grid_mg(1:m%ngridmax+m%ncachemax))
      allocate(father_mg(1:r%ngridmax+r%ngridmax/7+m%ncachemax))
-     allocate(nbor_mg(1:threetondim,1:m%ngridmax))
+     ! Match the +ncachemax headroom that grid_mg/father_mg already carry, so
+     ! nbor_mg is never the one array sitting at exact capacity (it was the
+     ! only MG array sized at exactly m%ngridmax, with no slack).
+     allocate(nbor_mg(1:threetondim,1:m%ngridmax+m%ncachemax))
      father_mg=0
      nbor_mg=0
      ! Allocate hash table space
