@@ -109,27 +109,20 @@ recursive subroutine r_transfer_grid_host(pst)
 
      ! Copy grid from device to host
      call nvtxStartRange("Copy entire mesh from device to host", color=5)!red
-     write(*,'("[DBG transfer] Copying grid D→H")'); flush(6)
      pst%s%m%grid = grid
-     write(*,'("[DBG transfer] Copying flag1 D→H")'); flush(6)
      pst%s%m%flag1 = flag1
 #ifdef HYDRO
-     write(*,'("[DBG transfer] Copying uold D→H")'); flush(6)
      pst%s%m%uold = uold
 #endif
 #ifdef GRAV
-     write(*,'("[DBG transfer] Copying f D→H")'); flush(6)
      pst%s%m%f = f
-     write(*,'("[DBG transfer] Copying phi D→H")'); flush(6)
      pst%s%m%phi = phi
 #endif
      call GPU_Error_Check(__FILE__, __LINE__)
      call nvtxEndRange()
-     write(*,'("[DBG transfer] Grid D→H complete")'); flush(6)
 
 #ifdef _CUDA
      call gpu_to_host_part(pst)
-     write(*,'("[DBG transfer] Particles D→H complete")'); flush(6)
 #endif
 
   endif

@@ -103,30 +103,24 @@ subroutine m_rho_fine(pst,ilevel,rtype)
 
         ! Sort particles according to their Hilbert index
         if(m%noct_tot(i)>0)then
-           write(*,'("[DBG rho_fine] Before r_sort_part level=",I2," noct=",I10)')i,m%noct_tot(i); flush(6)
            if(r%verbose)write(*,'(" Sort particles for level ",I2)')i
            call r_sort_part(pst,i,1)
-           write(*,'("[DBG rho_fine] After  r_sort_part level=",I2)')i; flush(6)
         endif
 
         ! Mass deposition into array rho using all massive particle types
 #ifdef GRAV
         if(m%noct_tot(i)>0 .and. r%poisson)then
-           write(*,'("[DBG rho_fine] Before r_cic_part level=",I2)')i; flush(6)
            if(r%verbose)write(*,'(" Compute rho from particles for level ",I2)')i
            input_array(1)=i
            input_array(2)=rtype
            call r_cic_part(pst,input_array,2)
-           write(*,'("[DBG rho_fine] After  r_cic_part level=",I2)')i; flush(6)
         endif
 #endif
 
         ! Sort particles between coarse and fine levels
         if(m%noct_tot(i)>0.AND.i<r%nlevelmax)then
-           write(*,'("[DBG rho_fine] Before r_split_part level=",I2)')i; flush(6)
            if(r%verbose)write(*,'(" Split particles for level ",I2)')i
            call r_split_part(pst,i,1)
-           write(*,'("[DBG rho_fine] After  r_split_part level=",I2)')i; flush(6)
         endif
 
      end do

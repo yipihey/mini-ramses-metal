@@ -1160,14 +1160,12 @@ contains
     threadsX_per_block = 8
     threadsY_per_block = 16
     num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
-    write(*,'("[DBG gpu] gpu_reset_rho ilevel=",I2," head=",I8," noct=",I8)')ilevel,head_idx,num_octs; flush(6)
     if (num_octs > 0) then
        call nvtxStartRange("GPU reset_rho", color=1)!blue
        call reset_rho<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(rho, nref, head_idx, num_octs)
        call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     end if
-    write(*,'("[DBG gpu] gpu_reset_rho done")'); flush(6)
 
   end subroutine gpu_reset_rho
 
@@ -1356,7 +1354,6 @@ contains
     threadsY_per_block = 16
     num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
 
-    write(*,'("[DBG gpu] gpu_save_phi_old ilevel=",I2," head=",I8," noct=",I8)')ilevel,head_idx,num_octs; flush(6)
     if (num_octs > 0) then
        call nvtxStartRange("GPU save_phi_old", color=1)!blue
        call save_phi_old<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(phi_old, phi, &
@@ -1364,7 +1361,6 @@ contains
        call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     end if
-    write(*,'("[DBG gpu] gpu_save_phi_old done")'); flush(6)
 
   end subroutine gpu_save_phi_old
 
@@ -1402,8 +1398,6 @@ contains
     threadsY_per_block = 16
     num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
 
-    write(*,'("[DBG gpu] gpu_init_phi ilevel=",I2," head=",I8," noct=",I8," icount=",I2)')&
-         &ilevel,head_idx,num_octs,icount; flush(6)
     ! Reset phi and 3-components of force to zero
     if (num_octs > 0) then
        call nvtxStartRange("GPU init_phi", color=1)!blue
@@ -1412,7 +1406,6 @@ contains
        call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     endif
-    write(*,'("[DBG gpu] gpu_init_phi after reset_phi")'); flush(6)
 
     ! Interpolate phi from coarser level
     if (ilevel > sim%r%levelmin) then
@@ -1433,7 +1426,6 @@ contains
     threadsY_per_block = 16
     num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
 
-    write(*,'("[DBG gpu] gpu_init_phi cache head=",I8," noct_cache=",I8)')head_idx,num_octs; flush(6)
     ! Interpolate phi from coarser level
     if (ilevel > sim%r%levelmin) then
        if (num_octs > 0) then
@@ -1444,7 +1436,6 @@ contains
           call nvtxEndRange()
        endif
     endif
-    write(*,'("[DBG gpu] gpu_init_phi done")'); flush(6)
 
   end subroutine gpu_init_phi
 
@@ -1472,7 +1463,6 @@ contains
     threadsX_per_block = 8
     threadsY_per_block = 16
     num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
-    write(*,'("[DBG gpu] gpu_make_mask ilevel=",I2," head=",I8," noct=",I8)')ilevel,head_idx,num_octs; flush(6)
     if (num_octs > 0) then
        call nvtxStartRange("GPU make_mask", color=1)!blue
        call reset_mask_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(f, &
@@ -1480,7 +1470,6 @@ contains
        call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     endif
-    write(*,'("[DBG gpu] gpu_make_mask done")'); flush(6)
 
   end subroutine gpu_make_mask
 
@@ -1518,8 +1507,6 @@ contains
     threadsX_per_block = 8
     threadsY_per_block = 16
     num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
-    write(*,'("[DBG gpu] gpu_make_rhs ilevel=",I2," head=",I8," noct=",I8," ngridmax=",I8)')&
-         &ilevel,head_idx,num_octs,sim%m%ngridmax; flush(6)
     if (num_octs > 0) then
        call nvtxStartRange("GPU make_rhs", color=1)!blue
        call reset_rhs_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(phi, rho, f, nbor, &
@@ -1527,7 +1514,6 @@ contains
        call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     end if
-    write(*,'("[DBG gpu] gpu_make_rhs done")'); flush(6)
 
   end subroutine gpu_make_rhs
 
@@ -1567,8 +1553,6 @@ contains
        head_father = sim%m%noct(ilevel) + sim%m_mg%head(ifine)
     endif
 
-    write(*,'("[DBG gpu] gpu_build_mg ilevel=",I2," ifine=",I2," head=",I8," noct=",I8)')&
-         &ilevel,ifine,head_idx,num_octs; flush(6)
 
     if (num_octs == 0) return
 
@@ -1577,8 +1561,6 @@ contains
 
     sim%m_mg%head(ifine-1) = sim%m_mg%tail(ifine) + 1
     head_mg = sim%m_mg%head(ifine-1)
-    write(*,'("[DBG gpu] gpu_build_mg head_mg=",I8," m_mg%ngridmax=",I8," m_mg%ncachemax=",I8)')&
-         &head_mg,sim%m_mg%ngridmax,sim%m_mg%ncachemax; flush(6)
 
     ! Init prefix sum (count new parent octs)
     call nvtxStartRange("GPU build_mg", color=2)!yellow
@@ -1595,7 +1577,6 @@ contains
     call gpu_scan(head_idx, num_octs, new_noct_d)
     new_noct = new_noct_d
     call nvtxEndRange()
-    write(*,'("[DBG gpu] gpu_build_mg new_noct=",I8)')new_noct; flush(6)
 
     if (new_noct > 0) then
 
@@ -1607,8 +1588,6 @@ contains
        ! head_mg+new_noct-1; the previous test (without -1) false-positived
        ! when the hierarchy fits exactly (e.g. power-of-two unigrids, where
        ! ngridmax/7 equals the MG oct count exactly).
-       write(*,'("[DBG gpu] gpu_build_mg capacity check: head_mg+new_noct-1=",I8," vs ngridmax=",I8)')&
-            &(head_mg+new_noct-1),sim%m_mg%ngridmax; flush(6)
        if ((head_mg + new_noct - 1) > sim%m_mg%ngridmax) then
           write(*,*)'No more grid memory, increase ngridmax for MG'
           write(*,*)'New multigrid octs:', new_noct
@@ -1620,7 +1599,6 @@ contains
        call compute_father_swap_table<<<num_blocks, num_threads>>>(swap_local, prefix_sum, head_idx, num_octs)
        call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
-       write(*,'("[DBG gpu] gpu_build_mg after compute_father_swap_table")'); flush(6)
 
        ! Make new MG octs.
        ! NOTE: the kernel signature is make_father_octs(grid, grid_mg, phi, f, ...)
@@ -1641,7 +1619,6 @@ contains
        endif
        call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
-       write(*,'("[DBG gpu] gpu_build_mg after make_father_octs")'); flush(6)
 
        ! Insert new octs in hash table
        call nvtxStartRange("GPU build_mg", color=2)!yellow
@@ -1649,7 +1626,6 @@ contains
             & sim%m_mg%hash_size, ckey_max, key_off, head_mg, new_noct)
        call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
-       write(*,'("[DBG gpu] gpu_build_mg after insert_hash_kernel")'); flush(6)
 
     end if
 
@@ -1669,7 +1645,6 @@ contains
        call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     endif
-    write(*,'("[DBG gpu] gpu_build_mg after update_father_array")'); flush(6)
 
     ! Store new first free cache oct
     head_nbor = head_mg + new_noct
@@ -1683,8 +1658,6 @@ contains
     num_threads = 128
     num_blocks = (num_octs + num_threads - 1) / num_threads
 
-    write(*,'("[DBG gpu] gpu_build_mg nbor head=",I8," noct=",I8," size(nbor_mg,2)=",I8)')&
-         &head_idx,num_octs,(sim%m_mg%ngridmax+sim%m_mg%ncachemax); flush(6)
     if (num_octs > 0) then
        call nvtxStartRange("GPU build_mg", color=2)!yellow
        call update_nbor_array_mg<<<num_blocks, num_threads>>>(nbor_mg, grid_mg, hash_key_mg, hash_val_mg, &
@@ -1692,7 +1665,6 @@ contains
        call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     end if
-    write(*,'("[DBG gpu] gpu_build_mg done ifine=",I2)')ifine; flush(6)
 
   end subroutine gpu_build_mg
 

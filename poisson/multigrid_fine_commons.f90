@@ -72,13 +72,9 @@ subroutine multigrid(pst,ilevel,icount)
   ! ---------------------------------------------------------------------
   level_count%ilevel=ilevel
   level_count%icount=icount
-  write(*,'("[DBG multigrid] Before r_make_initial_phi ilevel=",I2)')ilevel; flush(6)
   call r_make_initial_phi(pst,level_count,storage_size(level_count)/32) ! Initial guess
-  write(*,'("[DBG multigrid] After  r_make_initial_phi ilevel=",I2)')ilevel; flush(6)
   call r_make_mask(pst,ilevel,1) ! Fill the fine level mask
-  write(*,'("[DBG multigrid] After  r_make_mask ilevel=",I2)')ilevel; flush(6)
   call r_make_bc_rhs(pst,level_count,storage_size(level_count)/32) ! Fill BC-modified RHS
-  write(*,'("[DBG multigrid] After  r_make_bc_rhs ilevel=",I2)')ilevel; flush(6)
 
   if(pst%s%r%verbose) print '(A)','Initial guess done '
 
@@ -86,7 +82,6 @@ subroutine multigrid(pst,ilevel,icount)
   ! Initialize Domain Decomposition and Hash Table for Multigrid
   ! ---------------------------------------------------------------------
   call r_init_mg(pst,ilevel,1)
-  write(*,'("[DBG multigrid] After  r_init_mg ilevel=",I2)')ilevel; flush(6)
 
   if(pst%s%r%verbose) print '(A)','Multigrid init done '
 
@@ -96,10 +91,8 @@ subroutine multigrid(pst,ilevel,icount)
   double_level%ilevel=ilevel
   do ifine=ilevel,pst%s%r%bound_levelmin+1,-1
      double_level%ifine=ifine
-     write(*,'("[DBG multigrid] Before r_build_mg ifine=",I2," ilevel=",I2)')ifine,ilevel; flush(6)
      if(pst%s%r%verbose) print '(A,I2)','Build MG ',ifine
      call r_build_mg(pst,double_level,storage_size(double_level)/32)
-     write(*,'("[DBG multigrid] After  r_build_mg ifine=",I2)')ifine; flush(6)
   end do
 
   if(pst%s%r%verbose) print '(A)','Multigrid hierarchy done '
