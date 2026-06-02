@@ -486,7 +486,14 @@ subroutine init_refine_restart(s,ilevel,ncpu_file,levelmin_file,nlevelmax_file,n
         close(13)
      endif
   end do
-  
+
+  ! Restore the next-free-slot invariant after loading the mesh.  The CPU refine
+  ! sets m%ifree=m%noct_used+1 at refine time, but the GPU refine path
+  ! (m_metal_refine -> metal_ensure_hash) reads m%ifree BEFORE that, so on a
+  ! restart it would see the uninitialised ifree=0 -> num_octs=m%ifree-1=-1 ->
+  ! mtl_copy_grid_in memcpy of (size_t)(-1)*sizeof(Oct) -> SIGSEGV.
+  m%ifree=m%noct_used+1
+
   !-----------
   ! Super-octs
   !-----------
