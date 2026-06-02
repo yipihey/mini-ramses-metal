@@ -1589,10 +1589,10 @@ contains
        ! Make new MG octs
        call nvtxStartRange("GPU build_mg", color=2)!yellow
        if (ifine == ilevel) then
-          call make_father_octs<<<num_blocks_2, num_threads_2>>>(grid, grid_mg, f_mg, phi_mg, swap_local, &
+          call make_father_octs<<<num_blocks_2, num_threads_2>>>(grid, grid_mg, phi_mg, f_mg, swap_local, &
                & head_mg, new_noct)
        else
-          call make_father_octs<<<num_blocks_2, num_threads_2>>>(grid_mg, grid_mg, f_mg, phi_mg, swap_local, &
+          call make_father_octs<<<num_blocks_2, num_threads_2>>>(grid_mg, grid_mg, phi_mg, f_mg, swap_local, &
                & head_mg, new_noct)
        endif
        call nvtxEndRange()
