@@ -50,7 +50,7 @@ subroutine multigrid(pst,ilevel,icount)
   type(pst_t)::pst
   integer,intent(in) :: ilevel,icount
 
-  integer,parameter :: MAXITER  = 5
+  integer,parameter :: MAXITER  = 4
   real(kind=8),parameter :: SAFE_FACTOR = 0.5
 
   integer :: igrid, ifine, i, iter, allmasked
