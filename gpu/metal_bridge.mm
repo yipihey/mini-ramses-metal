@@ -1659,12 +1659,15 @@ void mtl_mg_make_rhs(int ilevel, float fourpi, float offset, float vol_loc,
         P.vol_loc=vol_loc; P.dx=dx_fine; P.tfrac=tfrac; P.use_ghost=has_coarse;
         id<MTLCommandBuffer> cb=[g_queue commandBuffer];
         id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
+        P.hash_size=B.hash_size;
         [e setComputePipelineState:pso("reset_rhs_kernel")];
         [e setBuffer:B.phi offset:0 atIndex:0]; [e setBuffer:B.rho offset:0 atIndex:1];
         [e setBuffer:B.f offset:0 atIndex:2]; [e setBuffer:B.nbor offset:0 atIndex:3];
         [e setBytes:&P length:sizeof(P) atIndex:4];
-        [e setBuffer:B.grid offset:0 atIndex:5]; [e setBuffer:B.father offset:0 atIndex:6];
-        [e setBuffer:B.phi_old offset:0 atIndex:7];
+        [e setBuffer:B.grid offset:0 atIndex:5];     [e setBuffer:B.hash_key offset:0 atIndex:6];
+        [e setBuffer:B.hash_val offset:0 atIndex:7]; [e setBuffer:B.ckey_max offset:0 atIndex:8];
+        [e setBuffer:B.key_off offset:0 atIndex:9];  [e setBuffer:B.box_min offset:0 atIndex:10];
+        [e setBuffer:B.box_max offset:0 atIndex:11]; [e setBuffer:B.phi_old offset:0 atIndex:12];
         [e dispatchThreads:MTLSizeMake(TWOTONDIM,MG.n_fine,1) threadsPerThreadgroup:MTLSizeMake(TWOTONDIM,8,1)];
         [e endEncoding]; submit_async(cb);
     }

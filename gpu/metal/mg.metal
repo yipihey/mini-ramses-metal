@@ -140,6 +140,49 @@ kernel void volume_to_mask(
 // as a cache oct (gpu_refine.cuf make_cache_octs) filled by make_initial_phi, read
 // directly by reset_rhs_kernel / gradient_phi.  That is the faithful boundary.)
 
+// INLINE interpol_phi ghost (the RESTORED faithful method, no cache octs): compute the
+// TWOTONDIM cell potentials of a MISSING coarse-fine boundary neighbour of `oct` in face
+// direction (idim1, sgn) by 3rd-order CIC of its 27 coarse (lev-1) parent cells +
+// time-extrapolation -- IDENTICAL to make_cache_octs / the CPU interpol_phi.  Used by
+// reset_rhs_kernel / gradient_phi when a neighbour oct index is 0 (cache OFF).
+inline void mg_interpol_ghost(
+    device const Oct* grid, device const int* nbor, device const long* hkey,
+    device const int* hval, device const int* ckey_max, device const long* key_off,
+    device const int* box_min, device const int* box_max, device const float* phi,
+    device const float* phi_old, int hash_size, int ngridmax, float tfrac,
+    int oct, int idim1, int sgn, thread float* out /* TWOTONDIM */)
+{
+    int lev = grid[oct-1].lev;
+    int nck[3] = {0,0,0};
+    for (int d=0; d<NDIM; ++d) nck[d] = grid[oct-1].ckey[d];
+    nck[idim1-1] += sgn;                                  // step to the missing neighbour
+    for (int d=0; d<NDIM; ++d) {                          // periodic wrap at this level
+        int bmn = box_min[(lev-1)*3+d], bmx = box_max[(lev-1)*3+d];
+        if (nck[d] <  bmn) nck[d] = bmx-1;
+        if (nck[d] >= bmx) nck[d] = bmn;
+    }
+    int pl = lev-1, pck[3] = {0,0,0}, p[3] = {0,0,0};
+    for (int d=0; d<NDIM; ++d) { pck[d] = floor_div2(nck[d]); p[d] = nck[d] & 1; }
+    long pkey  = mg_oct_key(ckey_max[pl], key_off[pl], pck);
+    int father = hash_get(hkey, hval, hash_size, pkey);   // coarse parent of the neighbour
+    int igc[THREETONDIM], icc[THREETONDIM];
+    if (father > 0) nbor_father_cells_at(father, p, nbor, igc, icc);
+    for (int c=1; c<=TWOTONDIM; ++c) {
+        float corr = 0.0f, corr_old = 0.0f;
+        if (father > 0) {
+            for (int ia=1; ia<=TWOTONDIM; ++ia) {
+                int indf = mg_cic_father_index(c, ia);
+                int igr = igc[indf-1], inr = icc[indf-1];
+                if (igr <= 0 || igr > ngridmax) { igr = igc[MG_CUBE_CENTER]; inr = icc[MG_CUBE_CENTER]; }
+                float w = mg_cic_weight(ia);
+                corr     += w * phi[IDX2(inr, igr)];
+                corr_old += w * phi_old[IDX2(inr, igr)];
+            }
+        }
+        out[c-1] = corr + (corr - corr_old) * tfrac;
+    }
+}
+
 // Grouped RHS.  S = coef*(rho_mono - offset_mono) (grouped: dx^2 absorbed).
 // use_ghost=1 (fine AMR level): no boundary reconstruction term -- the missing
 // same-level neighbours are supplied as interpol_phi ghosts in the smoother/residual
@@ -159,6 +202,14 @@ kernel void reset_rhs_kernel(
     device float*       f    [[buffer(2)]],
     device const int*   nbor [[buffer(3)]],
     constant MgParams&  P    [[buffer(4)]],
+    device const Oct*   grid     [[buffer(5)]],
+    device const long*  hkey     [[buffer(6)]],
+    device const int*   hval     [[buffer(7)]],
+    device const int*   ckey_max [[buffer(8)]],
+    device const long*  key_off  [[buffer(9)]],
+    device const int*   box_min  [[buffer(10)]],
+    device const int*   box_max  [[buffer(11)]],
+    device const float* phi_old  [[buffer(12)]],
     uint2 gid [[thread_position_in_grid]])
 {
     if ((int)gid.y >= P.num_octs) return;
@@ -178,9 +229,17 @@ kernel void reset_rhs_kernel(
             if (idim==1) in=off; else if (idim==2) jn=off; else kn=off;
             int onb = mg_nbor(nbor, oct, in, jn, kn);
             int cnb = MG_hhh[dir-1][cell-1];
-            // CUDA reads phi(cell_nbr,oct_nbr) for the materialised neighbour (incl cache
-            // octs > ngridmax); dis_nbr only valid for a real oct (<= ngridmax), else -1.
-            float phinb = (onb >= 1) ? phi[IDX2(cnb, onb)] : 0.0f;
+            // Boundary phi: a present neighbour (cache oct > ngridmax included) is read
+            // directly; a MISSING neighbour (index 0, cache OFF) is reconstructed inline
+            // via interpol_phi (else S would use phi_b=0 -> under-energized boundary).
+            float phinb;
+            if (onb >= 1) phinb = phi[IDX2(cnb, onb)];
+            else {
+                float gh[TWOTONDIM];
+                mg_interpol_ghost(grid, nbor, hkey, hval, ckey_max, key_off, box_min, box_max,
+                                  phi, phi_old, P.hash_size, P.ngridmax, P.tfrac, oct, idim, off, gh);
+                phinb = gh[cnb-1];
+            }
             float disnb = (onb >= 1 && onb <= P.ngridmax) ? f[IDX3(cnb, 3, onb)] : -1.0f;
             if (disnb <= 0.0f && dis_c > 0.0f) {
                 float w    = disnb / (disnb - dis_c);
@@ -278,49 +337,6 @@ kernel void cmp_residual(
 // exact transliteration of force_fine.f90 gradient_phi + interpol_phi.f90 — NOT an
 // approximation.  Per-oct (one thread builds phi_nbor[0..6][1..8] once, like the CPU
 // loop over the 6 face octs, then runs the 4-node stencil for all 8 cells).
-// INLINE interpol_phi ghost (the RESTORED faithful method, no cache octs): compute the
-// TWOTONDIM cell potentials of a MISSING coarse-fine boundary neighbour of `oct` in face
-// direction (idim1, sgn) by 3rd-order CIC of its 27 coarse (lev-1) parent cells +
-// time-extrapolation -- IDENTICAL to make_cache_octs / the CPU interpol_phi.  Used by
-// gradient_phi / gauss_seidel / cmp_residual when a neighbour oct index is 0 (cache OFF).
-inline void mg_interpol_ghost(
-    device const Oct* grid, device const int* nbor, device const long* hkey,
-    device const int* hval, device const int* ckey_max, device const long* key_off,
-    device const int* box_min, device const int* box_max, device const float* phi,
-    device const float* phi_old, int hash_size, int ngridmax, float tfrac,
-    int oct, int idim1, int sgn, thread float* out /* TWOTONDIM */)
-{
-    int lev = grid[oct-1].lev;
-    int nck[3] = {0,0,0};
-    for (int d=0; d<NDIM; ++d) nck[d] = grid[oct-1].ckey[d];
-    nck[idim1-1] += sgn;                                  // step to the missing neighbour
-    for (int d=0; d<NDIM; ++d) {                          // periodic wrap at this level
-        int bmn = box_min[(lev-1)*3+d], bmx = box_max[(lev-1)*3+d];
-        if (nck[d] <  bmn) nck[d] = bmx-1;
-        if (nck[d] >= bmx) nck[d] = bmn;
-    }
-    int pl = lev-1, pck[3] = {0,0,0}, p[3] = {0,0,0};
-    for (int d=0; d<NDIM; ++d) { pck[d] = floor_div2(nck[d]); p[d] = nck[d] & 1; }
-    long pkey  = mg_oct_key(ckey_max[pl], key_off[pl], pck);
-    int father = hash_get(hkey, hval, hash_size, pkey);   // coarse parent of the neighbour
-    int igc[THREETONDIM], icc[THREETONDIM];
-    if (father > 0) nbor_father_cells_at(father, p, nbor, igc, icc);
-    for (int c=1; c<=TWOTONDIM; ++c) {
-        float corr = 0.0f, corr_old = 0.0f;
-        if (father > 0) {
-            for (int ia=1; ia<=TWOTONDIM; ++ia) {
-                int indf = mg_cic_father_index(c, ia);
-                int igr = igc[indf-1], inr = icc[indf-1];
-                if (igr <= 0 || igr > ngridmax) { igr = igc[MG_CUBE_CENTER]; inr = icc[MG_CUBE_CENTER]; }
-                float w = mg_cic_weight(ia);
-                corr     += w * phi[IDX2(inr, igr)];
-                corr_old += w * phi_old[IDX2(inr, igr)];
-            }
-        }
-        out[c-1] = corr + (corr - corr_old) * tfrac;
-    }
-}
-
 // gradient_phi (gpu_mg.cuf:1094): force = 4th-order central difference of phi.  With cache
 // octs ON the boundary neighbour is a materialised cache oct (index>0, read directly);
 // with cache OFF it is 0 -> reconstruct it inline via mg_interpol_ghost (the faithful CPU
