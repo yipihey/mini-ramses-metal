@@ -28,7 +28,8 @@ recursive subroutine r_set_grid_device(pst)
      ! Copy grid from host to device
      call nvtxStartRange("Copy entire mesh from host to device", color=5)!red
      grid = pst%s%m%grid
-     flag1 = pst%s%m%flag1
+     ! flag1 is only allocated/used for adaptive mesh refinement
+     if(pst%s%r%nlevelmax > pst%s%r%levelmin) flag1 = pst%s%m%flag1
 #ifdef HYDRO
      uold = pst%s%m%uold
 #endif
@@ -110,7 +111,8 @@ recursive subroutine r_transfer_grid_host(pst)
      ! Copy grid from device to host
      call nvtxStartRange("Copy entire mesh from device to host", color=5)!red
      pst%s%m%grid = grid
-     pst%s%m%flag1 = flag1
+     ! flag1 is only allocated/used for adaptive mesh refinement
+     if(pst%s%r%nlevelmax > pst%s%r%levelmin) pst%s%m%flag1 = flag1
 #ifdef HYDRO
      pst%s%m%uold = uold
 #endif

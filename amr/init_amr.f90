@@ -125,14 +125,18 @@ subroutine init_amr(r,g,m,type)
 #ifdef _CUDA
   if(type=='amr')then
      allocate(grid(1:m%ngridmax+m%ncachemax))
-     allocate(flag1(1:twotondim,1:m%ngridmax+m%ncachemax))
-     allocate(flag2(1:twotondim,1:m%ngridmax+m%ncachemax))
-     allocate(father(1:m%ngridmax+m%ncachemax))
+     ! flag1, flag2 and father are only needed for adaptive mesh refinement
+     ! (nlevelmax > levelmin). Skip their allocation for unigrid runs.
+     if(r%nlevelmax > r%levelmin)then
+        allocate(flag1(1:twotondim,1:m%ngridmax+m%ncachemax))
+        allocate(flag2(1:twotondim,1:m%ngridmax+m%ncachemax))
+        allocate(father(1:m%ngridmax+m%ncachemax))
+        flag1=0
+        flag2=0
+        father=0
+     endif
      nborarrsize = (m%ngridmax + nsubgridtondim - 1) / nsubgridtondim
      allocate(nbor(1:subgridsize,1:nborarrsize))
-     flag1=0
-     flag2=0
-     father=0
      nbor=0
      ! Allocate hash table space
      m%hash_size=2*(m%ngridmax+m%ncachemax)
