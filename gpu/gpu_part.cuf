@@ -1341,15 +1341,15 @@ end subroutine gpu_newdt_part
 attributes(device) subroutine gather_cic_force_part(f_d, hash_key_d, hash_val_d, &
      hash_size_d, ckey_max_d, key_off_d, box_ckey_min_d, box_ckey_max_d, periodic_d, &
      ngridmax, x_in, cell_level, grid_level, ff, ok_level)
-  real(kind=dp),   device, intent(in) :: f_d(1:twotondim,1:ndim,*)
-  integer(kind=8), device, intent(in) :: hash_key_d(*)
-  integer(kind=4), device, intent(in) :: hash_val_d(*)
+  real(kind=dp),   device :: f_d(1:twotondim,1:ndim,*)
+  integer(kind=8), device :: hash_key_d(*)
+  integer(kind=4), device :: hash_val_d(*)
   integer(kind=4), intent(in), value :: hash_size_d
-  integer(kind=4), device, intent(in) :: ckey_max_d(*)
-  integer(kind=8), device, intent(in) :: key_off_d(*)
-  integer(kind=4), device, intent(in) :: box_ckey_min_d(1:3,*)
-  integer(kind=4), device, intent(in) :: box_ckey_max_d(1:3,*)
-  logical,         device, intent(in) :: periodic_d(1:3)
+  integer(kind=4), device :: ckey_max_d(*)
+  integer(kind=8), device :: key_off_d(*)
+  integer(kind=4), device :: box_ckey_min_d(1:3,*)
+  integer(kind=4), device :: box_ckey_max_d(1:3,*)
+  logical,         device :: periodic_d(1:3)
   integer(kind=4), intent(in), value :: ngridmax
   real(kind=8) :: x_in(1:3), ff(1:3)
   integer(kind=4), intent(in), value :: cell_level, grid_level
@@ -1361,12 +1361,6 @@ attributes(device) subroutine gather_cic_force_part(f_d, hash_key_d, hash_val_d,
   integer(kind=8) :: nx, offset, key, ix8, iy8, iz8
   real(kind=8) :: dr(1:3), dl(1:3), weight
   logical :: in_domain
-  ! Per-call father-oct hash memo: the 8 CIC corners map to <= twotondim
-  ! distinct father octs, so each distinct hash_get is computed once and reused.
-  integer(kind=8) :: cache_key(1:twotondim)
-  integer(kind=4) :: cache_igrid(1:twotondim)
-  integer :: ic, ncache
-  logical :: hit
 
   ok_level = .true.
   ff = 0.0_dp
@@ -1395,12 +1389,6 @@ attributes(device) subroutine gather_cic_force_part(f_d, hash_key_d, hash_val_d,
         if (ir(idim) >= box_max(idim)) ir(idim) = box_min(idim)
      endif
   end do
-
-  ! Grid-level constants are loop-invariant -> hoist out of the 8-corner loop.
-  ! ncache resets the per-call father-oct hash memo.
-  nx     = int(ckey_max_d(grid_level), kind=8)
-  offset = key_off_d(grid_level)
-  ncache = 0
 
   do bz = 0, 1
      do by = 0, 1
@@ -1436,25 +1424,11 @@ attributes(device) subroutine gather_cic_force_part(f_d, hash_key_d, hash_val_d,
            ix8 = int(father_ckey(1), kind=8)
            iy8 = int(father_ckey(2), kind=8)
            iz8 = int(father_ckey(3), kind=8)
+           nx  = int(ckey_max_d(grid_level), kind=8)
+           offset = key_off_d(grid_level)
            key = offset + ix8 + iy8*nx + iz8*nx*nx
 
-           ! Father-oct dedup: reuse a previously hashed igrid for this key.
-           ! hash_get is a pure function of key, so memoising is exact -- it only
-           ! removes the redundant FNV/probe work (the gather's dominant cost).
-           hit = .false.
-           do ic = 1, ncache
-              if (cache_key(ic) == key) then
-                 igrid = cache_igrid(ic)
-                 hit = .true.
-                 exit
-              endif
-           end do
-           if (.not. hit) then
-              igrid = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
-              ncache = ncache + 1
-              cache_key(ncache)   = key
-              cache_igrid(ncache) = igrid
-           endif
+           igrid = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
 
            ! Skip cache/ghost octs (igrid > ngridmax): gpu_gradient_phi does
            ! not update them, so f there is stale. CPU mirrors this by
@@ -1487,19 +1461,19 @@ attributes(global) subroutine kick_drift_part_kernel(xp_d, vp_d, levelp_d, &
   real(kind=dp),   device :: xp_d(*)
   real(kind=dp),   device :: vp_d(*)
   integer(kind=4), device :: levelp_d(*)
-  real(kind=dp),   device, intent(in) :: f_d(1:twotondim,1:ndim,*)
-  integer(kind=8), device, intent(in) :: hash_key_d(*)
-  integer(kind=4), device, intent(in) :: hash_val_d(*)
+  real(kind=dp),   device :: f_d(1:twotondim,1:ndim,*)
+  integer(kind=8), device :: hash_key_d(*)
+  integer(kind=4), device :: hash_val_d(*)
   integer(kind=4), intent(in), value :: hash_size_d
-  integer(kind=4), device, intent(in) :: ckey_max_d(*)
-  integer(kind=8), device, intent(in) :: key_off_d(*)
-  integer(kind=4), device, intent(in) :: box_ckey_min_d(1:3,*)
-  integer(kind=4), device, intent(in) :: box_ckey_max_d(1:3,*)
-  real(kind=8),    device, intent(in) :: box_size_d(1:3)
-  logical,         device, intent(in) :: periodic_d(1:3)
+  integer(kind=4), device :: ckey_max_d(*)
+  integer(kind=8), device :: key_off_d(*)
+  integer(kind=4), device :: box_ckey_min_d(1:3,*)
+  integer(kind=4), device :: box_ckey_max_d(1:3,*)
+  real(kind=8),    device :: box_size_d(1:3)
+  logical,         device :: periodic_d(1:3)
   integer(kind=4), intent(in), value :: ngridmax
-  real(kind=8),    device, intent(in) :: dtnew_d(*)
-  real(kind=8),    device, intent(in) :: dtold_d(*)
+  real(kind=8),    device :: dtnew_d(*)
+  real(kind=8),    device :: dtold_d(*)
   real(kind=8), intent(in), value :: skip1, skip2, skip3, dx_loc
   integer(kind=4), intent(in), value :: action_part
   integer(kind=4), intent(in), value :: ilevel
@@ -1582,328 +1556,6 @@ attributes(global) subroutine kick_drift_part_kernel(xp_d, vp_d, levelp_d, &
 
 end subroutine kick_drift_part_kernel
 
-!> Warp-cooperative CIC force gather + kick/drift over the level-ilevel bucket
-!> [headp(ilevel), tailp(ilevel)], walked in RAW order (gpu_split_part leaves it
-!> Hilbert-ordered; see rho_fine.f90: sort -> cic -> split per level, ahead of
-!> the kick), so consecutive lanes mostly share a level-ilevel home cell.
-!>
-!> Each warp tests whether all 32 lanes are valid and share ONE home cell:
-!>
-!>  - Uniform warp (the common case in well-populated cells): the threetondim =
-!>    3^ndim distinct neighbour-cell lookups for that shared cell are DISTRIBUTED
-!>    one-per-lane (lanes 0..threetondim-1) and run concurrently -- ~1 hash
-!>    latency for the whole stencil. Every lane then all-gathers the results via
-!>    __shfl and weights them by its OWN CIC weight. The shared force lookups are
-!>    done once per warp instead of once per particle, AND in parallel.
-!>
-!>  - Non-uniform warp (straddles a cell boundary, or the partial last warp):
-!>    each lane independently calls gather_cic_force_part -- exactly the old
-!>    per-thread cost, parallel across the warp, no sharing but no regression.
-!>
-!> This is the parallel rewrite of the first cooperative version, which had the
-!> segment HEAD do all threetondim lookups SERIALLY while the rest idled: on a
-!> latency-bound kernel that serialised the gather and ran ~4x slower than the
-!> old per-thread kernel. Distributing the lookups keeps the work-reduction
-!> while restoring warp-wide parallelism.
-!>
-!> Results match kick_drift_part_kernel to a few ULps: each lane's set of
-!> (cell, weight) pairs is identical (a 3-cell stencil centred on floor(x) with
-!> the wrong-side offsets carrying zero weight reproduces the 2-cell il/ir
-!> stencil of gather_cic_force_part), only the summation order differs. The
-!> coarse fallback reuses gather_cic_force_part verbatim, per lane.
-!>
-!> Launched at 256 threads/block (8 warps), like the deposit. The is_uniform
-!> branch is warp-uniform (a warp reduction), so all lanes take the same path
-!> and every lane reaches every __shfl; there is NO early return -- out-of-range
-!> lanes are masked by valid_lane.
-attributes(global) subroutine kick_drift_part_warp_kernel(xp_d, vp_d, levelp_d, &
-     f_d, hash_key_d, hash_val_d, hash_size_d, ckey_max_d, key_off_d, &
-     box_ckey_min_d, box_ckey_max_d, box_size_d, periodic_d, ngridmax, &
-     dtnew_d, dtold_d, skip1, skip2, skip3, dx_loc, &
-     action_part, ilevel, head_idx, num_parts, leading)
-  integer(kind=4), intent(in), value :: leading
-  real(kind=dp),   device :: xp_d(*)
-  real(kind=dp),   device :: vp_d(*)
-  integer(kind=4), device :: levelp_d(*)
-  real(kind=dp),   device :: f_d(1:twotondim,1:ndim,*)
-  integer(kind=8), device :: hash_key_d(*)
-  integer(kind=4), device :: hash_val_d(*)
-  integer(kind=4), intent(in), value :: hash_size_d
-  integer(kind=4), device :: ckey_max_d(*)
-  integer(kind=8), device :: key_off_d(*)
-  integer(kind=4), device :: box_ckey_min_d(1:3,*)
-  integer(kind=4), device :: box_ckey_max_d(1:3,*)
-  real(kind=8),    device :: box_size_d(1:3)
-  logical,         device :: periodic_d(1:3)
-  integer(kind=4), intent(in), value :: ngridmax
-  real(kind=8),    device :: dtnew_d(*)
-  real(kind=8),    device :: dtold_d(*)
-  real(kind=8), intent(in), value :: skip1, skip2, skip3, dx_loc
-  integer(kind=4), intent(in), value :: action_part
-  integer(kind=4), intent(in), value :: ilevel
-  integer(kind=4), intent(in), value :: head_idx
-  integer(kind=4), intent(in), value :: num_parts
-
-  integer :: tid_local, lane, warp_local, warps_per_block, warp_global, slot_global
-  integer :: ipart, idim, k, lp
-  integer :: ox, oy, oz, igrid, icell
-  integer :: my_found, g_found, redm, roff, c0x, c0y, c0z
-  integer(kind=4) :: host_ckey(1:3), target_ckey(1:3), father_ckey(1:3), ii(1:3)
-  integer(kind=4) :: box_min(1:3), box_max(1:3)
-  integer(kind=8) :: nx, hkey_offset, key, ix8, iy8, iz8
-  logical :: valid_lane, in_domain, is_uniform, ok_level
-  real(kind=8) :: skip(1:3), x(1:3), x_coarse(1:3), ff(1:3), frac(1:3)
-  real(kind=8) :: my_f(1:3), gf(1:3)
-  real(kind=8) :: wx(0:2), wy(0:2), wz(0:2), w, dteff, xnew
-
-  ! ------------------------------------------------------------------
-  ! Lane bookkeeping (mirrors cic_part_warp_kernel): map (block, thread) ->
-  ! (warp, lane, slot_global). slot_global is 1-based into the bucket window;
-  ! ipart walks the bucket in RAW order. valid_lane masks lanes past num_parts.
-  ! ------------------------------------------------------------------
-  tid_local       = threadIdx%x - 1
-  warps_per_block = blockDim%x / warpsize        ! 256 / 32 = 8
-  warp_local      = tid_local / warpsize
-  lane            = mod(tid_local, warpsize)
-  warp_global     = (blockIdx%x - 1) * warps_per_block + warp_local
-  slot_global     = warp_global * warpsize + lane + 1
-  valid_lane      = (slot_global <= num_parts)
-
-  skip(1) = skip1
-  skip(2) = skip2
-  skip(3) = skip3
-
-  ! ------------------------------------------------------------------
-  ! Per-level constants (identical on every lane). nx = octs per axis =
-  ! ckey_max(ilevel) is the base the oct hash consumes (father_ckey = cell/2).
-  ! box_min/box_max bound this rank's tile at level ilevel (stored at slot
-  ! ilevel+1, an array convention) for periodic wrap / OOB tests.
-  ! ------------------------------------------------------------------
-  nx          = int(ckey_max_d(ilevel), kind=8)
-  hkey_offset = key_off_d(ilevel)
-  box_min = 0
-  box_max = 0
-  do idim = 1, ndim
-     box_min(idim) = box_ckey_min_d(idim, ilevel+1)
-     box_max(idim) = box_ckey_max_d(idim, ilevel+1)
-  end do
-
-  ! ------------------------------------------------------------------
-  ! Per-lane home cell + fractional position (NO home-cell hash; the kick
-  ! computes positions itself). host_ckey = floor(x) is the level-ilevel cell
-  ! index; lanes sharing it gather from the same neighbour cells. x is kept in
-  ! registers for the exact coarse fallback. Invalid lanes keep host_ckey = 0
-  ! (masked out of the uniformity test below by valid_lane).
-  ! ------------------------------------------------------------------
-  x         = 0.0_dp
-  frac      = 0.0_dp
-  host_ckey = 0
-  ipart     = 0
-  if (valid_lane) then
-     ipart = head_idx + slot_global - 1
-     do idim = 1, ndim
-        x(idim)         = (xp_d(ipart + (idim-1)*leading) + skip(idim)) / dx_loc
-        host_ckey(idim) = floor(x(idim))
-        frac(idim)      = x(idim) - host_ckey(idim)
-     end do
-  endif
-
-  ! ------------------------------------------------------------------
-  ! 3-cell CIC weights per axis (identical to cic_part_warp_kernel 967-983).
-  ! Unused dims keep wy(1) = wz(1) = 1 so the 3D product is correct for ndim<3.
-  ! ------------------------------------------------------------------
-  wx(0) = max(0.0_dp, 0.5_dp - frac(1))
-  wx(1) = 1.0_dp - abs(frac(1) - 0.5_dp)
-  wx(2) = max(0.0_dp, frac(1) - 0.5_dp)
-  wy = 0.0_dp
-  wz = 0.0_dp
-  wy(1) = 1.0_dp
-  wz(1) = 1.0_dp
-  if (ndim >= 2) then
-     wy(0) = max(0.0_dp, 0.5_dp - frac(2))
-     wy(1) = 1.0_dp - abs(frac(2) - 0.5_dp)
-     wy(2) = max(0.0_dp, frac(2) - 0.5_dp)
-  endif
-  if (ndim >= 3) then
-     wz(0) = max(0.0_dp, 0.5_dp - frac(3))
-     wz(1) = 1.0_dp - abs(frac(3) - 0.5_dp)
-     wz(2) = max(0.0_dp, frac(3) - 0.5_dp)
-  endif
-
-  ! ------------------------------------------------------------------
-  ! Uniformity test: is this whole warp a single home cell with all 32 lanes
-  ! valid? Compare every lane's home cell to lane 0's (3 int4 broadcasts), set a
-  ! 0/1 match flag, then AND-reduce it (min over the warp via the __shfl_down
-  ! tree in warp_reduce_int_sum) and broadcast the verdict from lane 0. Only
-  ! fully-uniform warps take the cooperative path; everything else (cell
-  ! boundaries, the partial last warp) falls back to an independent per-lane
-  ! gather -- exactly the old kick_drift_part_kernel cost, never worse.
-  ! ------------------------------------------------------------------
-  c0x = __shfl(host_ckey(1), 0)
-  c0y = __shfl(host_ckey(2), 0)
-  c0z = __shfl(host_ckey(3), 0)
-  redm = merge(1, 0, valid_lane .and. host_ckey(1) == c0x &
-       &                         .and. host_ckey(2) == c0y &
-       &                         .and. host_ckey(3) == c0z)
-  roff = warpsize / 2
-  do
-     if (roff <= 0) exit
-     redm = min(redm, __shfl_down(redm, roff))
-     roff = roff / 2
-  end do
-  redm       = __shfl(redm, 0)
-  is_uniform = (redm == 1)
-
-  ff       = 0.0_dp
-  ok_level = valid_lane            ! invalid lanes stay .false. but skip fallback (valid_lane gate)
-
-  if (is_uniform) then
-     ! ---------------------------------------------------------------
-     ! Cooperative gather, PARALLELISED across the warp. All 32 lanes share one
-     ! home cell, so the threetondim = 3^ndim distinct neighbour-cell lookups
-     ! are spread one-per-lane (lanes 0..threetondim-1) and run concurrently --
-     ! ~1 hash latency, not threetondim serial latencies on a single head lane
-     ! (the flaw that made the first cooperative version latency-bound). Every
-     ! lane then all-gathers the threetondim results via indexed __shfl and
-     ! weights them by its OWN CIC weight. Control flow through the shuffles is
-     ! warp-uniform (is_uniform is a warp reduction), so all lanes participate.
-     ! ---------------------------------------------------------------
-     my_found = 0
-     my_f     = 0.0_dp
-     if (lane < threetondim) then           ! lanes 0..threetondim-1: one lookup each
-        k = lane + 1
-        ox = mod(k - 1, 3) - 1
-        oy = mod((k - 1) / 3, 3) - 1
-        oz = (k - 1) / 9 - 1
-        target_ckey = 0
-        target_ckey(1) = host_ckey(1) + ox   ! host_ckey is warp-uniform here
-        if (ndim >= 2) target_ckey(2) = host_ckey(2) + oy
-        if (ndim >= 3) target_ckey(3) = host_ckey(3) + oz
-
-        ! Periodic wrap / non-periodic OOB at level ilevel (cf. deposit 1093-1102).
-        in_domain = .true.
-        do idim = 1, ndim
-           if (periodic_d(idim)) then
-              if (target_ckey(idim) <  box_min(idim)) target_ckey(idim) = box_max(idim) - 1
-              if (target_ckey(idim) >= box_max(idim)) target_ckey(idim) = box_min(idim)
-           else
-              if (target_ckey(idim) <  box_min(idim)) in_domain = .false.
-              if (target_ckey(idim) >= box_max(idim)) in_domain = .false.
-           endif
-        end do
-
-        if (in_domain) then
-           father_ckey = target_ckey / 2
-           ii = target_ckey - 2 * father_ckey
-           icell = 1
-           do idim = 1, ndim
-              icell = icell + ii(idim) * (2**(idim-1))
-           end do
-           ix8 = int(father_ckey(1), kind=8)
-           iy8 = int(father_ckey(2), kind=8)
-           iz8 = int(father_ckey(3), kind=8)
-           key = hkey_offset + ix8 + iy8*nx + iz8*nx*nx
-           igrid = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
-           ! Skip absent (0) and cache/ghost (igrid > ngridmax) octs: f there is
-           ! stale -- same guard as gather_cic_force_part (1436).
-           if (igrid /= 0 .and. igrid <= ngridmax) then
-              my_found = 1
-              do idim = 1, ndim
-                 my_f(idim) = real(f_d(icell, idim, igrid), kind=8)
-              end do
-           endif
-        endif
-     endif
-
-     ! All-gather: offset k's lookup lives on lane k-1. Every lane reads all
-     ! threetondim results (indexed __shfl) and accumulates the non-zero-weight
-     ! ones with its own weight; ok_level drops if a needed cell was missing.
-     do k = 1, threetondim
-        ox = mod(k - 1, 3) - 1
-        oy = mod((k - 1) / 3, 3) - 1
-        oz = (k - 1) / 9 - 1
-        ! Indexed __shfl: int4 (found) is used in sibling kernels; real(8) (the
-        ! force) shares the generic family with __shfl_up(real8) at 1147. If a
-        ! given nvfortran rejects indexed __shfl on real(8), shuffle each value
-        ! as two int4 halves via transfer() -- do not cap.
-        g_found = __shfl(my_found, k - 1)
-        gf(1)   = __shfl(my_f(1),  k - 1)
-        if (ndim >= 2) gf(2) = __shfl(my_f(2), k - 1)
-        if (ndim >= 3) gf(3) = __shfl(my_f(3), k - 1)
-        w = wx(ox+1) * wy(oy+1) * wz(oz+1)
-        if (w > 0.0_dp) then
-           if (g_found == 1) then
-              do idim = 1, ndim
-                 ff(idim) = ff(idim) + w * gf(idim)
-              end do
-           else
-              ok_level = .false.        ! a contributing cell is missing -> fallback
-           endif
-        endif
-     end do
-
-  else
-     ! ---------------------------------------------------------------
-     ! Non-uniform warp (cell boundary or the partial last warp): each lane runs
-     ! its own fine gather independently, in parallel across the warp -- the same
-     ! work the old per-thread kernel does, no sharing but no regression. The
-     ! callee has no warp-collective ops, so this divergent call is safe.
-     ! ---------------------------------------------------------------
-     if (valid_lane) then
-        call gather_cic_force_part(f_d, hash_key_d, hash_val_d, hash_size_d, &
-             & ckey_max_d, key_off_d, box_ckey_min_d, box_ckey_max_d, periodic_d, &
-             & ngridmax, x, ilevel+1, ilevel, ff, ok_level)
-     endif
-  endif
-
-  ! ------------------------------------------------------------------
-  ! Coarse fallback, per-lane (rare: refinement / off-rank boundaries). Retry
-  ! the gather at ilevel-1 with x/2, exactly as kick_drift_part_kernel does.
-  ! gather_cic_force_part re-zeros ff on entry, so any partial fine ff is
-  ! discarded just as the host kernel discards it (ff=0 on .not. ok_level).
-  ! ------------------------------------------------------------------
-  if (valid_lane .and. .not. ok_level) then
-     do idim = 1, ndim
-        x_coarse(idim) = x(idim) / 2.0_dp
-     end do
-     call gather_cic_force_part(f_d, hash_key_d, hash_val_d, hash_size_d, &
-          & ckey_max_d, key_off_d, box_ckey_min_d, box_ckey_max_d, periodic_d, &
-          & ngridmax, x_coarse, ilevel, ilevel-1, ff, ok_level)
-  endif
-
-  ! ------------------------------------------------------------------
-  ! Kick / drift update (copied verbatim from kick_drift_part_kernel 1519-1555).
-  ! ------------------------------------------------------------------
-  if (valid_lane) then
-     if (action_part == 2) then
-        do idim = 1, ndim
-           vp_d(ipart + (idim-1)*leading) = vp_d(ipart + (idim-1)*leading) &
-                & + ff(idim) * 0.5_dp * dtnew_d(ilevel)
-           xnew = xp_d(ipart + (idim-1)*leading) &
-                & + vp_d(ipart + (idim-1)*leading) * dtnew_d(ilevel)
-           if (periodic_d(idim)) then
-              if (xnew < 0.0_dp)            xnew = xnew + box_size_d(idim)
-              if (xnew >= box_size_d(idim)) xnew = xnew - box_size_d(idim)
-           endif
-           xp_d(ipart + (idim-1)*leading) = xnew
-        end do
-     else if (action_part == 1) then
-        lp = levelp_d(ipart)
-        if (lp >= ilevel) then
-           dteff = dtnew_d(lp)
-        else
-           dteff = dtold_d(lp)
-        endif
-        levelp_d(ipart) = ilevel
-        do idim = 1, ndim
-           vp_d(ipart + (idim-1)*leading) = vp_d(ipart + (idim-1)*leading) &
-                & + ff(idim) * 0.5_dp * dteff
-        end do
-     endif
-  endif
-
-end subroutine kick_drift_part_warp_kernel
-
 subroutine gpu_kick_drift_part(sim, ilevel, action_part)
   use nvtx
   use amr_parameters, only: MAXLEVEL
@@ -1920,19 +1572,15 @@ subroutine gpu_kick_drift_part(sim, ilevel, action_part)
   integer(kind=4) :: gravity_type
   logical :: any_nonperiodic
   real(kind=8), device, dimension(1:MAXLEVEL) :: dtnew_part_d, dtold_part_d
-  character(len=32) :: nvtx_lbl
-
-  call nvtxStartRange("gpu_kick_drift_part", color=4) ! purple
 
   dx_loc = sim%r%boxlen/2**ilevel
   skip1 = sim%m%skip(1)
   skip2 = sim%m%skip(2)
   skip3 = sim%m%skip(3)
 
-  call nvtxStartRange("gpu_kick_drift_part:setup", color=4)
+  ! Host to device
   dtnew_part_d = sim%g%dtnew
   dtold_part_d = sim%g%dtold
-  call nvtxEndRange()
 
   head_idx = sim%p%headp(ilevel)
   tail_idx = sim%p%tailp(ilevel)
@@ -1940,23 +1588,10 @@ subroutine gpu_kick_drift_part(sim, ilevel, action_part)
 
   if (num_parts > 0) then
 
-     ! Active path: per-thread kick_drift_part_kernel (one thread per particle)
-     ! over the bucket [headp(ilevel), tailp(ilevel)]. Its gather now dedups
-     ! father-oct hashes per thread and reads f/hash through the read-only cache
-     ! (intent(in)). The warp-cooperative kick_drift_part_warp_kernel is kept for
-     ! comparison -- it only wins on dense, fully-uniform warps; swap the launch
-     ! below to benchmark it. 256 threads/block suits the flat 1-thread mapping.
-     num_threads = 256
+     num_threads = 128
      num_blocks  = (num_parts + num_threads - 1) / num_threads
 
-     if (action_part == 1) then
-        nvtx_lbl = 'gpu_kick_drift_part:kick_only'
-     else if (action_part == 2) then
-        nvtx_lbl = 'gpu_kick_drift_part:kick_drift'
-     else
-        write(nvtx_lbl, '(A,I0)') 'gpu_kick_drift_part:action_', action_part
-     endif
-     call nvtxStartRange(trim(nvtx_lbl), color=4)
+     call nvtxStartRange("gpu_kick_drift_part", color=4) ! purple
      call kick_drift_part_kernel<<<num_blocks, num_threads>>>(xp, vp, levelp, &
           & f, hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
           & box_ckey_min, box_ckey_max, box_size, periodic, sim%r%ngridmax, &
@@ -1965,8 +1600,6 @@ subroutine gpu_kick_drift_part(sim, ilevel, action_part)
      call nvtxEndRange()
 
   endif
-
-  call nvtxEndRange()
 
 end subroutine gpu_kick_drift_part
 
