@@ -59,6 +59,7 @@ kernel void make_initial_phi(
     device float*       phi     [[buffer(3)]],
     constant MgParams&  P       [[buffer(4)]],  // head_idx=fine head, head_father=fine father base
     device const float* phi_old [[buffer(5)]],  // for time-extrapolation (P.tfrac)
+    device atomic_uint* fbk     [[buffer(6)]],  // DIAG: centre-cell-fallback hit counter
     uint2 gid [[thread_position_in_grid]])
 {
     if ((int)gid.y >= P.num_octs) return;
@@ -75,7 +76,8 @@ kernel void make_initial_phi(
         // gpu_mg make_initial_phi), so the CIC weights still sum to 1.  SKIPPING it
         // (sum<1) leaves the boundary phi systematically too low -> over-energization
         // wherever the coarse level is itself partially refined (deep levels).
-        if (igr <= 0 || igr > P.ngridmax) { igr = ig[MG_CUBE_CENTER]; inr = ic[MG_CUBE_CENTER]; }
+        if (igr <= 0 || igr > P.ngridmax) { igr = ig[MG_CUBE_CENTER]; inr = ic[MG_CUBE_CENTER];
+            atomic_fetch_add_explicit(fbk, 1u, memory_order_relaxed); }
         // Same interpol_phi as the gradient ghost: 3rd-order CIC of the coarse phi,
         // linearly extrapolated in time so the held boundary matches the gradient.
         float pv = phi[IDX2(inr, igr)];

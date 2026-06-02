@@ -49,7 +49,7 @@ struct Buffers {
     // Scan scratch
     id<MTLBuffer> prefix, ps0, ps1, total;
     // Refine: compaction scratch (grid + widest float field) + permutation + free counter
-    id<MTLBuffer> grid2, fld2, swap, ifree_ctr, kill_ctr, redbuf;
+    id<MTLBuffer> grid2, fld2, swap, ifree_ctr, kill_ctr, redbuf, fbk;
     // Multigrid residual-norm partials (one float per threadgroup over the fine level)
     id<MTLBuffer> mgnorm, mgnorm_i;
     // Cache-oct (coarse-fine boundary ghost) compaction scratch: per-oct missing-nbor
@@ -410,6 +410,7 @@ void mtl_alloc_buffers(int ncell, int npartmax, int hash_size, int nlevelmax) {
     B.ifree_ctr = newbuf<int>(1);
     B.kill_ctr  = newbuf<int>(1);
     B.redbuf    = newbuf<unsigned>(3);   // newdt: [vmax bits, ekin_lo, ekin_hi]
+    B.fbk       = newbuf<unsigned>(1);    // DIAG: make_initial_phi centre-cell-fallback hits
     // residual_norm writes one df64 (hi,lo = 2 floats) per threadgroup -> size x2.
     B.mgnorm    = newbuf<float>(2*((size_t)((nc + 255) / 256) + 1));  // MG residual-norm df64 partials
     B.mgnorm_i  = newbuf<float>(2*((size_t)((nc + 255) / 256) + 1));  // iter-1 initial-norm df64 partials
@@ -1637,14 +1638,21 @@ void mtl_mg_make_initial_phi(int ilevel, float dx_fine, float tfrac, int has_coa
     @autoreleasepool {
         MgParams P{}; P.head_idx=MG.fine_head; P.num_octs=MG.n_fine; P.ngridmax=B.ngridmax;   // real-oct bound: nbr>ngridmax => cache (ghost) oct
         P.head_father=MG.fine_head; P.ilevel=ilevel; P.dx=dx_fine; P.tfrac=tfrac; P.use_ghost=1;
+        static bool s_fbk_diag = getenv("RAMSES_FALLBACK_DIAG") != nullptr;
+        if (s_fbk_diag) { mtl_drain(); *(unsigned*)B.fbk.contents = 0; }
         id<MTLCommandBuffer> cb=[g_queue commandBuffer];
         id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
         [e setComputePipelineState:pso("make_initial_phi")];
         [e setBuffer:B.grid offset:0 atIndex:0]; [e setBuffer:B.father offset:0 atIndex:1];
         [e setBuffer:B.nbor offset:0 atIndex:2]; [e setBuffer:B.phi offset:0 atIndex:3];
         [e setBytes:&P length:sizeof(P) atIndex:4]; [e setBuffer:B.phi_old offset:0 atIndex:5];
+        [e setBuffer:B.fbk offset:0 atIndex:6];
         [e dispatchThreads:MTLSizeMake(TWOTONDIM,MG.n_fine,1) threadsPerThreadgroup:MTLSizeMake(TWOTONDIM,8,1)];
         [e endEncoding]; submit_async(cb);
+        if (s_fbk_diag) { mtl_drain(); unsigned h=*(unsigned*)B.fbk.contents;
+            long tot=(long)TWOTONDIM*MG.n_fine;
+            fprintf(stderr,"[FALLBACK] ilevel=%d n_fine=%d corners=%ld hits=%u (%.4f%%)\n",
+                    ilevel, MG.n_fine, tot, h, tot>0?100.0*h/tot:0.0); }
     }
 }
 
