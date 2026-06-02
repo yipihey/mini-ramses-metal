@@ -40,11 +40,11 @@ module metal_gravity_module
   ! VALIDATED: total oct count matches the CPU refine EXACTLY through step 50, then
   ! stays statistically equivalent (chaotic divergence, like the flag); mass +
   ! energy conserved (mcons=0, econs=1.00) over 490+ steps, no orphans/crash.
-  ! NOTE: currently a modest perf regression vs the CPU refine (~1.3x) because the
-  ! hybrid still marshals m%grid<->B.grid each refine call; eliminating that (true
-  ! B.grid ownership, sync only at I/O) is the remaining optimization.
-  ! RAMSES_GPU_REFINE=0 reverts to the CPU refine.
-  logical :: metal_refine_on = .true.    ! route AMR refine to the GPU
+  ! AMR refine ALWAYS runs on the GPU when metal is enabled.  The former
+  ! RAMSES_GPU_REFINE=0 path ("CPU refine inside a GPU run") was REMOVED: it handed
+  ! the GPU solve a host-marshalled mesh/connectivity that produced a hot
+  ! high-velocity tail (refined-level over-energization) -- a known-wrong hybrid we
+  ! will not use.  Pure CPU runs (metal disabled) still use r_refine_fine.
   ! grid_dict rebuild: only needed if a CPU consumer reads it.  All per-step
   ! physics is GPU-routed (uses B.hash) so the full-GPU default does not need it;
   ! RAMSES_REFINE_REHASH=1 forces it (e.g. CPU-flag + GPU-refine).
@@ -156,12 +156,10 @@ contains
        ! insertion is invalid).  The rebuild runs on the GPU (parallel atomicCAS)
        ! so it is cheap; ifree changing is the proven mesh-change signal.
        num_octs = m%ifree - 1
-       ! Grid copy-in: when the GPU OWNS the mesh (metal_refine_on) B.grid is
-       ! authoritative and is mutated in place by the GPU refine, so we seed it
-       ! from the CPU-built initial mesh exactly ONCE and never copy again (the
-       ! per-step m%grid<->B.grid marshalling is what made refine a regression).
-       ! With the CPU refine, m%grid is authoritative -> copy in every change.
-       if (.not. metal_refine_on .or. .not. b_grid_seeded) then
+       ! The GPU OWNS the mesh: B.grid is mutated in place by the GPU refine, so we
+       ! seed it from the CPU-built initial mesh exactly ONCE and never copy again
+       ! (per-step m%grid<->B.grid marshalling is what made refine a regression).
+       if (.not. b_grid_seeded) then
           call mtl_drain()                       ! host memcpy into B.grid must not race in-flight GPU
           call mtl_copy_grid_in(c_loc(m%grid(1)), 1, num_octs)
           ! One-shot seed of resident B.flag1 from the CPU-built initial flags at
@@ -171,20 +169,17 @@ contains
           ! -> it sees no flags and derefines the whole adaptive mesh (1D pancake
           ! 25/18/3 -> 22/0/0; box-wide ~1e-4 force shift).  m%flag1 still holds the
           ! flags that built the current mesh; copy them in ONCE, then the GPU
-          ! flag->refine resident handoff owns B.flag1.  GPU-refine path only -- the
-          ! CPU-refine path uploads m%flag1 itself each step in m_metal_refine.
-          if (metal_refine_on .and. .not. b_grid_seeded) then
-             block
-               integer(c_int), pointer :: mf(:)
-               integer :: o, c
-               call c_f_pointer(mtl_ptr_flag1(), mf, [g_ncell*twotondim])
-               do o = 1, num_octs
-                  do c = 1, twotondim
-                     mf((o-1)*twotondim + c) = m%flag1(c, o)
-                  end do
+          ! flag->refine resident handoff owns B.flag1.
+          block
+            integer(c_int), pointer :: mf(:)
+            integer :: o, c
+            call c_f_pointer(mtl_ptr_flag1(), mf, [g_ncell*twotondim])
+            do o = 1, num_octs
+               do c = 1, twotondim
+                  mf((o-1)*twotondim + c) = m%flag1(c, o)
                end do
-             end block
-          end if
+            end do
+          end block
           b_grid_seeded = .true.
        end if
        call mtl_conn_rebuild_hash(num_octs, r%nlevelmax, g_box_min, g_box_max)
@@ -1022,17 +1017,12 @@ contains
     ! metal-vs-CPU divergence the flag-connectivity fix removed (rms 2.2e-3 -> 1.8e-5).
     ! The hazard is a refine between the gravity solve and this flag pass changing the
     ! mesh with NO net ifree change (kill+make), which the ifree guard misses.
-    !   * GPU refine (default): m_metal_refine bumps g_mesh_version on ANY create/derefine
-    !     (keyed off ncreate+nkill, so net-zero compaction is caught too).  Rebuild the
-    !     connectivity only when the mesh actually mutated since the last flag -- otherwise
-    !     the flag SHARES the gravity solve's already-current hash+nbor (was forcing a full
-    !     rebuild on EVERY call, ~19% of wall-clock, entirely redundant once settled).
-    !   * CPU refine (RAMSES_GPU_REFINE=0): the CPU mesh mutation does NOT bump the version
-    !     or invalidate the cache, so keep forcing the full rebuild for that path.
-    if (.not. metal_refine_on) then
-       g_synced_ifree = -1
-       g_nbor_synced  = -1
-    else if (g_mesh_version /= g_flag_synced_version) then
+    ! m_metal_refine bumps g_mesh_version on ANY create/derefine (keyed off
+    ! ncreate+nkill, so net-zero compaction is caught too).  Rebuild the connectivity
+    ! only when the mesh actually mutated since the last flag -- otherwise the flag
+    ! SHARES the gravity solve's already-current hash+nbor (forcing a full rebuild on
+    ! EVERY call was ~19% of wall-clock, entirely redundant once settled).
+    if (g_mesh_version /= g_flag_synced_version) then
        g_synced_ifree = -1
        g_nbor_synced  = -1
     end if
@@ -1048,17 +1038,15 @@ contains
     ! exactly the CPU inputs: init_flag needs the level-(ilevel+1) children's
     ! flag1, flag_poisson needs the level-ilevel nref.
     head1 = m%head(ilevel+1); num1 = m%noct(ilevel+1)
-    ! Upload the host's current-layout flag1 + nref only when the CPU owns the mesh
-    ! (CPU refine).  With GPU refine the mesh + B.flag1 are GPU-owned and stay
-    ! consistent through the GPU compaction, and B.nref is freshly deposited each
-    ! step, so the resident values are already correct -- uploading stale host
-    ! copies would corrupt them.
-    ! NOTE (2026-05-31): tried ALWAYS uploading children flag1 to fix the GPU-refine
+    ! With GPU refine the mesh + B.flag1 are GPU-owned and stay consistent through the
+    ! GPU compaction, and B.nref is freshly deposited each step, so the resident
+    ! values are already correct -- uploading stale host copies would corrupt them.
+    ! NOTE (2026-05-31): tried ALWAYS uploading children flag1 to fix a GPU-refine
     ! under-refinement (44 vs CPU 50 L11 cells); it CORRUPTED the resident full-GPU
     ! state (per-particle dv up to 0.13, sign flips) -> REVERTED.  The flag<->refine
-    ! handoff fix must keep resident B.flag1 authoritative, not overwrite it from a
-    ! host map that GPU-refine no longer maintains in sync.  See PORT_MAP.
-    if (.not. metal_refine_on .or. refine_hostmed) then
+    ! handoff must keep resident B.flag1 authoritative.  Only the refine_hostmed
+    ! EXPERIMENT (default off) host-mediates the flag<->refine handoff.  See PORT_MAP.
+    if (refine_hostmed) then
        call mtl_drain()                              ! host writes B.flag1/B.nref below
        block
          integer(c_int), pointer :: mf(:)
@@ -1145,10 +1133,10 @@ contains
     integer(kind=8) :: hkey(0:ndim)
 
     associate(r=>pst%s%r, m=>pst%s%m)
-    ! Ensure the GPU mesh + hash are current.  When the GPU OWNS the mesh
-    ! (metal_refine_on, default) B.grid is authoritative and NOT copied from the
-    ! host — ensure_hash only rebuilds the hash from B.grid.  Upload the flag map
-    ! only for the CPU-flag fallback (otherwise B.flag1 is resident + correct).
+    ! Ensure the GPU mesh + hash are current.  The GPU OWNS the mesh: B.grid is
+    ! authoritative and NOT copied from the host — ensure_hash only rebuilds the hash
+    ! from B.grid.  Upload the flag map only for the CPU-flag fallback (otherwise
+    ! B.flag1 is resident + correct).
     call metal_ensure_hash(pst)
     num = m%ifree - 1
     ! EXPERIMENT (RAMSES_REFINE_HOSTFLAG1=1): force the host-mediated flag1 round-trip
@@ -1257,7 +1245,7 @@ contains
     type(pst_t), target :: pst
     integer :: L, o
     integer(kind=8) :: hkey(0:ndim)
-    if (.not. (metal_enabled .and. metal_refine_on .and. b_grid_seeded)) return
+    if (.not. (metal_enabled .and. b_grid_seeded)) return
     associate(r=>pst%s%r, m=>pst%s%m)
     call mtl_drain()                 ! host reads B.grid below
     call mtl_copy_grid_out(c_loc(m%grid(1)), 1, m%noct_used)

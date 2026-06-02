@@ -3,7 +3,7 @@ module refine_utils
   use gpu_runner, only: gpu_refine
 #endif
 #ifdef _METAL
-  use metal_gravity_module, only: metal_enabled, metal_refine_on, m_metal_refine
+  use metal_gravity_module, only: metal_enabled, m_metal_refine
 #endif
   type out_refine_fine_t
     integer::make,kill
@@ -39,9 +39,11 @@ subroutine m_refine_fine(pst,ilevel)
 
   ! Create new octs and destroy unecessary octs
 #ifdef _METAL
-  if(metal_enabled .and. metal_refine_on)then
+  if(metal_enabled)then
      ! GPU AMR refine (create/derefine/compact on device + grid_dict rebuild);
-     ! replaces the CPU recursive refine for levels ilevel..nlevelmax.
+     ! replaces the CPU recursive refine for levels ilevel..nlevelmax.  This is the
+     ! ONLY refine path under metal -- the former "CPU refine inside a GPU run"
+     ! hybrid (RAMSES_GPU_REFINE=0) was removed (known-wrong: hot high-v tail).
      call m_metal_refine(pst,ilevel)
      out_refine_fine%make=0; out_refine_fine%kill=0
   else
