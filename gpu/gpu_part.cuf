@@ -1557,33 +1557,39 @@ attributes(global) subroutine kick_drift_part_kernel(xp_d, vp_d, levelp_d, &
 end subroutine kick_drift_part_kernel
 
 !> Warp-cooperative CIC force gather + kick/drift over the level-ilevel bucket
-!> [headp(ilevel), tailp(ilevel)]. This is the gather-side dual of
-!> cic_part_warp_kernel (the deposit): where the deposit SUMS each segment's
-!> contributions to a tail lane and emits one atomic, the kick has the segment
-!> HEAD perform the single shared hash_get + f_d read per stencil offset and
-!> BROADCASTS the looked-up force to the whole segment; each lane then weights
-!> that shared force by its OWN CIC weight and accumulates ff. No atomics.
+!> [headp(ilevel), tailp(ilevel)], walked in RAW order (gpu_split_part leaves it
+!> Hilbert-ordered; see rho_fine.f90: sort -> cic -> split per level, ahead of
+!> the kick), so consecutive lanes mostly share a level-ilevel home cell.
 !>
-!> A "segment" is a maximal run of adjacent lanes sharing a level-ilevel home
-!> cell. gpu_split_part leaves this bucket in Hilbert storage order (see
-!> rho_fine.f90: sort -> cic -> split per level, all ahead of the kick), so
-!> walking it in RAW order (no sortp indirection, unlike the deposit) already
-!> yields same-cell runs. Correctness is independent of ordering: an unsorted
-!> warp degrades to one singleton segment per lane (each lane does its own 27
-!> lookups, i.e. the old per-particle cost) but still computes the same force.
-!> Only the speedup depends on locality.
+!> Each warp tests whether all 32 lanes are valid and share ONE home cell:
 !>
-!> Results match kick_drift_part_kernel to a few ULps: the per-lane set of
+!>  - Uniform warp (the common case in well-populated cells): the threetondim =
+!>    3^ndim distinct neighbour-cell lookups for that shared cell are DISTRIBUTED
+!>    one-per-lane (lanes 0..threetondim-1) and run concurrently -- ~1 hash
+!>    latency for the whole stencil. Every lane then all-gathers the results via
+!>    __shfl and weights them by its OWN CIC weight. The shared force lookups are
+!>    done once per warp instead of once per particle, AND in parallel.
+!>
+!>  - Non-uniform warp (straddles a cell boundary, or the partial last warp):
+!>    each lane independently calls gather_cic_force_part -- exactly the old
+!>    per-thread cost, parallel across the warp, no sharing but no regression.
+!>
+!> This is the parallel rewrite of the first cooperative version, which had the
+!> segment HEAD do all threetondim lookups SERIALLY while the rest idled: on a
+!> latency-bound kernel that serialised the gather and ran ~4x slower than the
+!> old per-thread kernel. Distributing the lookups keeps the work-reduction
+!> while restoring warp-wide parallelism.
+!>
+!> Results match kick_drift_part_kernel to a few ULps: each lane's set of
 !> (cell, weight) pairs is identical (a 3-cell stencil centred on floor(x) with
-!> the 19 wrong-side offsets carrying zero weight reproduces the 2-cell
-!> il/ir stencil of gather_cic_force_part), only the summation order differs
-!> (k = 1..27 here vs the bz/by/bx triple loop there). The divergent coarse
-!> fallback reuses gather_cic_force_part verbatim, per lane.
+!> the wrong-side offsets carrying zero weight reproduces the 2-cell il/ir
+!> stencil of gather_cic_force_part), only the summation order differs. The
+!> coarse fallback reuses gather_cic_force_part verbatim, per lane.
 !>
-!> Launched at 256 threads/block (8 warps), like the deposit. NB: every lane
-!> reaches every warp-collective shuffle (segment detect, head-lane scan,
-!> per-offset broadcast), so there is NO early return -- out-of-range lanes are
-!> masked by valid_lane and still participate in the shuffles.
+!> Launched at 256 threads/block (8 warps), like the deposit. The is_uniform
+!> branch is warp-uniform (a warp reduction), so all lanes take the same path
+!> and every lane reaches every __shfl; there is NO early return -- out-of-range
+!> lanes are masked by valid_lane.
 attributes(global) subroutine kick_drift_part_warp_kernel(xp_d, vp_d, levelp_d, &
      f_d, hash_key_d, hash_val_d, hash_size_d, ckey_max_d, key_off_d, &
      box_ckey_min_d, box_ckey_max_d, box_size_d, periodic_d, ngridmax, &
@@ -1614,14 +1620,14 @@ attributes(global) subroutine kick_drift_part_warp_kernel(xp_d, vp_d, levelp_d, 
 
   integer :: tid_local, lane, warp_local, warps_per_block, warp_global, slot_global
   integer :: ipart, idim, k, lp
-  integer :: ox, oy, oz, igrid, icell, found, found_seg
-  integer :: head_lane, other_lane, scan_iter, scan_offset
+  integer :: ox, oy, oz, igrid, icell
+  integer :: my_found, g_found, redm, roff, c0x, c0y, c0z
   integer(kind=4) :: host_ckey(1:3), target_ckey(1:3), father_ckey(1:3), ii(1:3)
   integer(kind=4) :: box_min(1:3), box_max(1:3)
-  integer(kind=8) :: cell_key, prev_key, nx, nx_cell, hkey_offset, key, ix8, iy8, iz8
-  logical :: valid_lane, in_domain, is_head, ok_level
+  integer(kind=8) :: nx, hkey_offset, key, ix8, iy8, iz8
+  logical :: valid_lane, in_domain, is_uniform, ok_level
   real(kind=8) :: skip(1:3), x(1:3), x_coarse(1:3), ff(1:3), frac(1:3)
-  real(kind=8) :: fval(1:3), fval_seg(1:3)
+  real(kind=8) :: my_f(1:3), gf(1:3)
   real(kind=8) :: wx(0:2), wy(0:2), wz(0:2), w, dteff, xnew
 
   ! ------------------------------------------------------------------
@@ -1642,18 +1648,12 @@ attributes(global) subroutine kick_drift_part_warp_kernel(xp_d, vp_d, levelp_d, 
   skip(3) = skip3
 
   ! ------------------------------------------------------------------
-  ! Per-level constants (identical on every lane).
-  !   nx      = octs per axis  = ckey_max(ilevel) = 2^(ilevel-1): the base the
-  !             oct hash consumes (father_ckey = cell/2 below).
-  !   nx_cell = cells per axis = 2^ilevel: the base for the segment comparison
-  !             key. host_ckey = floor(x) is a CELL index in [0, 2^ilevel), so
-  !             the positional key must use nx_cell to stay injective; using nx
-  !             (octs) would alias distinct cells (e.g. (nx,0,0) vs (0,1,0)).
-  !   box_min/box_max bound this rank's tile at level ilevel (stored at slot
-  !             ilevel+1, an array convention) for periodic wrap / OOB tests.
+  ! Per-level constants (identical on every lane). nx = octs per axis =
+  ! ckey_max(ilevel) is the base the oct hash consumes (father_ckey = cell/2).
+  ! box_min/box_max bound this rank's tile at level ilevel (stored at slot
+  ! ilevel+1, an array convention) for periodic wrap / OOB tests.
   ! ------------------------------------------------------------------
   nx          = int(ckey_max_d(ilevel), kind=8)
-  nx_cell     = ishft(nx, 1)
   hkey_offset = key_off_d(ilevel)
   box_min = 0
   box_max = 0
@@ -1664,15 +1664,14 @@ attributes(global) subroutine kick_drift_part_warp_kernel(xp_d, vp_d, levelp_d, 
 
   ! ------------------------------------------------------------------
   ! Per-lane home cell + fractional position (NO home-cell hash; the kick
-  ! computes positions itself). cell_key is a within-warp comparison key for
-  ! the level-ilevel home cell; key_off cancels in the equality test (uniform
-  ! ilevel) so it is dropped. Invalid lanes carry -1 so they never merge with a
-  ! valid (>= 0) cell. x is kept in registers for the exact coarse fallback.
+  ! computes positions itself). host_ckey = floor(x) is the level-ilevel cell
+  ! index; lanes sharing it gather from the same neighbour cells. x is kept in
+  ! registers for the exact coarse fallback. Invalid lanes keep host_ckey = 0
+  ! (masked out of the uniformity test below by valid_lane).
   ! ------------------------------------------------------------------
   x         = 0.0_dp
   frac      = 0.0_dp
   host_ckey = 0
-  cell_key  = -1_8
   ipart     = 0
   if (valid_lane) then
      ipart = head_idx + slot_global - 1
@@ -1681,9 +1680,6 @@ attributes(global) subroutine kick_drift_part_warp_kernel(xp_d, vp_d, levelp_d, 
         host_ckey(idim) = floor(x(idim))
         frac(idim)      = x(idim) - host_ckey(idim)
      end do
-     cell_key = int(host_ckey(1), kind=8) &
-          &   + int(host_ckey(2), kind=8) * nx_cell &
-          &   + int(host_ckey(3), kind=8) * nx_cell * nx_cell
   endif
 
   ! ------------------------------------------------------------------
@@ -1709,41 +1705,52 @@ attributes(global) subroutine kick_drift_part_warp_kernel(xp_d, vp_d, levelp_d, 
   endif
 
   ! ------------------------------------------------------------------
-  ! Segment heads + per-lane head-lane index for the broadcast.
-  ! is_head: lane 0, or a left-neighbour with a different home cell.
-  ! head_lane: inclusive max-scan of merge(lane, 0, is_head) -- heads carry
-  ! their own lane index, non-heads carry 0, and the running max propagates the
-  ! most-recent head index forward, so every lane learns its segment head.
+  ! Uniformity test: is this whole warp a single home cell with all 32 lanes
+  ! valid? Compare every lane's home cell to lane 0's (3 int4 broadcasts), set a
+  ! 0/1 match flag, then AND-reduce it (min over the warp via the __shfl_down
+  ! tree in warp_reduce_int_sum) and broadcast the verdict from lane 0. Only
+  ! fully-uniform warps take the cooperative path; everything else (cell
+  ! boundaries, the partial last warp) falls back to an independent per-lane
+  ! gather -- exactly the old kick_drift_part_kernel cost, never worse.
   ! ------------------------------------------------------------------
-  prev_key  = __shfl_up(cell_key, 1)
-  is_head   = (lane == 0) .or. (cell_key /= prev_key)
-  head_lane = merge(lane, 0, is_head)
-  do scan_iter = 0, 4
-     scan_offset = ishft(1, scan_iter)            ! 1, 2, 4, 8, 16
-     other_lane  = __shfl_up(head_lane, scan_offset)
-     if (lane >= scan_offset) head_lane = max(head_lane, other_lane)
+  c0x = __shfl(host_ckey(1), 0)
+  c0y = __shfl(host_ckey(2), 0)
+  c0z = __shfl(host_ckey(3), 0)
+  redm = merge(1, 0, valid_lane .and. host_ckey(1) == c0x &
+       &                         .and. host_ckey(2) == c0y &
+       &                         .and. host_ckey(3) == c0z)
+  roff = warpsize / 2
+  do
+     if (roff <= 0) exit
+     redm = min(redm, __shfl_down(redm, roff))
+     roff = roff / 2
   end do
+  redm       = __shfl(redm, 0)
+  is_uniform = (redm == 1)
 
-  ! ------------------------------------------------------------------
-  ! Stencil loop. Per offset: the segment head does the one shared hash_get +
-  ! f_d read, broadcasts (found, fval) to the segment, and every lane weights
-  ! the shared force by its own CIC weight. ok_level is per-lane: a lane needs
-  ! the coarse fallback iff one of ITS non-zero-weight offsets missed (found==0
-  ! is segment-uniform, but which offsets have w>0 is per-lane via frac), which
-  ! reproduces gather_cic_force_part's ok_level exactly.
-  ! ------------------------------------------------------------------
   ff       = 0.0_dp
   ok_level = valid_lane            ! invalid lanes stay .false. but skip fallback (valid_lane gate)
-  do k = 1, threetondim
-     ox = mod(k - 1, 3) - 1
-     oy = mod((k - 1) / 3, 3) - 1
-     oz = (k - 1) / 9 - 1
 
-     found = 0
-     fval  = 0.0_dp
-     if (is_head .and. valid_lane) then          ! one lookup per segment per offset
+  if (is_uniform) then
+     ! ---------------------------------------------------------------
+     ! Cooperative gather, PARALLELISED across the warp. All 32 lanes share one
+     ! home cell, so the threetondim = 3^ndim distinct neighbour-cell lookups
+     ! are spread one-per-lane (lanes 0..threetondim-1) and run concurrently --
+     ! ~1 hash latency, not threetondim serial latencies on a single head lane
+     ! (the flaw that made the first cooperative version latency-bound). Every
+     ! lane then all-gathers the threetondim results via indexed __shfl and
+     ! weights them by its OWN CIC weight. Control flow through the shuffles is
+     ! warp-uniform (is_uniform is a warp reduction), so all lanes participate.
+     ! ---------------------------------------------------------------
+     my_found = 0
+     my_f     = 0.0_dp
+     if (lane < threetondim) then           ! lanes 0..threetondim-1: one lookup each
+        k = lane + 1
+        ox = mod(k - 1, 3) - 1
+        oy = mod((k - 1) / 3, 3) - 1
+        oz = (k - 1) / 9 - 1
         target_ckey = 0
-        target_ckey(1) = host_ckey(1) + ox
+        target_ckey(1) = host_ckey(1) + ox   ! host_ckey is warp-uniform here
         if (ndim >= 2) target_ckey(2) = host_ckey(2) + oy
         if (ndim >= 3) target_ckey(3) = host_ckey(3) + oz
 
@@ -1774,44 +1781,60 @@ attributes(global) subroutine kick_drift_part_warp_kernel(xp_d, vp_d, levelp_d, 
            ! Skip absent (0) and cache/ghost (igrid > ngridmax) octs: f there is
            ! stale -- same guard as gather_cic_force_part (1436).
            if (igrid /= 0 .and. igrid <= ngridmax) then
-              found = 1
+              my_found = 1
               do idim = 1, ndim
-                 fval(idim) = real(f_d(icell, idim, igrid), kind=8)
+                 my_f(idim) = real(f_d(icell, idim, igrid), kind=8)
               end do
            endif
         endif
      endif
 
-     ! Broadcast the head's lookup to every lane in the segment.
-     found_seg = __shfl(found, head_lane)
-     do idim = 1, ndim
-        ! Indexed __shfl on real(8): __shfl_up(real8) (1147) and indexed
-        ! __shfl(int4) (sibling kernels) are both exercised in this build. If a
-        ! given nvfortran rejects indexed __shfl on real(8), broadcast each
-        ! value as two int4 halves via transfer() (plan risk #2) -- do not cap.
-        fval_seg(idim) = __shfl(fval(idim), head_lane)
-     end do
-
-     if (valid_lane) then
+     ! All-gather: offset k's lookup lives on lane k-1. Every lane reads all
+     ! threetondim results (indexed __shfl) and accumulates the non-zero-weight
+     ! ones with its own weight; ok_level drops if a needed cell was missing.
+     do k = 1, threetondim
+        ox = mod(k - 1, 3) - 1
+        oy = mod((k - 1) / 3, 3) - 1
+        oz = (k - 1) / 9 - 1
+        ! Indexed __shfl: int4 (found) is used in sibling kernels; real(8) (the
+        ! force) shares the generic family with __shfl_up(real8) at 1147. If a
+        ! given nvfortran rejects indexed __shfl on real(8), shuffle each value
+        ! as two int4 halves via transfer() -- do not cap.
+        g_found = __shfl(my_found, k - 1)
+        gf(1)   = __shfl(my_f(1),  k - 1)
+        if (ndim >= 2) gf(2) = __shfl(my_f(2), k - 1)
+        if (ndim >= 3) gf(3) = __shfl(my_f(3), k - 1)
         w = wx(ox+1) * wy(oy+1) * wz(oz+1)
         if (w > 0.0_dp) then
-           if (found_seg == 1) then
+           if (g_found == 1) then
               do idim = 1, ndim
-                 ff(idim) = ff(idim) + w * fval_seg(idim)
+                 ff(idim) = ff(idim) + w * gf(idim)
               end do
            else
               ok_level = .false.        ! a contributing cell is missing -> fallback
            endif
         endif
+     end do
+
+  else
+     ! ---------------------------------------------------------------
+     ! Non-uniform warp (cell boundary or the partial last warp): each lane runs
+     ! its own fine gather independently, in parallel across the warp -- the same
+     ! work the old per-thread kernel does, no sharing but no regression. The
+     ! callee has no warp-collective ops, so this divergent call is safe.
+     ! ---------------------------------------------------------------
+     if (valid_lane) then
+        call gather_cic_force_part(f_d, hash_key_d, hash_val_d, hash_size_d, &
+             & ckey_max_d, key_off_d, box_ckey_min_d, box_ckey_max_d, periodic_d, &
+             & ngridmax, x, ilevel+1, ilevel, ff, ok_level)
      endif
-  end do
+  endif
 
   ! ------------------------------------------------------------------
   ! Coarse fallback, per-lane (rare: refinement / off-rank boundaries). Retry
   ! the gather at ilevel-1 with x/2, exactly as kick_drift_part_kernel does.
-  ! gather_cic_force_part re-zeros ff on entry, so the partial fine ff above is
-  ! discarded just as the host kernel discards it (ff=0 on .not. ok_level). The
-  ! callee has no warp-collective ops, so this divergent call is safe.
+  ! gather_cic_force_part re-zeros ff on entry, so any partial fine ff is
+  ! discarded just as the host kernel discards it (ff=0 on .not. ok_level).
   ! ------------------------------------------------------------------
   if (valid_lane .and. .not. ok_level) then
      do idim = 1, ndim
