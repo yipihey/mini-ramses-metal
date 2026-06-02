@@ -652,110 +652,6 @@ subroutine gpu_sort_part(sim, ilevel)
 
 end subroutine gpu_sort_part
 
-!> Build the per-particle source map consumed by gpu_cic_part.
-!>
-!> One thread per particle. Threads walk sortp(head_idx..head_idx+num_parts-1)
-!> in Hilbert order; for each particle we find the level-ilevel cell that
-!> contains it (cell side dx_loc = boxlen/2**ilevel, exactly as in the host
-!> cic_part), split that cell into its parent oct plus an in-oct child index
-!> (icell), hash the parent oct, and pack the resulting (igrid, icell) pair
-!> into a single 32-bit word in isp_swap(ipart).
-!>
-!> The pack layout (see gpu_runner.cuf) is:
-!>   bits  0..4  : icell  (1..twotondim, i.e. 1..8 in 3D)
-!>   bits  5..31 : igrid  (1-based oct index, up to 2^27)
-!> A hash miss is recorded as the whole-word zero sentinel: real (igrid, icell)
-!> pairs can never produce zero because igrid is 1-based, so combined == 0
-!> unambiguously means "out of domain" and the deposit kernel skips that lane.
-!>
-!> Note on indexing: although the kernel walks particles through sortp, the
-!> output array isp_swap is addressed by the *particle id* ipart, not by the
-!> sorted slot. The Hilbert traversal is only here to warm L1/L2 with the same
-!> xp access pattern the deposit kernel will use a moment later.
-attributes(global) subroutine build_src_part_kernel(xp_d, &
-     & sortp_d, isp_swap_d, &
-     & hash_key_d, hash_val_d, hash_size_d, ckey_max_d, key_off_d, &
-     & skip1, skip2, skip3, dx_loc, ilevel, head_idx, num_parts, leading)
-  integer(kind=4), intent(in), value :: leading
-  real(kind=dp),   device :: xp_d(*)
-  integer(kind=4), device :: sortp_d(*)
-  integer(kind=4), device :: isp_swap_d(*)
-  integer(kind=8), device :: hash_key_d(*)
-  integer(kind=4), device :: hash_val_d(*)
-  integer(kind=4), intent(in), value :: hash_size_d
-  integer(kind=4), device :: ckey_max_d(*)
-  integer(kind=8), device :: key_off_d(*)
-  real(kind=8), intent(in), value :: skip1, skip2, skip3, dx_loc
-  integer(kind=4), intent(in), value :: ilevel, head_idx, num_parts
-
-  integer :: thread_idx, block_idx, idx, ipart, idim, igrid, icell
-  integer(kind=4) :: host_ckey(1:3), father_ckey(1:3), ii(1:3)
-  integer(kind=8) :: nx, offset, key, ix8, iy8, iz8
-  real(kind=8) :: skip(1:3), xs, inv_dx_loc
-
-  ! Map this CUDA thread to a slot in the Hilbert-sorted window.
-  thread_idx = threadIdx%x - 1
-  block_idx  = blockIdx%x  - 1
-
-  idx = thread_idx + block_idx * blockDim%x
-  if (idx >= num_parts) return
-  ! One indirection through sortp -> physical particle index.
-  ipart = sortp_d(head_idx + idx)
-
-  skip(1) = skip1
-  skip(2) = skip2
-  skip(3) = skip3
-  inv_dx_loc = 1.0_dp / dx_loc
-
-  ! 1) Particle Cartesian key at the deposit level (level ilevel).
-  !    dx_loc = boxlen / 2**ilevel is the deposit CELL side (the host's
-  !    "mesh spacing at level ilevel"); the parent oct spans 2*dx_loc. The
-  !    skip vector recentres the box on this rank's tile, and floor() picks
-  !    the level-ilevel cell index in each dimension.
-  host_ckey = 0
-  do idim = 1, ndim
-     xs = (xp_d(ipart + (idim-1)*leading) + skip(idim)) * inv_dx_loc
-     host_ckey(idim) = floor(xs)
-  end do
-
-  ! 2) Split the level-ilevel cell key into (parent oct key, in-oct cell
-  !    index 1..twotondim). father_ckey is the integer-divide by 2 (the oct
-  !    ckey is one level coarser in resolution); ii(idim) in {0, 1} is the
-  !    corresponding 0/1 bit per axis, which is exactly the in-oct offset
-  !    along that axis.
-  father_ckey = host_ckey / 2
-  ii = host_ckey - 2 * father_ckey
-  icell = 1
-  do idim = 1, ndim
-     icell = icell + ii(idim) * (2**(idim-1))
-  end do
-
-  ! 3) Hash the parent oct. hash_get returns 0 on a miss, meaning the parent
-  !    is not materialised on this rank (off-rank or ghost-only). We carry the
-  !    miss forward as the zero source-map sentinel so the deposit kernel can
-  !    mask the lane out cheaply without a second hash lookup.
-  ix8 = int(father_ckey(1), kind=8)
-  iy8 = int(father_ckey(2), kind=8)
-  iz8 = int(father_ckey(3), kind=8)
-  nx  = int(ckey_max_d(ilevel), kind=8)
-  offset = key_off_d(ilevel)
-  key = offset + ix8 + iy8*nx + iz8*nx*nx
-  igrid = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
-
-  if (igrid == 0) then
-     isp_swap_d(ipart) = 0   ! out-of-domain sentinel
-     return
-  endif
-
-  ! 4) Pack (igrid, icell) -> one 32-bit word.
-  !    ishft(igrid, 5) shifts igrid up by 5 bits leaving zeros below; icell
-  !    occupies exactly those 5 bits (icell <= twotondim <= 8 < 32), so
-  !    ior() merges the two fields without overlap. Decoding (in the deposit
-  !    kernel) is iand(.,31) for icell and ishft(.,-5) for igrid.
-  isp_swap_d(ipart) = ior(ishft(igrid, 5), icell)
-
-end subroutine build_src_part_kernel
-
 !> Multipole reduction over [1, npart]: q(1)=sum(mp), q(idim+1)=sum(mp*xp).
 attributes(global) subroutine multipole_q_kernel(xp_d, mp_d, multipole_q_d, &
      & head_idx, num_parts, leading)
@@ -839,10 +735,10 @@ end subroutine gpu_newdt_part_kernel
 !> source cell appear in contiguous runs of sortp. The kernel is launched at
 !> 256 threads/block = 8 warps/block, so each warp owns 32 consecutive slots
 !> of the sorted window. Inside a warp, lanes split into "segments" -- maximal
-!> runs of adjacent lanes whose source-cell key (the packed combined word from
-!> build_src_part_kernel) agrees. A uniform warp is one 32-lane segment; a
-!> warp straddling a cell boundary contains two; OOD/OOB lanes (combined == 0)
-!> cluster into a zero-segment that contributes nothing.
+!> runs of adjacent lanes whose source-cell key (the packed combined word each
+!> lane builds at the top of the kernel) agrees. A uniform warp is one 32-lane
+!> segment; a warp straddling a cell boundary contains two; OOD/OOB lanes
+!> (combined == 0) cluster into a zero-segment that contributes nothing.
 !>
 !> For each of the threetondim = 3^ndim stencil offsets k:
 !>   1) each lane forms its own CIC contribution (mp * w / vol_loc for rho;
@@ -862,16 +758,14 @@ end subroutine gpu_newdt_part_kernel
 !> carrying weight zero. That removes per-lane branching and lets the
 !> zero-weight lanes drop out of the segmented scan silently.
 attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
-     & isp_swap_d, head_idx, num_parts, &
-     & grid_d, hash_key_d, hash_val_d, hash_size_d, ckey_max_d, key_off_d, &
+     & head_idx, num_parts, &
+     & hash_key_d, hash_val_d, hash_size_d, ckey_max_d, key_off_d, &
      & box_ckey_min_d, box_ckey_max_d, periodic_d, &
      & xp_d, mp_d, rho_d, nref_d, &
      & skip1, skip2, skip3, dx_loc, vol_loc, &
      & m_refine_at_level, mass_cut_refine, ilevel, leading)
   integer(kind=4), intent(in), value :: head_idx, num_parts, leading, ilevel
   integer(kind=4), device :: sortp_d(*)
-  integer(kind=4), device :: isp_swap_d(*)
-  type(oct),       device :: grid_d(*)
   integer(kind=8), device :: hash_key_d(*)
   integer(kind=4), device :: hash_val_d(*)
   integer(kind=4), intent(in), value :: hash_size_d
@@ -894,22 +788,12 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
   integer(kind=4) :: combined, prev_combined, next_combined
   integer(kind=4) :: head_acc, other_head, scan_iter, scan_offset
   integer(kind=4) :: src_full_ckey(1:3), target_ckey(1:3), father_ckey(1:3), ii(1:3)
-  integer(kind=4) :: ii_src(1:3), box_min(1:3), box_max(1:3)
+  integer(kind=4) :: box_min(1:3), box_max(1:3)
   integer(kind=8) :: nx, hkey_offset, key, ix8, iy8, iz8
   logical :: valid_lane, in_domain, is_head, is_tail
   real(kind=8) :: my_rho, my_nref, mp_i, other_rho, other_nref
   real(kind=8) :: skip(1:3), xs, frac(1:3)
   real(kind=8) :: wx(0:2), wy(0:2), wz(0:2), w
-
-  ! Per-segment destination-oct hash cache (see the stencil loop below). The
-  ! 3^ndim stencil offsets resolve to at most twotondim distinct parent octs
-  ! in the domain interior, so a small thread-local table lets the tail lane
-  ! hash each oct once and reuse it across offsets.
-  integer(kind=4), parameter :: oct_cache_max = twotondim
-  integer(kind=8) :: oct_cache_key(1:oct_cache_max)
-  integer(kind=4) :: oct_cache_igrid(1:oct_cache_max)
-  integer :: n_oct_cache, c
-  logical :: cache_hit
 
   ! ------------------------------------------------------------------
   ! Lane bookkeeping: map (block, thread) -> (warp, lane, slot_global).
@@ -925,43 +809,73 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
 
   valid_lane = (slot_global <= num_parts)
 
+  skip(1) = skip1
+  skip(2) = skip2
+  skip(3) = skip3
+
+  ! Hash geometry at level ilevel (grid(:) stores the parent octs there).
+  nx          = int(ckey_max_d(ilevel), kind=8)
+  hkey_offset = key_off_d(ilevel)
+
   ! ------------------------------------------------------------------
-  ! Unpack the per-lane source-cell map written by build_src_part_kernel.
-  ! combined == 0 marks an out-of-domain particle (hash miss). OOD lanes
-  ! and out-of-bounds (OOB) tail lanes carry the same zero word and so
-  ! group together as a single zero-segment during boundary detection.
+  ! Per-lane source-cell geometry (fused from the former build_src_part_kernel
+  ! pass). Each lane reads its own particle through sortp -- no isp_swap round
+  ! trip -- and derives everything the deposit needs straight from xp:
+  !   * src_full_ckey = floor((xp+skip)/dx_loc), the level-ilevel source cell;
+  !   * frac, the in-cell fractional position that sets the CIC weights;
+  !   * combined = packed (igrid, icell) of the parent oct, from a single
+  !     hash_get, which both identifies the source cell for segment detection
+  !     and carries the out-of-domain sentinel.
+  ! Folding the build pass in here removes a whole kernel launch plus the
+  ! isp_swap global write/read, and lets us take src_full_ckey directly from
+  ! the position instead of reading back grid(igrid)%ckey. combined == 0 marks
+  ! an out-of-domain particle (hash miss); OOD lanes and out-of-bounds (OOB)
+  ! tail lanes share that zero word and group into one zero-segment.
   ! ------------------------------------------------------------------
   ipart          = 0
   combined       = 0
   icell_src_lane = 0
   igrid_src_lane = 0
+  mp_i           = 0.0_dp
+  frac           = 0.0_dp
+  src_full_ckey  = 0
   if (valid_lane) then
-     ipart    = sortp_d(head_idx + slot_global - 1)
-     combined = isp_swap_d(ipart)
-     if (combined == 0) then
-        valid_lane = .false.
-     else
-        icell_src_lane = iand(combined, 31)    ! low 5 bits = icell
-        igrid_src_lane = ishft(combined, -5)   ! upper 27 bits = igrid
-     endif
-  endif
+     ipart = sortp_d(head_idx + slot_global - 1)
+     mp_i  = mp_d(ipart)
 
-  skip(1) = skip1
-  skip(2) = skip2
-  skip(3) = skip3
-
-  ! ------------------------------------------------------------------
-  ! Per-lane fractional position inside the home cell. Invalid lanes keep
-  ! mp_i = 0 so any weight they later form contributes nothing.
-  ! ------------------------------------------------------------------
-  mp_i = 0.0_dp
-  frac = 0.0_dp
-  if (valid_lane) then
-     mp_i = mp_d(ipart)
+     ! Level-ilevel source cell key and the in-cell fractional position. This
+     ! is the same level-ilevel cell the old build pass found, but taken
+     ! straight from the position rather than rebuilt from grid(igrid)%ckey.
      do idim = 1, ndim
         xs = (xp_d(ipart + (idim-1)*leading) + skip(idim)) / dx_loc
-        frac(idim) = xs - floor(xs)
+        src_full_ckey(idim) = floor(xs)
+        frac(idim) = xs - src_full_ckey(idim)
      end do
+
+     ! Split the source cell into (parent oct ckey, in-oct cell) and hash the
+     ! parent oct -- the same decomposition the deposit uses for destinations.
+     father_ckey = src_full_ckey / 2
+     ii          = src_full_ckey - 2 * father_ckey
+     icell_src_lane = 1
+     do idim = 1, ndim
+        icell_src_lane = icell_src_lane + ii(idim) * (2**(idim-1))
+     end do
+     ix8 = int(father_ckey(1), kind=8)
+     iy8 = int(father_ckey(2), kind=8)
+     iz8 = int(father_ckey(3), kind=8)
+     key = hkey_offset + ix8 + iy8*nx + iz8*nx*nx
+     igrid_src_lane = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
+
+     if (igrid_src_lane == 0) then
+        ! Parent oct not materialised on this rank: drop the lane into the
+        ! zero-segment (matches the old build pass writing the 0 sentinel).
+        valid_lane    = .false.
+        mp_i          = 0.0_dp
+        frac          = 0.0_dp
+        src_full_ckey = 0
+     else
+        combined = ior(ishft(igrid_src_lane, 5), icell_src_lane)
+     endif
   endif
 
   ! ------------------------------------------------------------------
@@ -993,11 +907,11 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
   endif
 
   ! ------------------------------------------------------------------
-  ! Per-level metadata. box_min/box_max bound the local tile at the deposit
+  ! Per-level box bounds. box_min/box_max bound the local tile at the deposit
   ! level (level ilevel) and drive periodic wrap / OOB rejection below. Note
   ! the box arrays store these level-ilevel cell coordinates in slot ilevel+1
-  ! -- an array-indexing convention, not a finer AMR level. The oct hash is
-  ! indexed at ilevel because grid(:) stores the parent octs there.
+  ! -- an array-indexing convention, not a finer AMR level. (nx / hkey_offset
+  ! for the oct hash were set with the source geometry above.)
   ! ------------------------------------------------------------------
   box_min = 0
   box_max = 0
@@ -1005,27 +919,6 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
      box_min(idim) = box_ckey_min_d(idim, ilevel+1)
      box_max(idim) = box_ckey_max_d(idim, ilevel+1)
   end do
-  nx          = int(ckey_max_d(ilevel), kind=8)
-  hkey_offset = key_off_d(ilevel)
-
-  ! ------------------------------------------------------------------
-  ! Reconstruct each lane's full source-cell Cartesian key at level ilevel.
-  ! The packed (igrid, icell) only carries the parent oct's index and the
-  ! in-oct child id; we recover the level-ilevel cell ckey as
-  !   2 * (parent oct ckey) + (in-oct bit per axis).
-  ! Lanes that share `combined` produce the same src_full_ckey, hence the
-  ! same destination at any fixed stencil offset k below.
-  ! ------------------------------------------------------------------
-  src_full_ckey = 0
-  if (valid_lane) then
-     ii_src = 0
-     do idim = 1, ndim
-        ii_src(idim) = mod((icell_src_lane - 1) / (2**(idim-1)), 2)
-     end do
-     do idim = 1, ndim
-        src_full_ckey(idim) = 2 * grid_d(igrid_src_lane)%ckey(idim) + ii_src(idim)
-     end do
-  endif
 
   ! ------------------------------------------------------------------
   ! Segment boundary detection. Adjacent-lane equality of `combined` is
@@ -1047,11 +940,6 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
   ! Per offset: each lane computes its own destination + contribution, the
   ! warp runs a segmented inclusive scan, and each segment's tail emits at
   ! most one atomicAdd into rho (and one into nref, if gated).
-  ! ------------------------------------------------------------------
-  ! Reset the tail lane's destination-oct hash cache once per segment, before
-  ! the offsets are swept. Only tail lanes populate it (they alone hash), but
-  ! resetting unconditionally is harmless for the other lanes.
-  n_oct_cache = 0
   do k = 1, threetondim
      ! Decode the linear index k = 1..27 into mixed-radix-3 offsets.
      ox = mod(k - 1, 3) - 1
@@ -1115,7 +1003,7 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
            endif
         end do
         if (in_domain) then
-           ! Same decomposition as in build_src_part_kernel: pull the parent
+           ! Same decomposition as for the source cell above: pull the parent
            ! oct's ckey and the in-oct child index out of the level-ilevel
            ! target ckey, then hash the parent oct.
            father_ckey = target_ckey / 2
@@ -1128,36 +1016,9 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
            iy8 = int(father_ckey(2), kind=8)
            iz8 = int(father_ckey(3), kind=8)
            key = hkey_offset + ix8 + iy8*nx + iz8*nx*nx
-
-           ! Memoised destination-oct lookup. The 3^ndim offsets sample a
-           ! 3x3x3 block of level-ilevel cells around the source, but
-           ! father_ckey = ckey/2 collapses that block to only a handful of
-           ! distinct parent octs (at most 2 per axis -> twotondim in the
-           ! interior; a few more on a periodic boundary). Rather than re-probe
-           ! the hash for every k, cache each distinct oct key the first time
-           ! it is seen and reuse the stored igrid on later offsets, cutting
-           ! hash_get from threetondim probes per segment to roughly twotondim.
-           ! A cache overflow (rare boundary corners with more than twotondim
-           ! distinct octs) falls back to a direct probe left uncached -- still
-           ! correct, just not memoised.
-           cache_hit = .false.
-           do c = 1, n_oct_cache
-              if (oct_cache_key(c) == key) then
-                 dst_igrid_lane = oct_cache_igrid(c)
-                 cache_hit = .true.
-                 exit
-              endif
-           end do
-           if (.not. cache_hit) then
-              ! hash_get returns 0 if the destination oct is not present on this
-              ! rank, which again suppresses the atomic for this segment.
-              dst_igrid_lane = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
-              if (n_oct_cache < oct_cache_max) then
-                 n_oct_cache = n_oct_cache + 1
-                 oct_cache_key(n_oct_cache)   = key
-                 oct_cache_igrid(n_oct_cache) = dst_igrid_lane
-              endif
-           endif
+           ! hash_get returns 0 if the destination oct is not present on this
+           ! rank, which again suppresses the atomic for this segment.
+           dst_igrid_lane = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
         endif
      endif
 
@@ -1226,11 +1087,11 @@ end subroutine cic_part_warp_kernel
 !>   2. On the coarsest active level only, launch multipole_q_kernel to
 !>      accumulate the global monopole and dipole (q_0 = sum mp, q_alpha =
 !>      sum mp * xp_alpha) over the full particle table.
-!>   3. Launch build_src_part_kernel over sortp(head_idx..head_idx+num_parts-1)
-!>      to hash each particle's parent oct and pack (igrid, icell) into
-!>      isp_swap.
-!>   4. Launch cic_part_warp_kernel over the same window to deposit into
-!>      rho and nref via a per-warp segmented Hillis-Steele scan.
+!>   3. Launch cic_part_warp_kernel over sortp(head_idx..head_idx+num_parts-1)
+!>      to deposit into rho and nref via a per-warp segmented Hillis-Steele
+!>      scan. Each lane builds its own source map (parent-oct hash + packed
+!>      (igrid, icell)) from xp at the top of the kernel -- the former separate
+!>      build_src_part_kernel pass and its isp_swap source map are folded in.
 !>
 !> Preconditions:
 !>   - gpu_sort_part has just run at depth ilevel, so sortp groups particles
@@ -1304,29 +1165,19 @@ subroutine gpu_cic_part(sim, ilevel, rtype)
   skip2 = sim%m%skip(2)
   skip3 = sim%m%skip(3)
 
-  ! Pass 1: build the per-particle source map in Hilbert order. The deposit
-  ! pass will walk the same sorted range, using contiguous same-source runs
-  ! as warp segments to coalesce contributions into a single atomicAdd per
-  ! segment. 128 threads/block here -- moderate occupancy, no warp reduction
-  ! needed inside this pass.
-  num_threads = 128
-  num_blocks  = (num_parts + num_threads - 1) / num_threads
-  call nvtxStartRange("gpu_cic_part:build_src", color=4)
-  call build_src_part_kernel<<<num_blocks, num_threads>>>(xp, &
-       & sortp, isp_swap, &
-       & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
-       & skip1, skip2, skip3, dx_loc, ilevel, head_idx, num_parts, sim%r%npartmax)
-  call nvtxEndRange()
-
-  ! Pass 2: warp-segmented CIC deposit. 256 threads/block = 8 warps/block;
+  ! Single-pass warp-segmented CIC deposit. 256 threads/block = 8 warps/block;
   ! each warp owns 32 contiguous slots of sortp and emits roughly one
-  ! atomicAdd per stencil offset (more on cell boundaries).
+  ! atomicAdd per stencil offset (more on cell boundaries). The former build
+  ! pass (which hashed each particle's parent oct into the isp_swap source map)
+  ! is now folded into this kernel: every lane derives its source cell, frac
+  ! position, and packed (igrid, icell) directly from xp, so no isp_swap
+  ! write/read round trip or grid(igrid)%ckey read is needed.
   deposit_block_size = 256
   deposit_num_blocks = (num_parts + deposit_block_size - 1) / deposit_block_size
   call nvtxStartRange("gpu_cic_part:deposit", color=4)
   call cic_part_warp_kernel<<<deposit_num_blocks, deposit_block_size>>>(&
-       & sortp, isp_swap, head_idx, num_parts, &
-       & grid, hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
+       & sortp, head_idx, num_parts, &
+       & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
        & box_ckey_min, box_ckey_max, periodic, &
        & xp, mp, rho, nref, &
        & skip1, skip2, skip3, dx_loc, vol_loc, &
