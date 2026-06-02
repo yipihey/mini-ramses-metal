@@ -845,12 +845,13 @@ end subroutine gpu_newdt_part_kernel
 !> cluster into a zero-segment that contributes nothing.
 !>
 !> For each of the threetondim = 3^ndim stencil offsets k:
-!>   1) each lane independently hashes its destination cell and forms its CIC
-!>      contribution (mp * w / vol_loc for rho; w for nref);
+!>   1) each lane forms its own CIC contribution (mp * w / vol_loc for rho;
+!>      w for nref) from its fractional position -- no hashing here;
 !>   2) an inclusive segmented Hillis-Steele scan along the warp accumulates
 !>      each segment's contributions so the tail lane holds the segment sum;
-!>   3) the tail lane emits one atomicAdd per segment with non-zero, in-domain
-!>      contribution.
+!>   3) the tail lane hashes the segment's (shared) destination cell -- once,
+!>      not once per lane -- and emits one atomicAdd per segment with
+!>      non-zero, in-domain contribution.
 !>
 !> The result: one atomic per (warp, segment, stencil-offset) -- typically
 !> just one atomic per warp per offset, because most warps are uniform.
@@ -1043,25 +1044,52 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
      oy = mod((k - 1) / 3, 3) - 1
      oz = (k - 1) / 9 - 1
 
-     ! Per-lane destination and contribution for this stencil offset.
-     ! Lanes in the same source segment share src_full_ckey, hence (at
-     ! fixed k) share dst_igrid_lane and dst_icell_lane -- so the tail lane
-     ! carries the segment's atomic target after the scan below.
-     dst_igrid_lane = 0
-     dst_icell_lane = 0
+     ! Per-lane CIC contribution for this stencil offset. The weight depends
+     ! on each lane's own fractional position, so every valid lane computes
+     ! it; invalid lanes keep my_rho = my_nref = 0 and drop out of the scan.
+     ! No destination gate here: if a lane's segment lands on an off-rank or
+     ! out-of-domain cell, its accumulated contribution is simply never
+     ! emitted, because emission is gated on the (segment-uniform) tail lookup.
      my_rho  = 0d0
      my_nref = 0d0
      if (valid_lane) then
+        ! CIC weight = product of 1D weights at offset (ox, oy, oz). Only
+        ! 2**ndim of the 3**ndim offsets are non-zero for a given particle
+        ! (8 of 27 in 3D); zero-weight lanes join the scan contributing nothing.
+        w = wx(ox+1) * wy(oy+1) * wz(oz+1)
+        if (w > 0d0) then
+           my_rho = mp_i * w / vol_loc
+           if (m_refine_at_level >= 0d0) then
+              ! nref follows the host refinement gate: either all masses count
+              ! (mass_cut_refine <= 0), or only particles below mass_cut_refine.
+              if (mass_cut_refine > 0d0) then
+                 if (mp_i < mass_cut_refine) then
+                    my_nref = w
+                 endif
+              else
+                 my_nref = w
+              endif
+           endif
+        endif
+     endif
+
+     ! Destination cell. Lanes in one segment share the source cell, so at a
+     ! fixed offset k they all map to the SAME destination oct -- the hash is
+     ! segment-uniform. Only the tail lane emits the segment's atomic, so only
+     ! the tail needs the destination: hash on the tail alone and skip the
+     ! expensive hash_get on the segment's other (up to warpsize-1) lanes.
+     dst_igrid_lane = 0
+     dst_icell_lane = 0
+     if (is_tail .and. valid_lane) then
         ! Target cell key at level ilevel = source key + stencil offset.
         target_ckey = 0
         target_ckey(1) = src_full_ckey(1) + ox
         if (ndim >= 2) target_ckey(2) = src_full_ckey(2) + oy
         if (ndim >= 3) target_ckey(3) = src_full_ckey(3) + oz
 
-        ! Boundary handling. Periodic axes wrap within the deposit-level box.
-        ! Non-periodic out-of-bounds lanes skip the lookup (in_domain=false)
-        ! and leave dst_igrid_lane = 0, which suppresses the tail atomic
-        ! later via the dst_igrid_lane /= 0 guard.
+        ! Boundary handling. Periodic axes wrap within the deposit-level box;
+        ! a non-periodic out-of-bounds target leaves dst_igrid_lane = 0, which
+        ! suppresses the atomic via the dst_igrid_lane /= 0 guard below.
         in_domain = .true.
         do idim = 1, ndim
            if (periodic_d(idim)) then
@@ -1087,31 +1115,8 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
            iz8 = int(father_ckey(3), kind=8)
            key = hkey_offset + ix8 + iy8*nx + iz8*nx*nx
            ! hash_get returns 0 if the destination oct is not present on this
-           ! rank, which again suppresses the tail atomic for this lane.
+           ! rank, which again suppresses the atomic for this segment.
            dst_igrid_lane = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
-        endif
-        if (dst_igrid_lane /= 0) then
-           ! CIC weight = product of 1D weights at offset (ox, oy, oz).
-           ! Only 2**ndim of the 3**ndim offsets are non-zero for a given
-           ! particle (8 of 27 in 3D); the rest are "wrong-side" cells of the
-           ! 3-cell stencil whose lanes join the segmented scan with zero
-           ! contribution and drop out.
-           w = wx(ox+1) * wy(oy+1) * wz(oz+1)
-           if (w > 0d0) then
-              my_rho = mp_i * w / vol_loc
-              if (m_refine_at_level >= 0d0) then
-                 ! nref follows the host refinement gate: either all masses
-                 ! count (mass_cut_refine <= 0), or only particles below
-                 ! mass_cut_refine count toward the refinement criterion.
-                 if (mass_cut_refine > 0d0) then
-                    if (mp_i < mass_cut_refine) then
-                       my_nref = w
-                    endif
-                 else
-                    my_nref = w
-                 endif
-              endif
-           endif
         endif
      endif
 
