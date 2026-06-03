@@ -1,6 +1,6 @@
 !> DM particle CUDA kernels.
 module part_device
-  use amr_parameters, only: ndim, twotondim, threetondim, dp, i8b
+  use amr_parameters, only: ndim, twotondim, threetondim, dp, i8b, MAXLEVEL
   use oct_commons, only: oct
   use gpu_utils
   use cudafor
@@ -24,6 +24,12 @@ module part_device
   private :: warp_reduce_sum,     block_reduce_sum
   private :: warp_reduce_min,     block_reduce_min
   private :: warp_reduce_max,     block_reduce_max
+
+  ! Persistent device copies of the per-level time steps, consumed by
+  ! kick_drift_part_kernel. Kept at module scope (one static allocation of
+  ! MAXLEVEL doubles) so gpu_kick_drift_part does not allocate/free a device
+  ! array on every call -- only the H2D refresh in the dispatcher remains.
+  real(kind=8), device, dimension(1:MAXLEVEL) :: dtnew_part_d, dtold_part_d
 
 contains
 
@@ -2189,7 +2195,6 @@ end subroutine kick_drift_part_kernel
 
 subroutine gpu_kick_drift_part(sim, ilevel, action_part)
   use nvtx
-  use amr_parameters, only: MAXLEVEL
   use ramses_commons, only: ramses_t
   type(ramses_t), intent(inout) :: sim
   integer, intent(in) :: ilevel
@@ -2202,14 +2207,13 @@ subroutine gpu_kick_drift_part(sim, ilevel, action_part)
   real(kind=8) :: gp1, gp2, gp3, gp4, gp5, q1, q2, q3, q4
   integer(kind=4) :: gravity_type
   logical :: any_nonperiodic
-  real(kind=8), device, dimension(1:MAXLEVEL) :: dtnew_part_d, dtold_part_d
 
   dx_loc = sim%r%boxlen/2**ilevel
   skip1 = sim%m%skip(1)
   skip2 = sim%m%skip(2)
   skip3 = sim%m%skip(3)
 
-  ! Host to device
+  ! Refresh the persistent (module-scope) device time-step arrays for this step.
   dtnew_part_d = sim%g%dtnew
   dtold_part_d = sim%g%dtold
 
