@@ -668,9 +668,6 @@ end subroutine gpu_sort_part
 !> The pack layout is:
 !>   bits  0..4  : icell  (1..twotondim, i.e. 1..8 in 3D)
 !>   bits  5..63   : igrid  (1-based oct index, up to ngridmax ~ 2^59)
-!> The word is 64-bit because ishft(igrid,5) for igrid ~ 2^27 reaches 2^32 and
-!> would overflow a 32-bit signed integer, so the map is carried in idp_swap
-!> (integer(kind=8)), not the 32-bit isp_swap scratch.
 !> A hash miss is recorded as the whole-word zero sentinel: real (igrid, icell)
 !> pairs can never produce zero because igrid is 1-based, so combined == 0
 !> unambiguously means "out of domain" and the deposit kernel skips that lane.
@@ -941,7 +938,7 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
         valid_lane = .false.
      else
         icell_src_lane = int(iand(combined, 31_8))    ! low 5 bits = icell
-        igrid_src_lane = int(ishft(combined, -5))     ! upper bits = igrid (64-bit packed)
+        igrid_src_lane = int(ishft(combined, -5))     ! upper 59 bits = igrid
      endif
   endif
 
@@ -1271,11 +1268,6 @@ subroutine gpu_cic_part(sim, ilevel, rtype)
   num_threads = 128
   num_blocks  = (num_parts + num_threads - 1) / num_threads
   call nvtxStartRange("gpu_cic_part", color=4) ! purple
-  ! The source map packs (igrid, icell) per particle. igrid can reach
-  ! ngridmax (~2**27 on a 512^3 base grid), so the packed word must be 64-bit
-  ! -- it is carried in idp_swap (integer(kind=8)), NOT the 32-bit isp_swap.
-  ! idp_swap is free here: gpu_sort_part (run earlier in the density path)
-  ! only used it for Hilbert keys, which are no longer needed.
   call build_src_part_kernel<<<num_blocks, num_threads>>>(xp, &
        & sortp, idp_swap, &
        & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
