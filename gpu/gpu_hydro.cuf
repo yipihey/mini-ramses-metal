@@ -1794,14 +1794,15 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine cmpdt_kernel(grid, uold, f, constant_gravity, head_idx, num_octs, mass, ekin, eint, emag, dt, dx, gamma, courant_factor)
+  attributes(global) subroutine cmpdt_kernel(grid, uold, f, constant_gravity, &
+      & head_idx, num_octs, data_out, dx, gamma, courant_factor)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
-    real(kind=8), device, intent(inout) :: mass, ekin, eint, emag, dt
+    real(kind=8), device :: data_out(*) !mass, ekin, eint, emag, dt
     real(kind=dp), value :: dx, gamma, courant_factor
 
     type(primitive_t) :: primitive
@@ -1887,11 +1888,11 @@ contains
     emag_loc = block_reduce_sum(emag_loc)
 
     if(tid == 0)then
-       info = atomicmin(dt,dt_loc)
-       info = atomicadd(mass,mass_loc)
-       info = atomicadd(ekin,ekin_loc)
-       info = atomicadd(eint,eint_loc)
-       info = atomicadd(emag,emag_loc)
+       info = atomicadd(data_out(1),mass_loc)
+       info = atomicadd(data_out(2),ekin_loc)
+       info = atomicadd(data_out(3),eint_loc)
+       info = atomicadd(data_out(4),emag_loc)
+       info = atomicmin(data_out(5),dt_loc)
     endif
 
   end subroutine cmpdt_kernel
