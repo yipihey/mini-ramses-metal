@@ -512,6 +512,8 @@ subroutine init_amr(r,g,m,type)
      do ilevel=2,r%nlevelmax+1
         m%key_off(ilevel)=m%key_off(ilevel-1)+m%hkey_max(1,ilevel-1)
      end do
+     ! Transfer debug parameter to host global
+     gpu_debug = r%debug
      ! Allocate and transfer bounding box to device
      allocate(ckey_max(1:r%nlevelmax+1))
      allocate(key_off(1:r%nlevelmax+1))
