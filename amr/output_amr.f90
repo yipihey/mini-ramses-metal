@@ -200,7 +200,7 @@ subroutine m_dump_all(pst,write_bkp_file)
      end if
 
      ttend = mdl_wtime(mdl)
-     print '(A,F14.7)',' Time elapsed writing to disk:',ttend-ttstart
+     print '(A,F0.7)',' Time elapsed writing to disk: ',ttend-ttstart
      
   end if
 
