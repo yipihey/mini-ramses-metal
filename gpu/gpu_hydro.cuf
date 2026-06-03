@@ -2284,7 +2284,7 @@ contains
     real(dp), value :: Uin(nvar), dU(nvar), igam, invD, Ekin, div_v, hdx, dtdx, idx
     real(dp) :: c_max, SL, SR, iSRL, SRL, pxL, pxR, pyL, pyR, pzL, pzR, eneL, eneR
     real(dp) :: fluxL_rho, fluxR_rho, fluxL_px, fluxR_px, fluxL_py, fluxR_py, fluxL_pz, fluxR_pz, fluxL_ene, fluxR_ene
-    real(dp) :: rhoL, rhoR, uL, uR, vL, vR, wL, wR, pL, pR, d_minus, d_plus, d_center, slp
+    real(dp) :: rhoL, rhoR, uL, uR, vL, vR, wL, wR, pL, pR, slp
 
     thread_idx = threadIdx%x - 1       ! Thread index in x dimension (0 to blockDim%x-1)
     block_idx = blockIdx%x - 1         ! Block index in x dimension (0 to num_subgrids-1)
@@ -2336,25 +2336,13 @@ contains
        if (ix >= 2 .and. ix <= m+3 .and. iy >= 2 .and. iy <= m+3) then
           do ivar = 1, nvar
              ! X direction
-             d_minus = q_storage(ix,iy,ivar,ic) - q_storage(ix-1,iy,ivar,ic)
-             d_plus = q_storage(ix+1,iy,ivar,ic) - q_storage(ix,iy,ivar,ic)
-             d_center = 0.5_dp * (d_plus + d_minus)
-             slp = sign(1.0_dp, d_center) * min(abs(d_center), min(abs(2.0_dp * d_minus), abs(2.0_dp * d_plus))) * idx
-             qds(ix,iy,ivar,1) = merge(slp, 0.0_dp, (d_center * d_minus > 0.0_dp .and. d_center * d_plus > 0.0_dp))
+             qds(ix,iy,ivar,1) = slope_moncen(q_storage(ix-1,iy,ivar,ic), q_storage(ix,iy,ivar,ic), q_storage(ix+1,iy,ivar,ic), slope) * idx
 
              ! Y direction
-             d_minus = q_storage(ix,iy,ivar,ic) - q_storage(ix,iy-1,ivar,ic)
-             d_plus  = q_storage(ix,iy+1,ivar,ic) - q_storage(ix,iy,ivar,ic)
-             d_center = 0.5_dp * (d_plus + d_minus)
-             slp = sign(1.0_dp, d_center) * min(abs(d_center), min(abs(2.0_dp * d_minus), abs(2.0_dp * d_plus))) * idx
-             qds(ix,iy,ivar,2) = merge(slp, 0.0_dp, (d_center * d_minus > 0.0_dp .and. d_center * d_plus > 0.0_dp))
+             qds(ix,iy,ivar,2) = slope_moncen(q_storage(ix,iy-1,ivar,ic), q_storage(ix,iy,ivar,ic), q_storage(ix,iy+1,ivar,ic), slope) * idx
 
              ! Z direction
-             d_minus = q_storage(ix,iy,ivar,ic) - q_storage(ix,iy,ivar,im)
-             d_plus  = q_storage(ix,iy,ivar,ip) - q_storage(ix,iy,ivar,ic)
-             d_center = 0.5_dp * (d_plus + d_minus)
-             slp = sign(1.0_dp, d_center) * min(abs(d_center), min(abs(2.0_dp * d_minus), abs(2.0_dp * d_plus))) * idx
-             qds(ix,iy,ivar,3) = merge(slp, 0.0_dp, (d_center * d_minus > 0.0_dp .and. d_center * d_plus > 0.0_dp))
+             qds(ix,iy,ivar,3) = slope_moncen(q_storage(ix,iy,ivar,im), q_storage(ix,iy,ivar,ic), q_storage(ix,iy,ivar,ip), slope) * idx
           end do
         ! FIXME, other slopes ideally inlined, and at the very least cleaned up to lessen register pressure and branches
         ! FIXME see how this is done in the code above
