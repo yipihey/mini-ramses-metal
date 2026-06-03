@@ -215,6 +215,12 @@ subroutine init_amr(r,g,m,type)
      uold=0d0
      unew=0d0
 #endif
+#ifdef MHD
+     allocate(bold(1:twotondim,1:6,1:m%ngridmax+m%ncachemax))
+     allocate(bnew(1:twotondim,1:6,1:m%ngridmax+m%ncachemax))
+     bold=0d0
+     bnew=0d0
+#endif
 #ifdef GRAV
      allocate(rho(1:twotondim,1:m%ngridmax+m%ncachemax))
      allocate(phi(1:twotondim,1:m%ngridmax+m%ncachemax))

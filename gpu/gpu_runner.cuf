@@ -25,6 +25,9 @@ module gpu_runner
   !> Arrays to hold the hydro variables on the device
   real(kind=dp), device, allocatable, dimension(:,:,:) :: uold, unew
 
+  !> Arrays to hold the face-centred B field on the device (MHD)
+  real(kind=dp), device, allocatable, dimension(:,:,:) :: bold, bnew
+
   !> Arrays to hold the gravity variables on the device
   real(kind=dp), device, allocatable, dimension(:,:) :: phi, rho, nref, phi_old
   real(kind=dp), device, allocatable, dimension(:,:,:) :: f
@@ -445,8 +448,8 @@ contains
     num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
     if (num_octs > 0) then
        call refine_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(grid, flag1, &
-            & uold, f, phi, phi_old, &
-            & ifree_d, head_idx, num_octs)
+            & uold, bold, f, phi, phi_old, &
+            & ifree_d, head_idx, num_octs, sim%r%mhd)
     endif
 
     ! Copy back to host new free memory pointer ifree
@@ -637,6 +640,11 @@ contains
             & swap_global, head_idx, num_octs)
        info = cudaMemcpy(uold(1,1,head_idx), unew(1,1,head_idx), twotondim*nvar*num_octs)
 #endif
+       if (sim%r%mhd) then
+          call sort_gather_mhd<<<num_blocks_2, dim3(threadsX_per_block,threadsY_per_block,1)>>>(bnew, bold, &
+               & swap_global, head_idx, num_octs)
+          info = cudaMemcpy(bold(1,1,head_idx), bnew(1,1,head_idx), twotondim*6*num_octs)
+       endif
 #ifdef GRAV
 #if defined(FUSE_SCATTER_GATHER)
        call sort_gather_scatter_force_phi<<<num_blocks, num_threads>>>(f, phi, phi_old, nref, swap_global, head_idx, num_octs)
@@ -719,9 +727,9 @@ contains
              ! Increment ifree_cache on device
 #if defined(FUSE_CACHE)
              call make_cache_insert_ghost_octs<<<num_blocks, num_threads>>>(grid, flag1, &
-                  & uold, f, phi, phi_old, swap_local, prefix_sum, father, nbor, hash_key, &
+                  & uold, bold, f, phi, phi_old, swap_local, prefix_sum, father, nbor, hash_key, &
                   & hash_val, sim%m%hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, &
-                  & periodic, sim%m%ngridmax, ifree_cache_d, ind, head_idx, num_subgrids)
+                  & periodic, sim%m%ngridmax, ifree_cache_d, ind, head_idx, num_subgrids, sim%r%mhd)
 #else
 #if defined(CUB_SCAN)
              call get_total_sum(prefix_sum, head_idx, num_subgrids, new_noct_d)
@@ -730,9 +738,9 @@ contains
                   & head_idx, num_subgrids)
 
              call make_cache_octs<<<num_blocks, num_threads>>>(grid, flag1, &
-                  & uold, f, phi, phi_old, swap_local, father, nbor, &
+                  & uold, bold, f, phi, phi_old, swap_local, father, nbor, &
                   & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-                  & sim%m%ngridmax, ifree_cache_d, new_noct_d, ind)
+                  & sim%m%ngridmax, ifree_cache_d, new_noct_d, ind, sim%r%mhd)
 
              call insert_hash_cache<<<num_blocks, num_threads>>>(grid, hash_key, hash_val, sim%m%hash_size, &
                   & ckey_max, key_off, sim%m%ngridmax, ifree_cache_d, new_noct_d)

@@ -12,18 +12,20 @@ contains
   include 'gpu_hilbert.cuf'
 
   ! =========================================================================
-  attributes(device) subroutine make_new_oct(grid, flag1, uold, f, phi, phi_old, ifree, oct_idx, cell_idx)
+  attributes(device) subroutine make_new_oct(grid, flag1, uold, bold, f, phi, phi_old, ifree, oct_idx, cell_idx, mhd)
     use amr_parameters, only: ndim
     type(oct), device :: grid(*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: phi(1:twotondim,*)
     real(kind=dp), device :: phi_old(1:twotondim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: flag1(1:twotondim,*)
     integer, device :: ifree
     integer, value :: oct_idx, cell_idx
+    logical, value :: mhd
 
-    integer(kind=4) :: i, j, k, ind, child_idx, ilevel
+    integer(kind=4) :: i, j, k, ind, child_idx, ilevel, ib
     integer(kind=4), dimension(1:ndim) :: ckey
     integer(kind=8) :: hkey
 
@@ -64,6 +66,15 @@ contains
     end do
 #endif
 
+    if (mhd) then
+       ! TODO: replace with interpol_mhd-equivalent (Stage D4)
+       do ind = 1, twotondim
+          do ib = 1, 6
+             bold(ind,ib,child_idx) = bold(cell_idx,ib,oct_idx)
+          end do
+       end do
+    endif
+
 #ifdef GRAV
       ! Straight injection for gravity variables
     do ind = 1, twotondim
@@ -79,16 +90,18 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine refine_kernel(grid, flag1, uold, f, phi, phi_old, ifree, head_idx, num_octs)
+  attributes(global) subroutine refine_kernel(grid, flag1, uold, bold, f, phi, phi_old, ifree, head_idx, num_octs, mhd)
     type(oct), device :: grid(*)
     integer, device :: flag1(1:twotondim,*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: phi(1:twotondim,*)
     real(kind=dp), device :: phi_old(1:twotondim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer, device :: ifree
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
+    logical, value :: mhd
 
     integer :: block_idx, oct_idx, cell_idx
     logical :: flagged, refined
@@ -109,7 +122,7 @@ contains
 
     ! Create new oct
     if (flagged .and. .not. refined) then
-       call make_new_oct(grid, flag1, uold, f, phi, phi_old, ifree, oct_idx, cell_idx)
+       call make_new_oct(grid, flag1, uold, bold, f, phi, phi_old, ifree, oct_idx, cell_idx, mhd)
        grid(oct_idx)%refined(cell_idx) = .true.
     endif
 
@@ -847,6 +860,50 @@ contains
   ! =========================================================================
 
   ! =========================================================================
+  attributes(global) subroutine sort_gather_mhd(bnew, bold, swap_global, head_idx, num_octs)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
+    integer(kind=4), device :: swap_global(*)
+    integer(kind=4), intent(in), value :: head_idx
+    integer(kind=4), intent(in), value :: num_octs
+
+    call sort_gather_mhd_impl(bnew, bold, swap_global, head_idx, num_octs)
+
+  end subroutine sort_gather_mhd
+
+  ! =========================================================================
+  attributes(device) subroutine sort_gather_mhd_impl(bnew, bold, swap_global, head_idx, num_octs)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
+    integer(kind=4), device :: swap_global(*)
+    integer(kind=4), intent(in), value :: head_idx
+    integer(kind=4), intent(in), value :: num_octs
+
+    integer :: oct_idx, cell_idx, block_idx, old_oct_idx, ib
+
+    ! Compute block idx
+    block_idx = blockIdx%x - 1
+
+    ! Compute oct idx
+    oct_idx = block_idx * blockDim%y + threadIdx%y - 1
+    if (oct_idx >= num_octs) return
+    oct_idx = head_idx + oct_idx
+
+    ! Compute cell idx
+    cell_idx = threadIdx%x
+
+    ! Update the global swap table
+    old_oct_idx = swap_global(oct_idx)
+
+    ! Gather bold into bnew
+    do ib = 1, 6
+       bnew(cell_idx, ib, oct_idx) = bold(cell_idx, ib, old_oct_idx)
+    end do
+
+  end subroutine sort_gather_mhd_impl
+  ! =========================================================================
+
+  ! =========================================================================
   attributes(global) subroutine sort_scatter_hydro(uold, unew, head_idx, num_octs)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
@@ -1316,10 +1373,10 @@ contains
 
   ! =========================================================================
   attributes(grid_global) subroutine make_cache_insert_ghost_octs(grid, flag1, &
-       & uold, f, phi, phi_old, swap_local, prefix_sum, father, nbor, hash_key, &
+       & uold, bold, f, phi, phi_old, swap_local, prefix_sum, father, nbor, hash_key, &
        & hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, &
        & periodic, ngridmax, ifree_cache, input_ind, head_idx, &
-       & num_subgrids)
+       & num_subgrids, mhd)
 
     use cooperative_groups
 
@@ -1329,6 +1386,7 @@ contains
     real(kind=dp), device :: phi(1:twotondim,*)
     real(kind=dp), device :: phi_old(1:twotondim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: flag1(1:twotondim,*)
     integer(kind=4), device :: swap_local(*)
     integer(kind=4), device :: prefix_sum(*)
@@ -1347,6 +1405,7 @@ contains
     integer(kind=4), intent(in), value :: input_ind
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_subgrids
+    logical, value :: mhd
     integer(kind=4) :: num_octs
 
     type(grid_group) :: gg
@@ -1360,9 +1419,9 @@ contains
     call syncthreads(gg)
 
     ! Make new ghost octs in cache
-    call make_cache_octs_impl(grid, flag1, uold, f, phi, phi_old, swap_local, father, nbor, &
+    call make_cache_octs_impl(grid, flag1, uold, bold, f, phi, phi_old, swap_local, father, nbor, &
         & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-        & ngridmax, ifree_cache, num_octs, input_ind)
+        & ngridmax, ifree_cache, num_octs, input_ind, mhd)
     call syncthreads(gg)
 
     ! Insert new octs in hash table
@@ -1379,14 +1438,15 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine make_cache_octs(grid, flag1, uold, f, phi, phi_old, swap_local, father, nbor, &
+  attributes(global) subroutine make_cache_octs(grid, flag1, uold, bold, f, phi, phi_old, swap_local, father, nbor, &
        & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-       & ngridmax, ifree_cache, num_octs, input_ind)
+       & ngridmax, ifree_cache, num_octs, input_ind, mhd)
     type(oct), device :: grid(*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: phi(1:twotondim,*)
     real(kind=dp), device :: phi_old(1:twotondim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: flag1(1:twotondim,*)
     integer(kind=4), device :: swap_local(*)
     integer(kind=4), device :: father(*)
@@ -1402,22 +1462,24 @@ contains
     integer(kind=4), intent(in), value :: hash_size
     integer(kind=4), intent(in), value :: ngridmax
     integer(kind=4), intent(in), value :: input_ind
+    logical, value :: mhd
 
-    call make_cache_octs_impl(grid, flag1, uold, f, phi, phi_old, swap_local, father, nbor, &
+    call make_cache_octs_impl(grid, flag1, uold, bold, f, phi, phi_old, swap_local, father, nbor, &
         & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-        & ngridmax, ifree_cache, num_octs, input_ind)
+        & ngridmax, ifree_cache, num_octs, input_ind, mhd)
 
   end subroutine make_cache_octs
 
   ! =========================================================================
-  attributes(device) subroutine make_cache_octs_impl(grid, flag1, uold, f, phi, phi_old, swap_local, father, nbor, &
+  attributes(device) subroutine make_cache_octs_impl(grid, flag1, uold, bold, f, phi, phi_old, swap_local, father, nbor, &
        & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-       & ngridmax, ifree_cache, num_octs, input_ind)
+       & ngridmax, ifree_cache, num_octs, input_ind, mhd)
     type(oct), device :: grid(*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: phi(1:twotondim,*)
     real(kind=dp), device :: phi_old(1:twotondim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: flag1(1:twotondim,*)
     integer(kind=4), device :: swap_local(*)
     integer(kind=4), device :: father(*)
@@ -1433,10 +1495,11 @@ contains
     integer(kind=4), intent(in), value :: hash_size
     integer(kind=4), intent(in), value :: ngridmax
     integer(kind=4), intent(in), value :: input_ind
+    logical, value :: mhd
 
     integer(kind=8) :: hkey, parent_key, offset, ix, iy, iz, nx
     integer :: oct_idx, subgrid_idx, thread_idx, block_idx, cache_idx, parent_idx, cell_idx
-    integer :: ind, i, j, k, ilevel, idim
+    integer :: ind, i, j, k, ilevel, idim, ib
     integer, dimension(1:ndim) :: ckey
 
     ! Compute thread and block idx
@@ -1521,6 +1584,15 @@ contains
        uold(ind,5,cache_idx) = uold(cell_idx,5,parent_idx)
     end do
 #endif
+
+    if (mhd) then
+       ! TODO: replace with interpol_mhd-equivalent (Stage D4)
+       do ind = 1, twotondim
+          do ib = 1, 6
+             bold(ind,ib,cache_idx) = bold(cell_idx,ib,parent_idx)
+          end do
+       end do
+    endif
 
 #ifdef GRAV
     ! Straight injection for gravity variables

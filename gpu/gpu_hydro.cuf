@@ -49,6 +49,91 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: pressure
   end type subgrid_2x2x3cell_primitive
 
+  ! ==========================================================================
+  ! MHD shared-memory subgrid types (Stage B1)
+  !
+  ! These mirror the hydro subgrid types but hold the MHD-specific buffers that
+  ! the (future) fused mhd_integrator_kernel needs in shared memory. All sizes
+  ! derive from `nsubgrid` (compile-time, currently 1), exactly like the hydro
+  ! subgrids. Anisotropic face/edge buffers carry the extra "+1" only along the
+  ! relevant normal direction (mirroring the anisotropic interface types above)
+  ! to keep the shared-memory footprint as small as possible. They are currently
+  ! unused; the MHD integrator wires them in later stages.
+  !
+  ! Naming map to the CPU work arrays (hydro_commons.f90 hydro_kernel_t):
+  !   subgrid_face_b_t       <-> h%bf   (face-centred B, +1 in the normal dir)
+  !   subgrid_face_db_t      <-> h%dbf  (2 transverse slopes per face-B)
+  !   subgrid_edge_e_t       <-> h%Ex / h%Ey / h%Ez       (edge-centred E)
+  !   subgrid_emf_t          <-> h%emfx / h%emfy / h%emfz (output EMFs, *dt/dx)
+  !   subgrid_corner_state_t <-> h%qRT / h%qRB / h%qLT / h%qLB (one type, four
+  !                             shared instances, like the hydro left/right
+  !                             interface arrays reuse one type)
+  ! ==========================================================================
+
+  !> @brief
+  !> Face-centred magnetic field subgrid (CPU h%bf). Component `bx` is centred on
+  !> the x-normal faces, so it carries one extra plane in x (0:2*nsubgrid+4);
+  !> likewise `by` in y and `bz` in z. Mirrors ctoprim's bf(i,j,k,1:3) layout
+  !> (umuscl.f90:1762-1802) where each component is +1 only along its normal.
+  type, public :: subgrid_face_b_t
+     real(kind=dp), dimension(0:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: bx
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+4, 0:2*nsubgrid+3) :: by
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+4) :: bz
+  end type subgrid_face_b_t
+
+  !> @brief
+  !> Transverse slopes of the face-centred B field (CPU h%dbf). Same anisotropic
+  !> shape as subgrid_face_b_t, with a trailing 1:2 index for the two transverse
+  !> slope directions of each face-B component (the dbf branch of CPU uslope,
+  !> umuscl.f90:1887+).
+  type, public :: subgrid_face_db_t
+     real(kind=dp), dimension(0:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:2) :: dbx
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+4, 0:2*nsubgrid+3, 1:2) :: dby
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+4, 1:2) :: dbz
+  end type subgrid_face_db_t
+
+  !> @brief
+  !> Edge-centred electric field subgrid (CPU h%Ex/h%Ey/h%Ez). Each component is
+  !> stored over the full cell-subgrid range, matching the CPU allocation over
+  !> (iu1:iu2,ju1:ju2,ku1:ku2) (hydro_commons.f90:95-97).
+  type, public :: subgrid_edge_e_t
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: Ex
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: Ey
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: Ez
+  end type subgrid_edge_e_t
+
+  !> @brief
+  !> Output EMF subgrid (CPU h%emfx/h%emfy/h%emfz). These edge EMFs feed the
+  !> constrained-transport update; they live on the flux ("if/jf/kf") range
+  !> 1:nn+1, i.e. 0:2*nsubgrid here, in all three directions (edge-centred).
+  !> NOTE: they must be stored *dt/dx-scaled in the CT stage (CPU `emfz=Ez*dt/dx`),
+  !> exactly like the hydro fluxes, or B drifts by a constant factor.
+  type, public :: subgrid_emf_t
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid) :: emfx
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid) :: emfy
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid) :: emfz
+  end type subgrid_emf_t
+
+  !> @brief
+  !> Edge corner-state subgrid (CPU h%qRT/h%qRB/h%qLT/h%qLB). One type is defined;
+  !> the integrator declares four shared instances (qRT, qRB, qLT, qLB), mirroring
+  !> how the hydro kernel reuses one interface type for its left/right states.
+  !> Each holds a full cell subgrid of primitive_mhd_t values for each of the 3
+  !> edge orientations (trailing 1:3), matching CPU
+  !> qRT(iu1:iu2,ju1:ju2,ku1:ku2,1:nprim,1:3). Only the 8 primitive_mhd_t
+  !> components are consumed by the 2D EMF solver (cmp_mag_flx, umuscl.f90:1639-1685).
+  !> Stored SoA (named fields) like the other subgrids.
+  type, public :: subgrid_corner_state_t
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: density
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: velocity_x
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: velocity_y
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: velocity_z
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: pressure
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: By
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: Bz
+  end type subgrid_corner_state_t
+
   !> @brief
   !> A simple type for holding the conserved variables of a cell
   type, public :: conserved_t
@@ -68,6 +153,42 @@ module hydro_device
      real(kind=dp) :: velocity_z
      real(kind=dp) :: pressure
   end type primitive_t
+
+  ! ==========================================================================
+  ! MHD cell types (Stage B1). These extend the hydro conserved_t / primitive_t
+  ! with the three *cell-centred* magnetic field components. They use named
+  ! fields (NOT arrays), exactly like conserved_t / primitive_t, to keep device
+  ! register pressure low. The cell-centred B is the 0.5*(B_left + B_right)
+  ! average of the face-centred field (see mhd_conserved_2_primitive below and
+  ! CPU ctoprim, umuscl.f90:1720). Currently unused: they are wired into the MHD
+  ! integrator in later stages (B2+).
+  ! ==========================================================================
+
+  !> @brief
+  !> A simple type for holding the conserved variables of an MHD cell
+  type, public :: conserved_mhd_t
+     real(kind=dp) :: density
+     real(kind=dp) :: momentum_x
+     real(kind=dp) :: momentum_y
+     real(kind=dp) :: momentum_z
+     real(kind=dp) :: energy
+     real(kind=dp) :: Bx
+     real(kind=dp) :: By
+     real(kind=dp) :: Bz
+  end type conserved_mhd_t
+
+  !> @brief
+  !> A simple type for holding the primitive variables of an MHD cell
+  type, public :: primitive_mhd_t
+     real(kind=dp) :: density
+     real(kind=dp) :: velocity_x
+     real(kind=dp) :: velocity_y
+     real(kind=dp) :: velocity_z
+     real(kind=dp) :: pressure
+     real(kind=dp) :: Bx
+     real(kind=dp) :: By
+     real(kind=dp) :: Bz
+  end type primitive_mhd_t
 
 contains
 
@@ -254,6 +375,284 @@ contains
     conserved%energy     = compute_energy(primitive, gamma)
     return
   end function primitive_2_conserved
+  ! ==========================================================================
+
+  ! ==========================================================================
+  ! MHD device helpers (Stage B1). Small attributes(device) functions mirroring
+  ! the conserved<->primitive math of CPU ctoprim (umuscl.f90:1720). Currently
+  ! unused; wired into the MHD integrator in later stages.
+  ! ==========================================================================
+
+  ! ==========================================================================
+  !> @brief
+  !> Compute B^2 = Bx^2 + By^2 + Bz^2 from the cell-centred magnetic field.
+  !> Parentheses guarantee associativity of the transverse terms, matching the
+  !> existing magnitude_squared helper.
+  !>
+  !> @param[in] Bx : The x component of the (cell-centred) magnetic field
+  !> @param[in] By : The y component of the (cell-centred) magnetic field
+  !> @param[in] Bz : The z component of the (cell-centred) magnetic field
+  !>
+  !> @return
+  !> The magnitude squared of the magnetic field
+  attributes(device) function compute_bsquared(Bx, By, Bz) result(bsquared)
+    real(kind=dp), value :: Bx, By, Bz
+    real(kind=dp) :: bsquared
+    bsquared = Bx**2 + (By**2 + Bz**2)
+    return
+  end function compute_bsquared
+  ! ==========================================================================
+
+  ! ==========================================================================
+  !> @brief
+  !> Compute the magnetic energy density emag = 0.5*(Bx^2 + By^2 + Bz^2) from the
+  !> cell-centred magnetic field (CPU ctoprim, umuscl.f90:1830-1833).
+  !>
+  !> @param[in] Bx : The x component of the (cell-centred) magnetic field
+  !> @param[in] By : The y component of the (cell-centred) magnetic field
+  !> @param[in] Bz : The z component of the (cell-centred) magnetic field
+  !>
+  !> @return
+  !> The magnetic energy density
+  attributes(device) function compute_emag(Bx, By, Bz) result(emag)
+    real(kind=dp), value :: Bx, By, Bz
+    real(kind=dp) :: emag
+    emag = 0.5d0 * compute_bsquared(Bx, By, Bz)
+    return
+  end function compute_emag
+  ! ==========================================================================
+
+  ! ==========================================================================
+  !> @brief
+  !> Convert conserved variables to primitive variables for MHD. Mirrors the
+  !> hydro conserved_2_primitive but additionally (a) cell-centres the magnetic
+  !> field as 0.5*(B_left + B_right) along each of the 3 axes and (b) subtracts
+  !> the magnetic energy from the total energy before forming the gas pressure.
+  !> See CPU ctoprim (umuscl.f90:1804-1845): the input energy is the TOTAL energy
+  !> so both kinetic and magnetic energy are removed to get the internal energy.
+  !> No floors are applied here, matching the hydro conserved_2_primitive /
+  !> compute_pressure (smallr/smallp are applied later in the trace/Riemann).
+  !>
+  !> @param[in] conserved : The hydro conserved variables (density, momentum, total energy)
+  !> @param[in] bxl, bxr  : The low/high x-face magnetic field of the cell
+  !> @param[in] byl, byr  : The low/high y-face magnetic field of the cell
+  !> @param[in] bzl, bzr  : The low/high z-face magnetic field of the cell
+  !> @param[in] gamma     : The adiabatic index
+  !>
+  !> @return
+  !> A primitive_mhd_t with cell-centred B and gas pressure
+  attributes(device) function mhd_conserved_2_primitive(conserved, bxl, bxr, byl, byr, bzl, bzr, gamma) result(primitive)
+    type(conserved_t), intent(in) :: conserved
+    real(kind=dp), value :: bxl, bxr, byl, byr, bzl, bzr
+    real(kind=dp), value :: gamma
+    type(primitive_mhd_t) :: primitive
+    real(kind=dp) :: momentum_squared, emag
+
+    primitive%density    = conserved%density
+    primitive%velocity_x = conserved%momentum_x / conserved%density
+    primitive%velocity_y = conserved%momentum_y / conserved%density
+    primitive%velocity_z = conserved%momentum_z / conserved%density
+
+    ! Cell-centred magnetic field: average of the two opposing faces per axis
+    primitive%Bx = 0.5d0 * (bxl + bxr)
+    primitive%By = 0.5d0 * (byl + byr)
+    primitive%Bz = 0.5d0 * (bzl + bzr)
+
+    ! Gas pressure from total energy minus kinetic and magnetic energy
+    momentum_squared = magnitude_squared(conserved%momentum_x, conserved%momentum_y, conserved%momentum_z)
+    emag = compute_emag(primitive%Bx, primitive%By, primitive%Bz)
+    primitive%pressure = (gamma - 1.d0) * (conserved%energy - 0.5d0*momentum_squared/conserved%density - emag)
+    return
+  end function mhd_conserved_2_primitive
+  ! ==========================================================================
+
+  ! ==========================================================================
+  !> @brief
+  !> Convert primitive variables to conserved variables for MHD. Mirrors the
+  !> hydro primitive_2_conserved but adds the magnetic energy into the total
+  !> energy and passes the cell-centred magnetic field through unchanged. Note
+  !> this is the inverse of mhd_conserved_2_primitive only for the cell-centred
+  !> field; the face-centred field is advanced separately by constrained transport.
+  !>
+  !> @param[in] primitive : The primitive MHD variables (cell-centred B)
+  !> @param[in] gamma     : The adiabatic index
+  !>
+  !> @return
+  !> A conserved_mhd_t with total energy (incl. magnetic) and cell-centred B
+  attributes(device) function mhd_primitive_2_conserved(primitive, gamma) result(conserved)
+    type(primitive_mhd_t), intent(in) :: primitive
+    real(kind=dp), value :: gamma
+    type(conserved_mhd_t) :: conserved
+    real(kind=dp) :: velocity_squared, emag
+
+    conserved%density    = primitive%density
+    conserved%momentum_x = primitive%velocity_x * primitive%density
+    conserved%momentum_y = primitive%velocity_y * primitive%density
+    conserved%momentum_z = primitive%velocity_z * primitive%density
+
+    velocity_squared = magnitude_squared(primitive%velocity_x, primitive%velocity_y, primitive%velocity_z)
+    emag = compute_emag(primitive%Bx, primitive%By, primitive%Bz)
+    conserved%energy = (primitive%pressure/(gamma - 1.d0)) + 0.5d0*primitive%density*velocity_squared + emag
+
+    conserved%Bx = primitive%Bx
+    conserved%By = primitive%By
+    conserved%Bz = primitive%Bz
+    return
+  end function mhd_primitive_2_conserved
+  ! ==========================================================================
+
+  ! ==========================================================================
+  !> @brief
+  !> GPU implementation of the 1D HLL MHD Riemann solver. This is a direct port
+  !> of CPU riemann_hll_mhd (godunov_utils.f90), with x as the normal direction;
+  !> callers rotate interface states for y/z faces in the MHD Riemann driver.
+  !>
+  !> @param[in] left  : The state on the left side of the interface
+  !> @param[in] right : The state on the right side of the interface
+  !> @param[in] gamma : The adiabatic index
+  !>
+  !> @return
+  !> flux : The conserved_mhd_t of the HLL MHD fluxes
+  attributes(device) function hll_mhd_fluxes(left, right, gamma) result(flux)
+    type(primitive_mhd_t), intent(in) :: left, right
+    real(kind=dp), value :: gamma
+    type(conserved_mhd_t) :: flux
+    real(kind=dp), parameter :: smallr = 1d-10
+    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
+    type(primitive_mhd_t) :: left_state, right_state
+    type(conserved_mhd_t) :: left_state_c, right_state_c, left_fluxes, right_fluxes
+    real(kind=dp) :: smallp
+    real(kind=dp) :: bx_mean
+    real(kind=dp) :: rl, rr, pl, pr, ul, ur, vl, vr, wl, wr
+    real(kind=dp) :: blx, bly, blz, brx, bry, brz
+    real(kind=dp) :: emagl, emagr, ptotl, ptotr, vdotbl, vdotbr
+    real(kind=dp) :: b2l, b2r, c2l, c2r, d2l, d2r, cfleft, cfright
+    real(kind=dp) :: speed_l, speed_r
+
+    smallp = smallc_squared / gamma
+
+    left_state = left
+    right_state = right
+
+    ! Enforce continuity of the normal magnetic field across the interface.
+    bx_mean = 0.5d0 * (left_state%Bx + right_state%Bx)
+    left_state%Bx = bx_mean
+    right_state%Bx = bx_mean
+
+    left_state%density = max(left_state%density, smallr)
+    right_state%density = max(right_state%density, smallr)
+    left_state%pressure = max(left_state%pressure, smallp * left_state%density)
+    right_state%pressure = max(right_state%pressure, smallp * right_state%density)
+
+    rl = left_state%density
+    rr = right_state%density
+    ul = left_state%velocity_x
+    ur = right_state%velocity_x
+    vl = left_state%velocity_y
+    vr = right_state%velocity_y
+    wl = left_state%velocity_z
+    wr = right_state%velocity_z
+    pl = left_state%pressure
+    pr = right_state%pressure
+    blx = left_state%Bx
+    brx = right_state%Bx
+    bly = left_state%By
+    bry = right_state%By
+    blz = left_state%Bz
+    brz = right_state%Bz
+
+    left_state_c = mhd_primitive_2_conserved(left_state, gamma)
+    right_state_c = mhd_primitive_2_conserved(right_state, gamma)
+
+    emagl = compute_emag(blx, bly, blz)
+    emagr = compute_emag(brx, bry, brz)
+    ptotl = pl + emagl
+    ptotr = pr + emagr
+    vdotbl = blx * ul + bly * vl + blz * wl
+    vdotbr = brx * ur + bry * vr + brz * wr
+
+    ! Compute the left and right physical MHD fluxes (CPU find_mhd_flux).
+    left_fluxes%density = rl * ul
+    left_fluxes%momentum_x = rl * ul * ul + ptotl - blx * blx
+    left_fluxes%momentum_y = rl * ul * vl - blx * bly
+    left_fluxes%momentum_z = rl * ul * wl - blx * blz
+    left_fluxes%energy = (left_state_c%energy + ptotl) * ul - blx * vdotbl
+    left_fluxes%Bx = 0.0_dp
+    left_fluxes%By = bly * ul - blx * vl
+    left_fluxes%Bz = blz * ul - blx * wl
+
+    right_fluxes%density = rr * ur
+    right_fluxes%momentum_x = rr * ur * ur + ptotr - brx * brx
+    right_fluxes%momentum_y = rr * ur * vr - brx * bry
+    right_fluxes%momentum_z = rr * ur * wr - brx * brz
+    right_fluxes%energy = (right_state_c%energy + ptotr) * ur - brx * vdotbr
+    right_fluxes%Bx = 0.0_dp
+    right_fluxes%By = bry * ur - brx * vr
+    right_fluxes%Bz = brz * ur - brx * wr
+
+    ! Fast magnetosonic speeds (CPU find_speed_fast).
+    b2l = compute_bsquared(blx, bly, blz)
+    c2l = gamma * pl / rl
+    d2l = 0.5d0 * (b2l / rl + c2l)
+    cfleft = sqrt(d2l + sqrt(d2l**2 - c2l * blx * blx / rl))
+
+    b2r = compute_bsquared(brx, bry, brz)
+    c2r = gamma * pr / rr
+    d2r = 0.5d0 * (b2r / rr + c2r)
+    cfright = sqrt(d2r + sqrt(d2r**2 - c2r * brx * brx / rr))
+
+    speed_l = min(min(ul, ur) - max(cfleft, cfright), 0.0_dp)
+    speed_r = max(max(ul, ur) + max(cfleft, cfright), 0.0_dp)
+
+    ! HLL flux, matching CPU fgdnv = (SR*fleft-SL*fright+SR*SL*(uright-uleft))/(SR-SL).
+    flux%density = hll_flux(speed_l, speed_r, left_fluxes%density, right_fluxes%density, &
+         & left_state_c%density, right_state_c%density)
+    flux%momentum_x = hll_flux(speed_l, speed_r, left_fluxes%momentum_x, right_fluxes%momentum_x, &
+         & left_state_c%momentum_x, right_state_c%momentum_x)
+    flux%momentum_y = hll_flux(speed_l, speed_r, left_fluxes%momentum_y, right_fluxes%momentum_y, &
+         & left_state_c%momentum_y, right_state_c%momentum_y)
+    flux%momentum_z = hll_flux(speed_l, speed_r, left_fluxes%momentum_z, right_fluxes%momentum_z, &
+         & left_state_c%momentum_z, right_state_c%momentum_z)
+    flux%energy = hll_flux(speed_l, speed_r, left_fluxes%energy, right_fluxes%energy, &
+         & left_state_c%energy, right_state_c%energy)
+    flux%Bx = hll_flux(speed_l, speed_r, left_fluxes%Bx, right_fluxes%Bx, &
+         & left_state_c%Bx, right_state_c%Bx)
+    flux%By = hll_flux(speed_l, speed_r, left_fluxes%By, right_fluxes%By, &
+         & left_state_c%By, right_state_c%By)
+    flux%Bz = hll_flux(speed_l, speed_r, left_fluxes%Bz, right_fluxes%Bz, &
+         & left_state_c%Bz, right_state_c%Bz)
+
+    return
+  end function hll_mhd_fluxes
+  ! ==========================================================================
+
+  ! ==========================================================================
+  !> @brief
+  !> Dispatch GPU MHD Riemann solvers. Only HLL is implemented for now; all other
+  !> solver ids intentionally fall back to HLL until their ports are added.
+  !>
+  !> @param[in] left  : The state on the left side of the interface
+  !> @param[in] right : The state on the right side of the interface
+  !> @param[in] gamma : The adiabatic index
+  !> @param[in] riemann : Solver id
+  !>
+  !> @return
+  !> flux : The conserved_mhd_t of the fluxes
+  attributes(device) function riemann_mhd_fluxes(left, right, gamma, riemann) result(flux)
+    type(primitive_mhd_t), intent(in) :: left, right
+    real(kind=dp), value :: gamma
+    integer, value :: riemann
+    type(conserved_mhd_t) :: flux
+
+    if (riemann .eq. solver_hll) then
+       flux = hll_mhd_fluxes(left, right, gamma)
+    else
+       ! TODO: add solver_hlld / solver_llf / solver_roe here.
+       flux = hll_mhd_fluxes(left, right, gamma)   ! fall back to HLL
+    endif
+
+    return
+  end function riemann_mhd_fluxes
   ! ==========================================================================
 
   ! ==========================================================================
@@ -1345,6 +1744,77 @@ contains
 
   end subroutine coarse_cell_update
   ! =========================================================================
+
+  ! =========================================================================
+  ! ##########################################################################
+  ! ## STAGE B1 PLACEHOLDER: mhd_integrator_kernel SHARED-MEMORY BUDGET      ##
+  ! ##########################################################################
+  !
+  ! The fused MHD Godunov+CT kernel (mhd_integrator_kernel) will be assembled in
+  ! Stage C7 and will live here (after Track 3's device functions and Track 2's
+  ! integrator subroutines are merged). Before any of that is written, B1 must
+  ! size its per-block shared-memory footprint, because that decision gates the
+  ! launch configuration for every later stage.
+  !
+  ! Geometry for nsubgrid = 1 (compile-time): the cell subgrid is 6^3 cells.
+  !   nc  = 2*nsubgrid+4 = 6   -> nc^3 = 216   (cell-subgrid plane count)
+  !   nf  = 2*nsubgrid+5 = 7                    (face-normal: one extra plane)
+  !   ne  = 2*nsubgrid+1 = 3   -> ne^3 = 27     (edge/flux EMF range, 1:nn+1)
+  !   interface block (hydro flux) = 3*2*2 = 12 (normal 3, transverse 2)
+  !   sizeof(real(dp)) = 8 B,  sizeof(logical) = 4 B
+  !
+  ! Per-block shared buffers the MHD integrator needs (one instance unless noted):
+  !
+  !   (A) subgrid_6x6x6cell_primitive_mhd   8 reals*216 + 216 logical(refined)
+  !                                         = 1728*8 + 216*4 = 13824 + 864
+  !                                         = 14688 B
+  !   (B) subgrid_face_b_t (bf)             bx 7*6*6 + by 6*7*6 + bz 6*6*7
+  !                                         = 756 reals*8                 =  6048 B
+  !   (C) subgrid_face_db_t (dbf)           (756 reals)*2 transverse      = 12096 B
+  !   (D) subgrid_edge_e_t (Ex,Ey,Ez)       3*216 reals*8                 =  5184 B
+  !   (E) subgrid_emf_t (emfx,emfy,emfz)    3*27  reals*8                 =   648 B
+  !   (F) subgrid_corner_state_t * 4        each 8 reals*216*3 = 5184 reals
+  !       (qRT,qRB,qLT,qLB)                 4*5184*8                      = 165888 B
+  !   (G) reused hydro interface arrays * 6 6 * 5 reals * 12 (already in the
+  !       (subgrid_3x2x2 / 2x3x2 / 2x2x3)   hydro kernel)                 =  2880 B
+  !       ------------------------------------------------------------------------
+  !       TOTAL per block                                                 = 207432 B
+  !                                                                       = 202.6 KB
+  !
+  ! VERDICT (sm_80 / A100):
+  !   * Default STATIC shared/block limit = 48 KB (49152 B): 207432 B is 4.2x over.
+  !   * Opt-in MAX shared/block          = 163 KB (166912 B usable, 164 KB SM total
+  !     minus ~1 KB reserved): 207432 B is ~40 KB over even the opt-in.
+  !   => The footprint as specified does NOT fit, even with the opt-in. The four
+  !      corner states (F) alone are 165888 B = 162 KB = 80% of the total.
+  !
+  !   NOTE: reducing threads/block does NOT shrink per-block shared memory here --
+  !   the subgrids are sized by nsubgrid (compile-time), not by thread count. A
+  !   single block must hold the whole footprint, so a 203 KB block cannot launch
+  !   at ANY thread count (it exceeds the 164 KB hardware max). Thread/block count
+  !   only affects occupancy once the block already fits. So spilling is mandatory.
+  !
+  ! RECOMMENDATION (in priority order):
+  !   1. SPILL the 4 corner-state buffers (F, 162 KB) to a device global scratch
+  !      array, indexed per block like the CPU h%qRT/h%qRB/h%qLT/h%qLB workspace
+  !      (declare alongside uold/unew in gpu_runner.cuf, shape ~ (num_blocks,...)).
+  !      They are large and consumed once (by cmp_mag_flx), so they are the
+  !      least-reused-per-byte candidate. Resident shared then drops to
+  !      207432 - 165888 = 41544 B = 40.6 KB, which fits the 48 KB DEFAULT static
+  !      shared limit at the current 64 threads/block -- no opt-in, no kernel
+  !      restructuring beyond the spill.
+  !   2. (Optional, more headroom) also spill dbf (C, 11.8 KB) -> 29448 B = 28.8 KB
+  !      resident, leaving room for the MHD interface-flux widening in C2.
+  !   3. ALTERNATIVE to spilling, if corner states must stay on-chip: compute one
+  !      edge direction at a time (drop the trailing 1:3) so (F) becomes
+  !      4*8*216*8 = 55296 B = 54 KB; total resident = 40.6 + 54 = 94.6 KB. That
+  !      needs DYNAMIC shared memory plus the sm_80 96-164 KB opt-in (static shared
+  !      is hard-capped at 48 KB), so it is strictly more work than (1). Prefer (1).
+  !
+  ! Reference: the current hydro_integrator_kernel resident shared is
+  !   subgrid_6x6x6cell_primitive (5*216*8 + 864 = 9504 B) + 6 interface arrays
+  !   (2880 B) = 12384 B = 12.1 KB. Option (1) keeps MHD at ~3.4x that, under 48 KB.
+  ! ##########################################################################
 
   ! =========================================================================
   attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, f, father, nbor, &

@@ -19,6 +19,7 @@ module amr_commons
      logical::pic     =.false.   ! Particle In Cell activated
      logical::poisson =.false.   ! Poisson solver activated
      logical::hydro   =.false.   ! Hydro activated
+     logical::mhd     =.false.   ! MHD activated
      logical::rt      =.false.   ! RT activated
      logical::part    =.false.   ! Dark matter particles activated
      logical::star    =.false.   ! Stars and star formation activated
@@ -727,10 +728,8 @@ module amr_commons
      real(dp),allocatable,dimension(:,:,:)::mflux      ! Time-integrated mass flux for tracers
 #endif
 #endif
-#ifdef MHD
      real(dp),allocatable,dimension(:,:,:)::bold
      real(dp),allocatable,dimension(:,:,:)::bnew
-#endif
 #ifdef RT
      real(dp),allocatable,dimension(:,:,:)::rtuold
      real(dp),allocatable,dimension(:,:,:)::rtunew
