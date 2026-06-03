@@ -3,7 +3,7 @@
 #############################################################################
 # Compilation time parameters
 COMPILER = GNU
-CUDA_ARCH = sm_80,sm_90
+CUDA_ARCH = sm_80
 CUDA_PROFILE = 0
 NDIM = 3
 MPI = 0
