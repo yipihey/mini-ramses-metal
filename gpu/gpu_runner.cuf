@@ -467,7 +467,7 @@ contains
     nmake = new_ifree - old_ifree
 
     ! Check we have enough memory
-    if (new_ifree > sim%r%ngridmax) then
+    if (new_ifree - 1 > sim%r%ngridmax) then
        write(*,*)'No more main memory, increase ngridmax'
        write(*,*)'New octs:', nmake
        stop
