@@ -104,7 +104,6 @@ subroutine init_part(r,g,m,p)
 #ifdef OUTPUT_PARTICLE_POTENTIAL
   allocate(phip(1:r%npartmax))
 #endif
-  ! Gather/scatter scratch (device-only). isp_swap doubles as the
   ! gpu_cic_part source map.
   allocate(xp_swap (1:r%npartmax))
   allocate(isp_swap(1:r%npartmax))

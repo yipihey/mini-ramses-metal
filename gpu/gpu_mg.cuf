@@ -983,7 +983,7 @@ contains
        if (f(cell_idx, 3, oct_idx) <= 0d0) then
           norm_loc = 0d0
        else
-          norm_loc = f(cell_idx, 1, oct_idx)*f(cell_idx, 1, oct_idx)
+          norm_loc = real(f(cell_idx, 1, oct_idx), kind=8)*real(f(cell_idx, 1, oct_idx), kind=8)
        endif
 
     endif

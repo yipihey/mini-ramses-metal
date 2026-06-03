@@ -76,7 +76,7 @@ subroutine m_refine_fine(pst,ilevel)
         ttstart = mdl_wtime(s%mdl)
         call r_balance_part(pst,ilevel,1,dummy,0)
         ttend = mdl_wtime(s%mdl)
-        print '(A,F14.7)',' Time elapsed load balancing:',ttend-ttstart
+        print '(A,F0.7)',' Time elapsed load balancing: ',ttend-ttstart
      endif
   endif
 

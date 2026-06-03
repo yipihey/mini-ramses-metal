@@ -81,7 +81,7 @@ subroutine m_update_time(pst,ilevel,done)
         do i=r%levelmin,r%nlevelmax
            if(m%noct_tot(i)>0)write(*,999)i,m%noct_tot(i),m%noct_min(i),m%noct_max(i),m%noct_tot(i)/g%ncpu
         end do
-999     format(' Level ',I0,' has ',I0,' grids (',3(I0,','),')')
+999     format(' Level ',I0,' has ',I0,' grids (',I0,',',I0,',',I0,')')
 
         !------------------------
         ! Output timing data
@@ -282,9 +282,9 @@ subroutine writemem(usedmem)
      write(*,997)usedmem/1024.
   endif
 
-997 format(' Used memory:',F6.1,' kb')
-998 format(' Used memory:',F6.1,' Mb')
-999 format(' Used memory:',F6.1,' Gb')
+997 format(' Used memory: ',F0.1,' kb')
+998 format(' Used memory: ',F0.1,' Mb')
+999 format(' Used memory: ',F0.1,' Gb')
 
 end subroutine writemem
 
