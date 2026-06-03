@@ -2280,11 +2280,10 @@ contains
     ! m=16: 68 kB (FP32) 135 kB (FP64)
 
     ! Thread-private variables
-    integer(kind=4) :: ix, iy, iz, ivar, iv, dir, im, ic, ip, j_px, j_py, j_pz, ub_x, ub_y
-    real(dp), value :: Uin(nvar), dU(nvar), igam, invD, Ekin, div_v, hdx, dtdx, idx
-    real(dp) :: c_max, SL, SR, iSRL, SRL, pxL, pxR, pyL, pyR, pzL, pzR, eneL, eneR
-    real(dp) :: fluxL_rho, fluxR_rho, fluxL_px, fluxR_px, fluxL_py, fluxR_py, fluxL_pz, fluxR_pz, fluxL_ene, fluxR_ene
-    real(dp) :: rhoL, rhoR, uL, uR, vL, vR, wL, wR, pL, pR, slp
+    integer(kind=4) :: ix, iy, iz, ivar, im, ic, ip
+    real(dp), value :: Uin(nvar), dU(nvar), invD, Ekin, div_v, hdx, dtdx, idx
+    type(primitive_t) :: left_state, right_state
+    type(conserved_t) :: flux_result
 
     thread_idx = threadIdx%x - 1       ! Thread index in x dimension (0 to blockDim%x-1)
     block_idx = blockIdx%x - 1         ! Block index in x dimension (0 to num_subgrids-1)
@@ -2301,7 +2300,6 @@ contains
     ! FIXME: but minimise shared memory usage
 
     ! Initialize constants
-    igam = 1.0 / (gamma - 1.0)
     dtdx = dt / dx
     hdx = 0.5_dp*dx
     idx = 1.0_dp / dx
@@ -2393,34 +2391,26 @@ contains
           !call syncthreads()
 
           ! Compute flux for z-direction
-          j_px = i_pz; j_py = i_px; j_pz = i_py
-          ub_x = m+2; ub_y = m+2
-          if (ix >= 3 .and. ix <= ub_x .and. iy >= 3 .and. iy <= ub_y) then
-             rhoL = qL(ix,iy,i_rho); rhoR = qR(ix,iy,i_rho)
-             uL   = qL(ix,iy,i_px ); uR   = qR(ix,iy,i_px )
-             vL   = qL(ix,iy,i_py ); vR   = qR(ix,iy,i_py )
-             wL   = qL(ix,iy,i_pz ); wR   = qR(ix,iy,i_pz )
-             pL   = qL(ix,iy,i_ene); pR   = qR(ix,iy,i_ene)
+          if (ix >= 3 .and. ix <= m+2 .and. iy >= 3 .and. iy <= m+2) then
+             left_state%density    = qL(ix,iy,i_rho)
+             left_state%velocity_x = qL(ix,iy,i_px)
+             left_state%velocity_y = qL(ix,iy,i_py)
+             left_state%velocity_z = qL(ix,iy,i_pz)
+             left_state%pressure   = qL(ix,iy,i_ene)
 
-             pxL = rhoL*uL; pyL = rhoL*vL; pzL = rhoL*wL
-             pxR = rhoR*uR; pyR = rhoR*vR; pzR = rhoR*wR
-             fluxL_rho = pxL;            fluxR_rho = pxR
-             fluxL_px  = pxL*uL + pL;    fluxR_px  = pxR*uR + pR
-             fluxL_py  = pyL*uL;         fluxR_py  = pyR*uR
-             fluxL_pz  = pzL*uL;         fluxR_pz  = pzR*uR
-             eneL = 0.5_dp*(pxL*uL + pyL*vL + pzL*wL) + igam*pL
-             eneR = 0.5_dp*(pxR*uR + pyR*vR + pzR*wR) + igam*pR
-             fluxL_ene = (eneL + pL)*uL; fluxR_ene = (eneR + pR)*uR
-             c_max = sqrt(max(gamma*pL/rhoL, gamma*pR/rhoR))
-             SL = min(min(uL, uR) - c_max, 0.0_dp)
-             SR = max(max(uL, uR) + c_max, 0.0_dp)
-             iSRL = 1.0_dp / (SR - SL)
-             SRL = SR*SL
-             flux(ix,iy,i_rho) = (SR*fluxL_rho - SL*fluxR_rho + SRL*(rhoR - rhoL))*iSRL
-             flux(ix,iy,j_px ) = (SR*fluxL_px  - SL*fluxR_px  + SRL*(pxR - pxL))*iSRL
-             flux(ix,iy,j_py ) = (SR*fluxL_py  - SL*fluxR_py  + SRL*(pyR - pyL))*iSRL
-             flux(ix,iy,j_pz ) = (SR*fluxL_pz  - SL*fluxR_pz  + SRL*(pzR - pzL))*iSRL
-             flux(ix,iy,i_ene) = (SR*fluxL_ene - SL*fluxR_ene + SRL*(eneR - eneL))*iSRL
+             right_state%density    = qR(ix,iy,i_rho)
+             right_state%velocity_x = qR(ix,iy,i_px)
+             right_state%velocity_y = qR(ix,iy,i_py)
+             right_state%velocity_z = qR(ix,iy,i_pz)
+             right_state%pressure   = qR(ix,iy,i_ene)
+
+             flux_result = riemann_fluxes(left_state, right_state, gamma, riemann)
+
+             flux(ix,iy,i_rho) = flux_result%density
+             flux(ix,iy,i_pz ) = flux_result%momentum_x
+             flux(ix,iy,i_px ) = flux_result%momentum_y
+             flux(ix,iy,i_py ) = flux_result%momentum_z
+             flux(ix,iy,i_ene) = flux_result%energy
           end if
           !call syncthreads()
 
@@ -2469,33 +2459,26 @@ contains
           !call syncthreads()
 
           ! Compute flux for x-direction
-          j_px = i_px; j_py = i_py; j_pz = i_pz
-          ub_x = m+3; ub_y = m+2
-          if (ix >= 3 .and. ix <= ub_x .and. iy >= 3 .and. iy <= ub_y) then
-             rhoL = qL(ix,iy,i_rho); rhoR = qR(ix,iy,i_rho)
-             uL   = qL(ix,iy,i_px ); uR   = qR(ix,iy,i_px )
-             vL   = qL(ix,iy,i_py ); vR   = qR(ix,iy,i_py )
-             wL   = qL(ix,iy,i_pz ); wR   = qR(ix,iy,i_pz )
-             pL   = qL(ix,iy,i_ene); pR   = qR(ix,iy,i_ene)
-             pxL = rhoL*uL; pyL = rhoL*vL; pzL = rhoL*wL
-             pxR = rhoR*uR; pyR = rhoR*vR; pzR = rhoR*wR
-             eneL = 0.5_dp*(pxL*uL + pyL*vL + pzL*wL) + igam*pL
-             eneR = 0.5_dp*(pxR*uR + pyR*vR + pzR*wR) + igam*pR
-             fluxL_rho = pxL;            fluxR_rho = pxR
-             fluxL_px  = pxL*uL + pL;    fluxR_px  = pxR*uR + pR
-             fluxL_py  = pyL*uL;         fluxR_py  = pyR*uR
-             fluxL_pz  = pzL*uL;         fluxR_pz  = pzR*uR
-             fluxL_ene = (eneL + pL)*uL; fluxR_ene = (eneR + pR)*uR
-             c_max = sqrt(max(gamma*pL/rhoL, gamma*pR/rhoR))
-             SL = min(min(uL, uR) - c_max, 0.0_dp)
-             SR = max(max(uL, uR) + c_max, 0.0_dp)
-             iSRL = 1.0_dp / (SR - SL)
-             SRL = SR*SL
-             flux(ix,iy,i_rho) = (SR*fluxL_rho - SL*fluxR_rho + SRL*(rhoR - rhoL))*iSRL
-             flux(ix,iy,j_px ) = (SR*fluxL_px  - SL*fluxR_px  + SRL*(pxR - pxL))*iSRL
-             flux(ix,iy,j_py ) = (SR*fluxL_py  - SL*fluxR_py  + SRL*(pyR - pyL))*iSRL
-             flux(ix,iy,j_pz ) = (SR*fluxL_pz  - SL*fluxR_pz  + SRL*(pzR - pzL))*iSRL
-             flux(ix,iy,i_ene) = (SR*fluxL_ene - SL*fluxR_ene + SRL*(eneR - eneL))*iSRL
+          if (ix >= 3 .and. ix <= m+3 .and. iy >= 3 .and. iy <= m+2) then
+             left_state%density    = qL(ix,iy,i_rho)
+             left_state%velocity_x = qL(ix,iy,i_px)
+             left_state%velocity_y = qL(ix,iy,i_py)
+             left_state%velocity_z = qL(ix,iy,i_pz)
+             left_state%pressure   = qL(ix,iy,i_ene)
+
+             right_state%density    = qR(ix,iy,i_rho)
+             right_state%velocity_x = qR(ix,iy,i_px)
+             right_state%velocity_y = qR(ix,iy,i_py)
+             right_state%velocity_z = qR(ix,iy,i_pz)
+             right_state%pressure   = qR(ix,iy,i_ene)
+
+             flux_result = riemann_fluxes(left_state, right_state, gamma, riemann)
+
+             flux(ix,iy,i_rho) = flux_result%density
+             flux(ix,iy,i_px ) = flux_result%momentum_x
+             flux(ix,iy,i_py ) = flux_result%momentum_y
+             flux(ix,iy,i_pz ) = flux_result%momentum_z
+             flux(ix,iy,i_ene) = flux_result%energy
           end if
           call syncthreads()
 
@@ -2529,34 +2512,26 @@ contains
           !call syncthreads()
 
           ! Compute flux for y-direction
-          j_px = i_py; j_py = i_pz; j_pz = i_px
-          ub_x = m+2; ub_y = m+3
-          if (ix >= 3 .and. ix <= ub_x .and. iy >= 3 .and. iy <= ub_y) then
-             rhoL = qL(ix,iy,i_rho); rhoR = qR(ix,iy,i_rho)
-             uL   = qL(ix,iy,i_px ); uR   = qR(ix,iy,i_px )
-             vL   = qL(ix,iy,i_py ); vR   = qR(ix,iy,i_py )
-             wL   = qL(ix,iy,i_pz ); wR   = qR(ix,iy,i_pz )
-             pL   = qL(ix,iy,i_ene); pR   = qR(ix,iy,i_ene)
+          if (ix >= 3 .and. ix <= m+2 .and. iy >= 3 .and. iy <= m+3) then
+             left_state%density    = qL(ix,iy,i_rho)
+             left_state%velocity_x = qL(ix,iy,i_px)
+             left_state%velocity_y = qL(ix,iy,i_py)
+             left_state%velocity_z = qL(ix,iy,i_pz)
+             left_state%pressure   = qL(ix,iy,i_ene)
 
-             pxL = rhoL*uL; pyL = rhoL*vL; pzL = rhoL*wL
-             pxR = rhoR*uR; pyR = rhoR*vR; pzR = rhoR*wR
-             eneL = 0.5_dp*(pxL*uL + pyL*vL + pzL*wL) + igam*pL
-             eneR = 0.5_dp*(pxR*uR + pyR*vR + pzR*wR) + igam*pR
-             fluxL_rho = pxL;            fluxR_rho = pxR
-             fluxL_px  = pxL*uL + pL;    fluxR_px  = pxR*uR + pR
-             fluxL_py  = pyL*uL;         fluxR_py  = pyR*uR
-             fluxL_pz  = pzL*uL;         fluxR_pz  = pzR*uR
-             fluxL_ene = (eneL + pL)*uL; fluxR_ene = (eneR + pR)*uR
-             c_max = sqrt(max(gamma*pL/rhoL, gamma*pR/rhoR))
-             SL = min(min(uL, uR) - c_max, 0.0_dp)
-             SR = max(max(uL, uR) + c_max, 0.0_dp)
-             iSRL = 1.0_dp / (SR - SL)
-             SRL = SR*SL
-             flux(ix,iy,i_rho) = (SR*fluxL_rho - SL*fluxR_rho + SRL*(rhoR - rhoL))*iSRL
-             flux(ix,iy,j_px ) = (SR*fluxL_px  - SL*fluxR_px  + SRL*(pxR - pxL))*iSRL
-             flux(ix,iy,j_py ) = (SR*fluxL_py  - SL*fluxR_py  + SRL*(pyR - pyL))*iSRL
-             flux(ix,iy,j_pz ) = (SR*fluxL_pz  - SL*fluxR_pz  + SRL*(pzR - pzL))*iSRL
-             flux(ix,iy,i_ene) = (SR*fluxL_ene - SL*fluxR_ene + SRL*(eneR - eneL))*iSRL
+             right_state%density    = qR(ix,iy,i_rho)
+             right_state%velocity_x = qR(ix,iy,i_px)
+             right_state%velocity_y = qR(ix,iy,i_py)
+             right_state%velocity_z = qR(ix,iy,i_pz)
+             right_state%pressure   = qR(ix,iy,i_ene)
+
+             flux_result = riemann_fluxes(left_state, right_state, gamma, riemann)
+
+             flux(ix,iy,i_rho) = flux_result%density
+             flux(ix,iy,i_py ) = flux_result%momentum_x
+             flux(ix,iy,i_pz ) = flux_result%momentum_y
+             flux(ix,iy,i_px ) = flux_result%momentum_z
+             flux(ix,iy,i_ene) = flux_result%energy
           end if
           call syncthreads()
 
@@ -2598,4 +2573,3 @@ contains
   ! =========================================================================
 
 end module hydro_device
-
