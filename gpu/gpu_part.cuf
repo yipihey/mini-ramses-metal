@@ -541,13 +541,11 @@ end subroutine gpu_split_part
 !> deposit (part_dep_algo=1) shift=0; for the shifted deposits (part_dep_algo=2
 !> medium and 3 small) shift=0.5 so the source cell becomes the upper corner of
 !> the standard CIC 2x2x2 stencil block (matching host cic_part's x+0.5 anchor).
-!> On periodic axes the shifted source cell is wrapped into [0, ncell) so an
-!> upper-edge particle groups with its periodic image; the shifted paths use
-!> key_level = level+1 so a non-periodic upper-edge virtual cell (index = ncell)
-!> is not aliased onto cell 0 by the Hilbert key.
+!> GPU runs are periodic, so the (possibly shifted) source cell is wrapped into
+!> [0, ncell) before keying: an upper-edge particle groups with its periodic
+!> image, and the Hilbert key is computed at the deposit level.
 attributes(global) subroutine compute_hkey_part_kernel(xp, hkey_part_d, &
-     & skip1, skip2, skip3, dx_inv, head_idx, num_parts, leading, level, &
-     & key_level, shift, periodic_d)
+     & skip1, skip2, skip3, dx_inv, head_idx, num_parts, leading, level, shift)
   integer(kind=4), intent(in), value :: leading
   real(kind=dp),   device :: xp(*)
   integer(kind=8), device :: hkey_part_d(*)
@@ -556,9 +554,7 @@ attributes(global) subroutine compute_hkey_part_kernel(xp, hkey_part_d, &
   integer(kind=4), intent(in), value :: head_idx
   integer(kind=4), intent(in), value :: num_parts
   integer(kind=4), intent(in), value :: level
-  integer(kind=4), intent(in), value :: key_level
   real(kind=8),    intent(in), value :: shift
-  logical,         device :: periodic_d(1:3)
 
   integer :: thread_idx, block_idx, idx, ipart, idim
   integer(kind=4) :: ix(1:ndim), ncell
@@ -580,13 +576,13 @@ attributes(global) subroutine compute_hkey_part_kernel(xp, hkey_part_d, &
   do idim = 1, ndim
      xs = (xp(ipart + (idim-1)*leading) + skip(idim)) * dx_inv + shift
      ix(idim) = floor(xs)
-     if (periodic_d(idim)) then
-        if (ix(idim) >= ncell) ix(idim) = ix(idim) - ncell
-        if (ix(idim) < 0)      ix(idim) = ix(idim) + ncell
-     end if
+     ! GPU runs are periodic: wrap the (possibly shifted) source cell into
+     ! [0, ncell) so an upper-edge particle groups with its periodic image.
+     if (ix(idim) >= ncell) ix(idim) = ix(idim) - ncell
+     if (ix(idim) < 0)      ix(idim) = ix(idim) + ncell
   end do
 
-  hkey_part_d(ipart) = hilbert_key(ix, key_level)
+  hkey_part_d(ipart) = hilbert_key(ix, level)
 
 end subroutine compute_hkey_part_kernel
 
@@ -641,7 +637,7 @@ subroutine gpu_sort_part(sim, ilevel)
 
   integer(kind=4) :: head_idx, tail_idx, num_parts
   integer :: num_threads, num_blocks
-  integer :: ibit, level, key_level
+  integer :: ibit, level
   real(kind=8) :: dx, dx_inv, skip1, skip2, skip3, shift
   character(len=32) :: nvtx_lbl
 
@@ -662,15 +658,14 @@ subroutine gpu_sort_part(sim, ilevel)
   skip3 = sim%m%skip(3)
 
   ! The shifted-source deposits (part_dep_algo=2 medium, 3 small) sort by the
-  ! half-cell shifted source cell (upper corner of the 2x2x2 CIC block) and need
-  ! one extra Hilbert level to keep the non-periodic upper-edge cell
-  ! (index = 2**level) distinct from cell 0. The large deposit (1) is unshifted.
+  ! half-cell shifted source cell (upper corner of the 2x2x2 CIC block). The
+  ! +1/2 shift can push the source cell to index 2**level at the upper edge,
+  ! which is wrapped back to 0 before keying (GPU runs are periodic). The large
+  ! deposit (1) is unshifted.
   if (sim%r%part_dep_algo >= 2) then
      shift = 0.5_dp
-     key_level = level + 1
   else
      shift = 0.0_dp
-     key_level = level
   end if
 
   call nvtxStartRange("gpu_sort_part", color=4) ! purple
@@ -679,7 +674,7 @@ subroutine gpu_sort_part(sim, ilevel)
   call nvtxStartRange("gpu_sort_part:hkey", color=4)
   call compute_hkey_part_kernel<<<num_blocks, num_threads>>>(xp, idp_swap, &
        & skip1, skip2, skip3, dx_inv, head_idx, num_parts, sim%r%npartmax, level, &
-       & key_level, shift, periodic)
+       & shift)
   call nvtxEndRange()
 
   ! Init sortp
@@ -689,7 +684,7 @@ subroutine gpu_sort_part(sim, ilevel)
   call nvtxEndRange()
 
   ! Loop over bits (one NVTX range per radix pass; kernels visible in CUDA row)
-  do ibit = 0, ndim * key_level - 1
+  do ibit = 0, ndim * level - 1
      write(nvtx_lbl, '(A,I0)') 'gpu_sort_part:bit_', ibit
      call nvtxStartRange(trim(nvtx_lbl), color=4)
 
@@ -1278,7 +1273,7 @@ end subroutine gpu_cic_part_large
 attributes(global) subroutine cic_part_medium_kernel(sortp_d, &
      & head_idx, num_parts, &
      & hash_key_d, hash_val_d, hash_size_d, ckey_max_d, key_off_d, &
-     & box_ckey_min_d, box_ckey_max_d, periodic_d, &
+     & box_ckey_min_d, box_ckey_max_d, &
      & xp_d, mp_d, rho_d, nref_d, &
      & skip1, skip2, skip3, dx_loc, vol_loc, &
      & m_refine_at_level, mass_cut_refine, ilevel, leading)
@@ -1291,7 +1286,6 @@ attributes(global) subroutine cic_part_medium_kernel(sortp_d, &
   integer(kind=8), device :: key_off_d(*)
   integer(kind=4), device :: box_ckey_min_d(1:3, *)
   integer(kind=4), device :: box_ckey_max_d(1:3, *)
-  logical,         device :: periodic_d(1:3)
   real(kind=dp),   device :: xp_d(*)
   real(kind=dp),   device :: mp_d(*)
   real(kind=dp),   device :: rho_d (1:twotondim, *)
@@ -1308,7 +1302,7 @@ attributes(global) subroutine cic_part_medium_kernel(sortp_d, &
   integer(kind=4) :: src_full_ckey(1:3), target_ckey(1:3), father_ckey(1:3), ii(1:3)
   integer(kind=4) :: box_min(1:3), box_max(1:3), ncell
   integer(kind=8) :: nx, hkey_offset, key, ix8, iy8, iz8
-  logical :: valid_lane, in_domain, is_head, is_tail
+  logical :: valid_lane, is_head, is_tail
   real(kind=8) :: my_rho, my_nref, mp_i, other_rho, other_nref
   real(kind=8) :: skip(1:3), xs, frac(1:3)
   real(kind=8) :: wx(0:1), wy(0:1), wz(0:1), w
@@ -1354,10 +1348,9 @@ attributes(global) subroutine cic_part_medium_kernel(sortp_d, &
         xs = (xp_d(ipart + (idim-1)*leading) + skip(idim)) / dx_loc + 0.5d0
         src_full_ckey(idim) = floor(xs)
         frac(idim) = xs - src_full_ckey(idim)
-        if (periodic_d(idim)) then
-           if (src_full_ckey(idim) >= ncell) src_full_ckey(idim) = src_full_ckey(idim) - ncell
-           if (src_full_ckey(idim) < 0)      src_full_ckey(idim) = src_full_ckey(idim) + ncell
-        endif
+        ! GPU runs are periodic: wrap the shifted source cell into [0, ncell).
+        if (src_full_ckey(idim) >= ncell) src_full_ckey(idim) = src_full_ckey(idim) - ncell
+        if (src_full_ckey(idim) < 0)      src_full_ckey(idim) = src_full_ckey(idim) + ncell
      end do
 
      ! Split the (shifted) source cell into (parent oct ckey, in-oct cell)
@@ -1454,29 +1447,22 @@ attributes(global) subroutine cic_part_medium_kernel(sortp_d, &
         if (ndim >= 2) target_ckey(2) = src_full_ckey(2) - 1 + by
         if (ndim >= 3) target_ckey(3) = src_full_ckey(3) - 1 + bz
 
-        in_domain = .true.
+        ! GPU runs are periodic: wrap the target cell into [box_min, box_max).
         do idim = 1, ndim
-           if (periodic_d(idim)) then
-              if (target_ckey(idim) < box_min(idim))  target_ckey(idim) = box_max(idim) - 1
-              if (target_ckey(idim) >= box_max(idim)) target_ckey(idim) = box_min(idim)
-           else
-              if (target_ckey(idim) < box_min(idim))  in_domain = .false.
-              if (target_ckey(idim) >= box_max(idim)) in_domain = .false.
-           endif
+           if (target_ckey(idim) < box_min(idim))  target_ckey(idim) = box_max(idim) - 1
+           if (target_ckey(idim) >= box_max(idim)) target_ckey(idim) = box_min(idim)
         end do
-        if (in_domain) then
-           father_ckey = target_ckey / 2
-           ii = target_ckey - 2 * father_ckey
-           dst_icell_lane = 1
-           do idim = 1, ndim
-              dst_icell_lane = dst_icell_lane + ii(idim) * (2**(idim-1))
-           end do
-           ix8 = int(father_ckey(1), kind=8)
-           iy8 = int(father_ckey(2), kind=8)
-           iz8 = int(father_ckey(3), kind=8)
-           key = hkey_offset + ix8 + iy8*nx + iz8*nx*nx
-           dst_igrid_lane = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
-        endif
+        father_ckey = target_ckey / 2
+        ii = target_ckey - 2 * father_ckey
+        dst_icell_lane = 1
+        do idim = 1, ndim
+           dst_icell_lane = dst_icell_lane + ii(idim) * (2**(idim-1))
+        end do
+        ix8 = int(father_ckey(1), kind=8)
+        iy8 = int(father_ckey(2), kind=8)
+        iz8 = int(father_ckey(3), kind=8)
+        key = hkey_offset + ix8 + iy8*nx + iz8*nx*nx
+        dst_igrid_lane = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
      endif
 
      ! Segmented inclusive Hillis-Steele scan along the warp (identical).
@@ -1576,7 +1562,7 @@ subroutine gpu_cic_part_medium(sim, ilevel, rtype)
   call cic_part_medium_kernel<<<deposit_num_blocks, deposit_block_size>>>(&
        & sortp, head_idx, num_parts, &
        & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
-       & box_ckey_min, box_ckey_max, periodic, &
+       & box_ckey_min, box_ckey_max, &
        & xp, mp, rho, nref, &
        & skip1, skip2, skip3, dx_loc, vol_loc, &
        & sim%r%m_refine(ilevel), sim%r%mass_cut_refine, ilevel, sim%r%npartmax)
@@ -1724,7 +1710,7 @@ end subroutine fill_contrib_part_small
 attributes(global) subroutine deposit_runs_part_small(sortp_d, xp_d, contrib_d, &
      & prefix_sum_d, run_tail_d, &
      & hash_key_d, hash_val_d, hash_size_d, ckey_max_d, key_off_d, &
-     & box_ckey_min_d, box_ckey_max_d, periodic_d, out_d, &
+     & box_ckey_min_d, box_ckey_max_d, out_d, &
      & skip1, skip2, skip3, dx_inv, k, ilevel, head_idx, num_parts, leading)
   integer(kind=4), device :: sortp_d(*)
   real(kind=dp),   device :: xp_d(*)
@@ -1738,7 +1724,6 @@ attributes(global) subroutine deposit_runs_part_small(sortp_d, xp_d, contrib_d, 
   integer(kind=8), device :: key_off_d(*)
   integer(kind=4), device :: box_ckey_min_d(1:3, *)
   integer(kind=4), device :: box_ckey_max_d(1:3, *)
-  logical,         device :: periodic_d(1:3)
   real(kind=dp),   device :: out_d(1:twotondim, *)
   real(kind=8), intent(in), value :: skip1, skip2, skip3, dx_inv
   integer(kind=4), intent(in), value :: k, ilevel, head_idx, num_parts, leading
@@ -1749,7 +1734,6 @@ attributes(global) subroutine deposit_runs_part_small(sortp_d, xp_d, contrib_d, 
   integer(kind=4) :: box_min(1:3), box_max(1:3), ncell
   integer(kind=8) :: nx, hkey_offset, key, ix8, iy8, iz8
   real(kind=8) :: skip(1:3), xs, run_sum
-  logical :: in_domain
 
   thread_idx = threadIdx%x - 1
   block_idx  = blockIdx%x  - 1
@@ -1780,10 +1764,9 @@ attributes(global) subroutine deposit_runs_part_small(sortp_d, xp_d, contrib_d, 
   do idim = 1, ndim
      xs = (xp_d(ipart + (idim-1)*leading) + skip(idim)) * dx_inv + 0.5d0
      src_ckey(idim) = floor(xs)
-     if (periodic_d(idim)) then
-        if (src_ckey(idim) >= ncell) src_ckey(idim) = src_ckey(idim) - ncell
-        if (src_ckey(idim) < 0)      src_ckey(idim) = src_ckey(idim) + ncell
-     end if
+     ! GPU runs are periodic: wrap the shifted source cell into [0, ncell).
+     if (src_ckey(idim) >= ncell) src_ckey(idim) = src_ckey(idim) - ncell
+     if (src_ckey(idim) < 0)      src_ckey(idim) = src_ckey(idim) + ncell
   end do
 
   ! Per-level box bounds (stored at slot ilevel+1, an array convention).
@@ -1797,19 +1780,13 @@ attributes(global) subroutine deposit_runs_part_small(sortp_d, xp_d, contrib_d, 
   ! Target cell for offset k: bit set -> source cell, bit clear -> lower neighbour.
   kk = k - 1
   target_ckey = 0
-  in_domain = .true.
   do idim = 1, ndim
      bit = ibits(kk, idim-1, 1)
      target_ckey(idim) = src_ckey(idim) - 1 + bit
-     if (periodic_d(idim)) then
-        if (target_ckey(idim) <  box_min(idim)) target_ckey(idim) = box_max(idim) - 1
-        if (target_ckey(idim) >= box_max(idim)) target_ckey(idim) = box_min(idim)
-     else
-        if (target_ckey(idim) <  box_min(idim)) in_domain = .false.
-        if (target_ckey(idim) >= box_max(idim)) in_domain = .false.
-     end if
+     ! GPU runs are periodic: wrap the target cell into [box_min, box_max).
+     if (target_ckey(idim) <  box_min(idim)) target_ckey(idim) = box_max(idim) - 1
+     if (target_ckey(idim) >= box_max(idim)) target_ckey(idim) = box_min(idim)
   end do
-  if (.not. in_domain) return
 
   ! Hash the target cell's parent oct; skip if it is not present on this rank.
   nx          = int(ckey_max_d(ilevel), kind=8)
@@ -1918,7 +1895,7 @@ subroutine gpu_cic_part_small(sim, ilevel, rtype)
      call deposit_runs_part_small<<<blk, nblk>>>(sortp, xp, xp_swap, &
           & prefix_sum, isp_swap, &
           & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
-          & box_ckey_min, box_ckey_max, periodic, rho, &
+          & box_ckey_min, box_ckey_max, rho, &
           & skip1, skip2, skip3, dx_inv, k, ilevel, head_idx, num_parts, sim%r%npartmax)
 
      ! nref contribution (w, gated), only when the refinement gate is active.
@@ -1930,7 +1907,7 @@ subroutine gpu_cic_part_small(sim, ilevel, rtype)
         call deposit_runs_part_small<<<blk, nblk>>>(sortp, xp, xp_swap, &
              & prefix_sum, isp_swap, &
              & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
-             & box_ckey_min, box_ckey_max, periodic, nref, &
+             & box_ckey_min, box_ckey_max, nref, &
              & skip1, skip2, skip3, dx_inv, k, ilevel, head_idx, num_parts, sim%r%npartmax)
      endif
   end do
