@@ -106,36 +106,38 @@ contains
     integer(kind=4) :: head_idx, num_octs
     integer :: num_threads, num_blocks
     real(kind=dp) :: gamma, dx, courant_factor
-    real(kind=8), device :: mass_d, ekin_d, eint_d, emag_d, dt_d
+    real(kind=8), device, dimension(5) :: d_data !mass, ekin, eint, emag, dt
+    real(kind=8), dimension(5) :: h_data
 
     courant_factor = sim%r%courant_factor
     gamma = sim%r%gamma
     dx = sim%r%boxlen/2**ilevel
     dt = courant_factor*dx/sim%r%smallc
 
-    ! host to device
-    dt_d = dt
-    mass_d = 0d0
-    ekin_d = 0d0
-    eint_d = 0d0
-    emag_d = 0d0
+    ! initialize device memory for reduction
+    d_data(:) = 0d0
+    d_data(5) = dt
 
     head_idx = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
     num_threads = 256
     num_blocks = (num_octs * twotondim + num_threads - 1 ) / num_threads
     call nvtxStartRange("GPU cmpdt", color=0)!green
-    call cmpdt_kernel<<<num_blocks, num_threads>>>(grid, uold, f, constant_gravity, head_idx, num_octs, &
-         & mass_d, ekin_d, eint_d, emag_d, dt_d, dx, gamma, courant_factor)
-    call GPU_Error_Check(__FILE__, __LINE__)
+    call cmpdt_kernel<<<num_blocks, num_threads>>>(grid, uold, f, &
+        & constant_gravity, head_idx, num_octs, d_data, dx, gamma, &
+        & courant_factor)
     call nvtxEndRange()
 
-    ! device to host
-    dt = dt_d
-    mass = mass_d
-    ekin = ekin_d
-    eint = eint_d
-    emag = emag_d
+    ! move results to host
+    h_data(:) = d_data(:)
+
+    mass = h_data(1)
+    ekin = h_data(2)
+    eint = h_data(3)
+    emag = h_data(4)
+    dt = h_data(5)
+
+    call GPU_Error_Check(__FILE__, __LINE__)
 
   end subroutine gpu_cmpdt
 
@@ -470,7 +472,7 @@ contains
     nmake = new_ifree - old_ifree
 
     ! Check we have enough memory
-    if (new_ifree > sim%r%ngridmax) then
+    if (new_ifree - 1 > sim%r%ngridmax) then
        write(*,*)'No more main memory, increase ngridmax'
        write(*,*)'New octs:', nmake
        stop
@@ -1181,6 +1183,7 @@ contains
     if (num_octs > 0) then
        call nvtxStartRange("GPU reset_rho", color=1)!blue
        call reset_rho<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(rho, nref, head_idx, num_octs)
+       call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     end if
 
@@ -1375,6 +1378,7 @@ contains
        call nvtxStartRange("GPU save_phi_old", color=1)!blue
        call save_phi_old<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(phi_old, phi, &
             & head_idx, num_octs)
+       call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     end if
 
@@ -1419,6 +1423,7 @@ contains
        call nvtxStartRange("GPU init_phi", color=1)!blue
        call reset_phi<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(phi, f, &
             & head_idx, num_octs)
+       call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     endif
 
@@ -1428,6 +1433,7 @@ contains
           call nvtxStartRange("GPU init_phi", color=1)!blue
           call make_initial_phi<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(grid, father, &
                & nbor, phi, phi_old, tfrac, head_idx, num_octs, sim%m%ngridmax)
+          call GPU_Error_Check(__FILE__, __LINE__)
           call nvtxEndRange()
        endif
     endif
@@ -1446,6 +1452,7 @@ contains
           call nvtxStartRange("GPU init_phi", color=1)!blue
           call make_initial_phi<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(grid, father, &
                & nbor, phi, phi_old, tfrac, head_idx, num_octs, sim%m%ngridmax)
+          call GPU_Error_Check(__FILE__, __LINE__)
           call nvtxEndRange()
        endif
     endif
@@ -1480,6 +1487,7 @@ contains
        call nvtxStartRange("GPU make_mask", color=1)!blue
        call reset_mask_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(f, &
             & head_idx, num_octs, 1d0)
+       call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     endif
 
@@ -1523,6 +1531,7 @@ contains
        call nvtxStartRange("GPU make_rhs", color=1)!blue
        call reset_rhs_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(phi, rho, f, nbor, &
             & head_idx, num_octs, sim%m%ngridmax, fourpi, offset, oneoverdx2)
+       call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     end if
 
@@ -1564,6 +1573,7 @@ contains
        head_father = sim%m%noct(ilevel) + sim%m_mg%head(ifine)
     endif
 
+
     if (num_octs == 0) return
 
     num_threads = 128
@@ -1579,6 +1589,7 @@ contains
     else
        call init_prefix_sum_mg<<<num_blocks, num_threads>>>(grid_mg, prefix_sum, head_idx, num_octs)
     endif
+    call GPU_Error_Check(__FILE__, __LINE__)
     call nvtxEndRange()
 
     ! Compute prefix sums
@@ -1592,8 +1603,7 @@ contains
        num_threads_2 = 128
        num_blocks_2 = (new_noct + num_threads_2 - 1) / num_threads_2
 
-       ! Check we have enough memory
-       if ((head_mg + new_noct) > sim%m_mg%ngridmax) then
+       if ((head_mg + new_noct - 1) > sim%m_mg%ngridmax) then
           write(*,*)'No more grid memory, increase ngridmax for MG'
           write(*,*)'New multigrid octs:', new_noct
           stop
@@ -1602,9 +1612,10 @@ contains
        ! Compute MG father swap table
        call nvtxStartRange("GPU build_mg", color=2)!yellow
        call compute_father_swap_table<<<num_blocks, num_threads>>>(swap_local, prefix_sum, head_idx, num_octs)
+       call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
-
-       ! Make new MG octs
+ 
+       ! Make new MG octs.
        call nvtxStartRange("GPU build_mg", color=2)!yellow
        if (ifine == ilevel) then
           call make_father_octs<<<num_blocks_2, num_threads_2>>>(grid, grid_mg, phi_mg, f_mg, swap_local, &
@@ -1613,12 +1624,14 @@ contains
           call make_father_octs<<<num_blocks_2, num_threads_2>>>(grid_mg, grid_mg, phi_mg, f_mg, swap_local, &
                & head_mg, new_noct)
        endif
+       call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
 
        ! Insert new octs in hash table
        call nvtxStartRange("GPU build_mg", color=2)!yellow
        call insert_hash_kernel<<<num_blocks_2, num_threads_2>>>(grid_mg, hash_key_mg, hash_val_mg, &
             & sim%m_mg%hash_size, ckey_max, key_off, head_mg, new_noct)
+       call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
 
     end if
@@ -1629,12 +1642,14 @@ contains
        call update_father_array<<<num_blocks, num_threads>>>(father_mg, grid, grid_mg, &
             & hash_key_mg, hash_val_mg, sim%m_mg%hash_size, &
             & ckey_max, key_off, head_idx, head_father, num_octs)
+       call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     else
        call nvtxStartRange("GPU build_mg", color=2)!yellow
        call update_father_array<<<num_blocks, num_threads>>>(father_mg, grid_mg, grid_mg, &
             & hash_key_mg, hash_val_mg, sim%m_mg%hash_size, &
             & ckey_max, key_off, head_idx, head_father, num_octs)
+       call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     endif
 
@@ -1654,6 +1669,7 @@ contains
        call nvtxStartRange("GPU build_mg", color=2)!yellow
        call update_nbor_array_mg<<<num_blocks, num_threads>>>(nbor_mg, grid_mg, hash_key_mg, hash_val_mg, &
             & sim%m_mg%hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, head_idx, num_octs)
+       call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
     end if
 

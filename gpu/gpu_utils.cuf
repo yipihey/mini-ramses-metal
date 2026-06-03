@@ -13,6 +13,8 @@ module gpu_utils
   integer, parameter :: nsubgridp2sq = nsubgridp2**2
   integer, parameter :: subgridsize = nsubgridp2**ndim
 
+  logical :: gpu_debug = .false.
+
   !> @brief
   !> Contains a 6 by 6 by 6 subgrid of primitive variables. Intended to act as a subgrid
   !> where the inner 2 by 2 by 2 cells are "real" and the outer 2 cells are ghost/halo cells.
@@ -63,14 +65,18 @@ contains
     integer, intent(in) :: line_number
     integer :: code
 
-    ! Sync and get code
-    code = cudaDeviceSynchronize()
+    if (gpu_debug) then
 
-    ! Check the code
-    if (code /= cudaSuccess) then
-       print *, "GPU_Error_Check: Failed in File: ", file_name, "At Line:", line_number, "With code: ", cudaGetErrorString(code)
-       error stop code
-    end if
+       ! Sync and get code
+       code = cudaDeviceSynchronize()
+
+       ! Check the code
+       if (code /= cudaSuccess) then
+          print *, "GPU_Error_Check: Failed in File: ", file_name, "At Line:", line_number, "With code: ", cudaGetErrorString(code)
+          error stop code
+       end if
+
+    endif
 #endif
   end subroutine GPU_Error_Check
   ! ==========================================================================

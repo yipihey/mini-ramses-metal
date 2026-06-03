@@ -193,7 +193,7 @@ subroutine multigrid(pst,ilevel,icount)
      err = sqrt(res_norm2/(i_res_norm2+1d-20*pst%s%g%rho_tot**2))
 
      ! Verbosity
-     if(pst%s%r%verbose) print '(A,I5,A,1pE10.3)','   ==> Step=',iter,' Error=',err
+     if(pst%s%r%verbose) print '(A,I0,A,1pE10.3)','   ==> Step ',iter,' Error=',err
 
      ! Converged?
      if(err<pst%s%r%epsilon .or. iter>=MAXITER) exit
@@ -206,7 +206,7 @@ subroutine multigrid(pst,ilevel,icount)
 
   end do main_iteration_loop
 
-  print '(A,I5,A,I5,A,1pE10.3)','   ==> Level=',ilevel,' Step=',iter,' Error=',err
+  print '(A,I0,A,I0,A,1pE10.3)','   ==> Level ',ilevel,' Step ',iter,' Error=',err
   if(iter==MAXITER) print *,'WARN: Fine multigrid Poisson failed to converge...'
 
   ! ---------------------------------------------------------------------
