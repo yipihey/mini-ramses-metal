@@ -66,9 +66,16 @@ end module timer_module
 subroutine m_timer(label,cmd)
   use mdl_module
   use timer_module
+#ifdef _CUDA
+  use cudafor
+#endif
   implicit none
   character(len=*) label, cmd
   real(kind=8) wallclock, current
+#ifdef _CUDA
+  integer :: cuda_ierr
+  cuda_ierr = cudaDeviceSynchronize()
+#endif
   current = wallclock()                                                 ! current time
   if (itimer > 0) then                                                  ! if timer is active ..
      time(itimer) = time(itimer) + current - start(itimer)              ! add to it
