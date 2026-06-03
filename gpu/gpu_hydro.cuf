@@ -608,13 +608,6 @@ contains
     real(kind=dp) :: smallp
     real(kind=dp) :: sound_speed_l, sound_speed_r, speed_l, speed_r, speed_max
 
-    ! Verify that the density and pressure are reasonable and positive
-    smallp = smallc_squared / gamma ! The minimum pressure
-    left_state_p%density   = max(left_state_p%density,   smallr)
-    right_state_p%density  = max(right_state_p%density,  smallr)
-    left_state_p%pressure  = max(left_state_p%pressure,  smallp * left_state_p%density)
-    right_state_p%pressure = max(right_state_p%pressure, smallp * right_state_p%density)
-
     ! Compute the sound speeds
     sound_speed_l = sound_speed(left_state_p, gamma)
     sound_speed_r = sound_speed(right_state_p, gamma)
