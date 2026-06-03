@@ -10,10 +10,11 @@ module part_device
        & rho, nref, f, &
        & swap_local, swap_global, prefix_sum, &
        & partial_sums_0, partial_sums_1, partial_sums_2, &
+       & partial_sums_dp_0, partial_sums_dp_1, partial_sums_dp_2, &
        & xp, vp, mp, phip, levelp, sortp, idp, &
 !       & jp, zp, tp, tm, size_p, charge, idm, idt, &
        & xp_swap, isp_swap, idp_swap, &
-       & gpu_scan
+       & gpu_scan, gpu_scan_dp
   implicit none
 
   ! Local hash/hilbert/reduce includes.
@@ -76,6 +77,35 @@ subroutine ensure_scan_capacity_part(min_capacity)
      endif
   else
      allocate(partial_sums_2(1:gs2))
+  endif
+
+  ! Real(dp) partial-sum workspace, mirroring the integer tiers above. Used by
+  ! the DM CIC small-stencil deposit's per-offset gpu_scan_dp passes.
+  if (allocated(partial_sums_dp_0)) then
+     if (size(partial_sums_dp_0) < gs0) then
+        deallocate(partial_sums_dp_0)
+        allocate(partial_sums_dp_0(1:gs0))
+     endif
+  else
+     allocate(partial_sums_dp_0(1:gs0))
+  endif
+
+  if (allocated(partial_sums_dp_1)) then
+     if (size(partial_sums_dp_1) < gs1) then
+        deallocate(partial_sums_dp_1)
+        allocate(partial_sums_dp_1(1:gs1))
+     endif
+  else
+     allocate(partial_sums_dp_1(1:gs1))
+  endif
+
+  if (allocated(partial_sums_dp_2)) then
+     if (size(partial_sums_dp_2) < gs2) then
+        deallocate(partial_sums_dp_2)
+        allocate(partial_sums_dp_2(1:gs2))
+     endif
+  else
+     allocate(partial_sums_dp_2(1:gs2))
   endif
 
 end subroutine ensure_scan_capacity_part
@@ -505,8 +535,19 @@ subroutine gpu_split_part(sim, ilevel)
 
 end subroutine gpu_split_part
 
+!> Compute per-particle Hilbert sort keys.
+!>
+!> The source cell per axis is floor((xp+skip)/dx + shift). For the large
+!> deposit (part_dep_algo=1) shift=0; for the small deposit (part_dep_algo=2)
+!> shift=0.5 so the source cell becomes the upper corner of the standard CIC
+!> 2x2x2 stencil block (matching host cic_part's x+0.5 anchor). On periodic
+!> axes the shifted source cell is wrapped into [0, ncell) so an upper-edge
+!> particle groups with its periodic image; the small path uses key_level =
+!> level+1 so a non-periodic upper-edge virtual cell (index = ncell) is not
+!> aliased onto cell 0 by the Hilbert key.
 attributes(global) subroutine compute_hkey_part_kernel(xp, hkey_part_d, &
-     & skip1, skip2, skip3, dx_inv, head_idx, num_parts, leading, level)
+     & skip1, skip2, skip3, dx_inv, head_idx, num_parts, leading, level, &
+     & key_level, shift, periodic_d)
   integer(kind=4), intent(in), value :: leading
   real(kind=dp),   device :: xp(*)
   integer(kind=8), device :: hkey_part_d(*)
@@ -515,9 +556,12 @@ attributes(global) subroutine compute_hkey_part_kernel(xp, hkey_part_d, &
   integer(kind=4), intent(in), value :: head_idx
   integer(kind=4), intent(in), value :: num_parts
   integer(kind=4), intent(in), value :: level
+  integer(kind=4), intent(in), value :: key_level
+  real(kind=8),    intent(in), value :: shift
+  logical,         device :: periodic_d(1:3)
 
   integer :: thread_idx, block_idx, idx, ipart, idim
-  integer(kind=4) :: ix(1:ndim)
+  integer(kind=4) :: ix(1:ndim), ncell
   real(kind=8) :: skip(1:3), xs
 
   thread_idx = threadIdx%x - 1
@@ -531,12 +575,18 @@ attributes(global) subroutine compute_hkey_part_kernel(xp, hkey_part_d, &
   skip(2) = skip2
   skip(3) = skip3
 
+  ncell = ishft(1, level)
+
   do idim = 1, ndim
-     xs = xp(ipart + (idim-1)*leading) + skip(idim)
-     ix(idim) = floor(xs * dx_inv)
+     xs = (xp(ipart + (idim-1)*leading) + skip(idim)) * dx_inv + shift
+     ix(idim) = floor(xs)
+     if (periodic_d(idim)) then
+        if (ix(idim) >= ncell) ix(idim) = ix(idim) - ncell
+        if (ix(idim) < 0)      ix(idim) = ix(idim) + ncell
+     end if
   end do
 
-  hkey_part_d(ipart) = hilbert_key(ix, level)
+  hkey_part_d(ipart) = hilbert_key(ix, key_level)
 
 end subroutine compute_hkey_part_kernel
 
@@ -591,8 +641,8 @@ subroutine gpu_sort_part(sim, ilevel)
 
   integer(kind=4) :: head_idx, tail_idx, num_parts
   integer :: num_threads, num_blocks
-  integer :: ibit, level
-  real(kind=8) :: dx, dx_inv, skip1, skip2, skip3
+  integer :: ibit, level, key_level
+  real(kind=8) :: dx, dx_inv, skip1, skip2, skip3, shift
   character(len=32) :: nvtx_lbl
 
   head_idx = sim%p%headp(ilevel)
@@ -611,12 +661,24 @@ subroutine gpu_sort_part(sim, ilevel)
   skip2 = sim%m%skip(2)
   skip3 = sim%m%skip(3)
 
+  ! Small deposit (part_dep_algo=2) sorts by the half-cell shifted source cell
+  ! and needs one extra Hilbert level to keep the non-periodic upper-edge cell
+  ! (index = 2**level) distinct from cell 0.
+  if (sim%r%part_dep_algo == 2) then
+     shift = 0.5_dp
+     key_level = level + 1
+  else
+     shift = 0.0_dp
+     key_level = level
+  end if
+
   call nvtxStartRange("gpu_sort_part", color=4) ! purple
 
   ! Compute Hilbert keys and store them in idp_swap
   call nvtxStartRange("gpu_sort_part:hkey", color=4)
   call compute_hkey_part_kernel<<<num_blocks, num_threads>>>(xp, idp_swap, &
-       & skip1, skip2, skip3, dx_inv, head_idx, num_parts, sim%r%npartmax, level)
+       & skip1, skip2, skip3, dx_inv, head_idx, num_parts, sim%r%npartmax, level, &
+       & key_level, shift, periodic)
   call nvtxEndRange()
 
   ! Init sortp
@@ -626,7 +688,7 @@ subroutine gpu_sort_part(sim, ilevel)
   call nvtxEndRange()
 
   ! Loop over bits (one NVTX range per radix pass; kernels visible in CUDA row)
-  do ibit = 0, ndim * level - 1
+  do ibit = 0, ndim * key_level - 1
      write(nvtx_lbl, '(A,I0)') 'gpu_sort_part:bit_', ibit
      call nvtxStartRange(trim(nvtx_lbl), color=4)
 
@@ -757,7 +819,7 @@ end subroutine gpu_newdt_part_kernel
 !> expresses it as a 3-cell stencil per axis with the "wrong-side" cell
 !> carrying weight zero. That removes per-lane branching and lets the
 !> zero-weight lanes drop out of the segmented scan silently.
-attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
+attributes(global) subroutine cic_part_large_kernel(sortp_d, &
      & head_idx, num_parts, &
      & hash_key_d, hash_val_d, hash_size_d, ckey_max_d, key_off_d, &
      & box_ckey_min_d, box_ckey_max_d, periodic_d, &
@@ -1081,7 +1143,7 @@ attributes(global) subroutine cic_part_warp_kernel(sortp_d, &
      endif
   end do
 
-end subroutine cic_part_warp_kernel
+end subroutine cic_part_large_kernel
 
 !> Host dispatcher for the GPU CIC mass deposit at level ilevel.
 !>
@@ -1090,7 +1152,7 @@ end subroutine cic_part_warp_kernel
 !>   2. On the coarsest active level only, launch multipole_q_kernel to
 !>      accumulate the global monopole and dipole (q_0 = sum mp, q_alpha =
 !>      sum mp * xp_alpha) over the full particle table.
-!>   3. Launch cic_part_warp_kernel over sortp(head_idx..head_idx+num_parts-1)
+!>   3. Launch cic_part_large_kernel over sortp(head_idx..head_idx+num_parts-1)
 !>      to deposit into rho and nref via a per-warp segmented Hillis-Steele
 !>      scan. Each lane builds its own source map (parent-oct hash + packed
 !>      (igrid, icell)) from xp at the top of the kernel -- the former separate
@@ -1108,7 +1170,7 @@ end subroutine cic_part_warp_kernel
 !>     head_idx = p%headp(ilevel) through p%tailp(nlevelmax), so the range
 !>     covers every particle at or below ilevel (matching the host cic_part
 !>     loop bounds).
-subroutine gpu_cic_part(sim, ilevel, rtype)
+subroutine gpu_cic_part_large(sim, ilevel, rtype)
   use nvtx
   use ramses_commons, only: ramses_t
   type(ramses_t), intent(inout) :: sim
@@ -1127,7 +1189,7 @@ subroutine gpu_cic_part(sim, ilevel, rtype)
      return
   endif
 
-  call nvtxStartRange("gpu_cic_part", color=4) ! purple
+  call nvtxStartRange("gpu_cic_part_large", color=4) ! purple
 
   ! Coarsest level: accumulate global monopole and dipole.
   if (ilevel == sim%r%levelmin .and. sim%p%npart > 0) then
@@ -1136,7 +1198,7 @@ subroutine gpu_cic_part(sim, ilevel, rtype)
      num_blocks  = (sim%p%npart + num_threads - 1) / num_threads
 
      q_d = 0.0_dp
-     call nvtxStartRange("gpu_cic_part:multipole", color=4)
+     call nvtxStartRange("gpu_cic_part_large:multipole", color=4)
      call multipole_q_kernel<<<num_blocks, num_threads>>>(xp, mp, q_d, &
           & 1, sim%p%npart, sim%r%npartmax)
      call nvtxEndRange()
@@ -1177,8 +1239,8 @@ subroutine gpu_cic_part(sim, ilevel, rtype)
   ! write/read round trip or grid(igrid)%ckey read is needed.
   deposit_block_size = 256
   deposit_num_blocks = (num_parts + deposit_block_size - 1) / deposit_block_size
-  call nvtxStartRange("gpu_cic_part:deposit", color=4)
-  call cic_part_warp_kernel<<<deposit_num_blocks, deposit_block_size>>>(&
+  call nvtxStartRange("gpu_cic_part_large:deposit", color=4)
+  call cic_part_large_kernel<<<deposit_num_blocks, deposit_block_size>>>(&
        & sortp, head_idx, num_parts, &
        & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
        & box_ckey_min, box_ckey_max, periodic, &
@@ -1189,7 +1251,361 @@ subroutine gpu_cic_part(sim, ilevel, rtype)
 
   call nvtxEndRange()
 
-end subroutine gpu_cic_part
+end subroutine gpu_cic_part_large
+
+!################################################################
+!  GPU CIC small-stencil deposit (part_dep_algo = 2)
+!################################################################
+!
+!> Mark source-cell run leaders into prefix_sum (1 at a run head, 0 otherwise).
+!>
+!> After the shifted gpu_sort_part, particles sharing a (half-cell shifted)
+!> source cell have an identical Hilbert key in hkey_part_d and are contiguous
+!> in sortp. A slot is a run leader when its key differs from the previous
+!> slot's key (the first slot is always a leader).
+attributes(global) subroutine init_leader_marker_part_small(sortp_d, hkey_part_d, &
+     & prefix_sum_d, head_idx, num_parts)
+  integer(kind=4), device :: sortp_d(*)
+  integer(kind=8), device :: hkey_part_d(*)
+  integer(kind=4), device :: prefix_sum_d(*)
+  integer(kind=4), intent(in), value :: head_idx, num_parts
+
+  integer :: thread_idx, block_idx, idx, g
+
+  thread_idx = threadIdx%x - 1
+  block_idx  = blockIdx%x  - 1
+  idx = thread_idx + block_idx * blockDim%x
+  if (idx >= num_parts) return
+  g = head_idx + idx
+
+  if (idx == 0) then
+     prefix_sum_d(g) = 1
+  else if (hkey_part_d(sortp_d(g)) /= hkey_part_d(sortp_d(g-1))) then
+     prefix_sum_d(g) = 1
+  else
+     prefix_sum_d(g) = 0
+  end if
+
+end subroutine init_leader_marker_part_small
+
+!> Record, for each source-cell run, the 1-based slot of its last particle.
+!>
+!> prefix_sum_d already holds the inclusive run id per slot (the scan of the
+!> leader markers). A slot is the run tail when it is the last particle or the
+!> next slot belongs to a different run.
+attributes(global) subroutine fill_run_tail_part_small(prefix_sum_d, run_tail_d, &
+     & head_idx, num_parts)
+  integer(kind=4), device :: prefix_sum_d(*)
+  integer(kind=4), device :: run_tail_d(*)
+  integer(kind=4), intent(in), value :: head_idx, num_parts
+
+  integer :: thread_idx, block_idx, idx, g, rid
+
+  thread_idx = threadIdx%x - 1
+  block_idx  = blockIdx%x  - 1
+  idx = thread_idx + block_idx * blockDim%x
+  if (idx >= num_parts) return
+  g = head_idx + idx
+  rid = prefix_sum_d(g)
+
+  if (idx == num_parts - 1) then
+     run_tail_d(rid) = idx + 1
+  else if (prefix_sum_d(g+1) /= rid) then
+     run_tail_d(rid) = idx + 1
+  end if
+
+end subroutine fill_run_tail_part_small
+
+!> Per-particle CIC contribution for stencil offset k into contrib_d.
+!>
+!> The shifted source cell is the upper corner of the 2x2x2 stencil; for offset
+!> k (1..twotondim) bit (idim-1) selects the source cell (weight = frac) when
+!> set or the lower neighbour (weight = 1-frac) when clear, matching host
+!> cic_index/cic_weight ordering. mode 0 fills rho contributions (mp*w/vol_loc);
+!> mode 1 fills nref contributions (w, gated by mass_cut_refine, DM branch).
+attributes(global) subroutine fill_contrib_part_small(sortp_d, xp_d, mp_d, contrib_d, &
+     & skip1, skip2, skip3, dx_inv, vol_loc, k, mode, mass_cut_refine, &
+     & head_idx, num_parts, leading)
+  integer(kind=4), device :: sortp_d(*)
+  real(kind=dp),   device :: xp_d(*)
+  real(kind=dp),   device :: mp_d(*)
+  real(kind=dp),   device :: contrib_d(*)
+  real(kind=8), intent(in), value :: skip1, skip2, skip3, dx_inv, vol_loc, mass_cut_refine
+  integer(kind=4), intent(in), value :: k, mode, head_idx, num_parts, leading
+
+  integer :: thread_idx, block_idx, idx, g, ipart, idim, bit, kk
+  real(kind=8) :: skip(1:3), xs, fr(1:3), w, mp_i
+
+  thread_idx = threadIdx%x - 1
+  block_idx  = blockIdx%x  - 1
+  idx = thread_idx + block_idx * blockDim%x
+  if (idx >= num_parts) return
+  g = head_idx + idx
+  ipart = sortp_d(g)
+
+  skip(1) = skip1
+  skip(2) = skip2
+  skip(3) = skip3
+
+  fr = 0.0d0
+  do idim = 1, ndim
+     xs = (xp_d(ipart + (idim-1)*leading) + skip(idim)) * dx_inv + 0.5d0
+     fr(idim) = xs - floor(xs)
+  end do
+
+  kk = k - 1
+  w = 1.0d0
+  do idim = 1, ndim
+     bit = ibits(kk, idim-1, 1)
+     if (bit == 1) then
+        w = w * fr(idim)
+     else
+        w = w * (1.0d0 - fr(idim))
+     end if
+  end do
+
+  if (mode == 0) then
+     mp_i = mp_d(ipart)
+     contrib_d(g) = real(mp_i * w / vol_loc, kind=dp)
+  else
+     if (mass_cut_refine > 0.0d0) then
+        if (mp_d(ipart) < mass_cut_refine) then
+           contrib_d(g) = real(w, kind=dp)
+        else
+           contrib_d(g) = 0.0_dp
+        end if
+     else
+        contrib_d(g) = real(w, kind=dp)
+     end if
+  end if
+
+end subroutine fill_contrib_part_small
+
+!> Deposit one accumulated value per source-cell run for stencil offset k.
+!>
+!> contrib_d holds the inclusive prefix sum of the per-particle contributions,
+!> so a run's total is contrib_d(tail) - contrib_d(head-1). Only the run leader
+!> emits; it hashes the single target cell (source cell + offset k) and writes
+!> it. For a fixed offset distinct source cells map to distinct target cells, so
+!> the plain read-modify-write is race free (no atomics needed).
+attributes(global) subroutine deposit_runs_part_small(sortp_d, xp_d, contrib_d, &
+     & prefix_sum_d, run_tail_d, &
+     & hash_key_d, hash_val_d, hash_size_d, ckey_max_d, key_off_d, &
+     & box_ckey_min_d, box_ckey_max_d, periodic_d, out_d, &
+     & skip1, skip2, skip3, dx_inv, k, ilevel, head_idx, num_parts, leading)
+  integer(kind=4), device :: sortp_d(*)
+  real(kind=dp),   device :: xp_d(*)
+  real(kind=dp),   device :: contrib_d(*)
+  integer(kind=4), device :: prefix_sum_d(*)
+  integer(kind=4), device :: run_tail_d(*)
+  integer(kind=8), device :: hash_key_d(*)
+  integer(kind=4), device :: hash_val_d(*)
+  integer(kind=4), intent(in), value :: hash_size_d
+  integer(kind=4), device :: ckey_max_d(*)
+  integer(kind=8), device :: key_off_d(*)
+  integer(kind=4), device :: box_ckey_min_d(1:3, *)
+  integer(kind=4), device :: box_ckey_max_d(1:3, *)
+  logical,         device :: periodic_d(1:3)
+  real(kind=dp),   device :: out_d(1:twotondim, *)
+  real(kind=8), intent(in), value :: skip1, skip2, skip3, dx_inv
+  integer(kind=4), intent(in), value :: k, ilevel, head_idx, num_parts, leading
+
+  integer :: thread_idx, block_idx, idx, g, ipart, idim, bit, kk, rid
+  integer :: tail_slot, g_t, igrid, icell
+  integer(kind=4) :: src_ckey(1:3), target_ckey(1:3), father_ckey(1:3), ii(1:3)
+  integer(kind=4) :: box_min(1:3), box_max(1:3), ncell
+  integer(kind=8) :: nx, hkey_offset, key, ix8, iy8, iz8
+  real(kind=8) :: skip(1:3), xs, run_sum
+  logical :: in_domain
+
+  thread_idx = threadIdx%x - 1
+  block_idx  = blockIdx%x  - 1
+  idx = thread_idx + block_idx * blockDim%x
+  if (idx >= num_parts) return
+  g = head_idx + idx
+
+  ! Only the run leader works (first slot, or a key change vs the previous slot).
+  if (idx > 0) then
+     if (prefix_sum_d(g) == prefix_sum_d(g-1)) return
+  end if
+
+  ! Run total = prefix(tail) - prefix(head-1).
+  rid = prefix_sum_d(g)
+  tail_slot = run_tail_d(rid)
+  g_t = head_idx + tail_slot - 1
+  run_sum = contrib_d(g_t)
+  if (idx > 0) run_sum = run_sum - contrib_d(g-1)
+  if (run_sum == 0.0_dp) return
+
+  ! Recompute the canonical (shifted, periodic-wrapped) source cell.
+  ipart = sortp_d(g)
+  skip(1) = skip1
+  skip(2) = skip2
+  skip(3) = skip3
+  ncell = ishft(1, ilevel)
+  src_ckey = 0
+  do idim = 1, ndim
+     xs = (xp_d(ipart + (idim-1)*leading) + skip(idim)) * dx_inv + 0.5d0
+     src_ckey(idim) = floor(xs)
+     if (periodic_d(idim)) then
+        if (src_ckey(idim) >= ncell) src_ckey(idim) = src_ckey(idim) - ncell
+        if (src_ckey(idim) < 0)      src_ckey(idim) = src_ckey(idim) + ncell
+     end if
+  end do
+
+  ! Per-level box bounds (stored at slot ilevel+1, an array convention).
+  box_min = 0
+  box_max = 0
+  do idim = 1, ndim
+     box_min(idim) = box_ckey_min_d(idim, ilevel+1)
+     box_max(idim) = box_ckey_max_d(idim, ilevel+1)
+  end do
+
+  ! Target cell for offset k: bit set -> source cell, bit clear -> lower neighbour.
+  kk = k - 1
+  target_ckey = 0
+  in_domain = .true.
+  do idim = 1, ndim
+     bit = ibits(kk, idim-1, 1)
+     target_ckey(idim) = src_ckey(idim) - 1 + bit
+     if (periodic_d(idim)) then
+        if (target_ckey(idim) <  box_min(idim)) target_ckey(idim) = box_max(idim) - 1
+        if (target_ckey(idim) >= box_max(idim)) target_ckey(idim) = box_min(idim)
+     else
+        if (target_ckey(idim) <  box_min(idim)) in_domain = .false.
+        if (target_ckey(idim) >= box_max(idim)) in_domain = .false.
+     end if
+  end do
+  if (.not. in_domain) return
+
+  ! Hash the target cell's parent oct; skip if it is not present on this rank.
+  nx          = int(ckey_max_d(ilevel), kind=8)
+  hkey_offset = key_off_d(ilevel)
+  father_ckey = target_ckey / 2
+  ii          = target_ckey - 2 * father_ckey
+  icell = 1
+  do idim = 1, ndim
+     icell = icell + ii(idim) * (2**(idim-1))
+  end do
+  ix8 = int(father_ckey(1), kind=8)
+  iy8 = int(father_ckey(2), kind=8)
+  iz8 = int(father_ckey(3), kind=8)
+  key = hkey_offset + ix8 + iy8*nx + iz8*nx*nx
+  igrid = hash_get(hash_key_d, hash_val_d, hash_size_d, key)
+  if (igrid == 0) return
+
+  ! Race free: distinct runs (source cells) map to distinct target cells here.
+  out_d(icell, igrid) = out_d(icell, igrid) + real(run_sum, kind=dp)
+
+end subroutine deposit_runs_part_small
+
+!> Host dispatcher for the GPU CIC small-stencil mass deposit at level ilevel.
+!>
+!> Like gpu_cic_part_large, this accumulates the global monopole/dipole on the
+!> coarsest level, then deposits particle mass into rho (and nref). Unlike the
+!> large path it relies on gpu_sort_part having grouped particles by their
+!> half-cell shifted source cell, builds one run per source cell, and for each
+!> of the twotondim = 2**ndim stencil offsets runs a real prefix sum over the
+!> per-particle weights and emits a single value per run. Because a fixed offset
+!> maps every distinct source cell to a distinct target cell, the run leaders
+!> write without atomics. The offsets are looped on the host so only one
+!> contribution buffer (xp_swap) is live at a time.
+subroutine gpu_cic_part_small(sim, ilevel, rtype)
+  use nvtx
+  use ramses_commons, only: ramses_t
+  type(ramses_t), intent(inout) :: sim
+  integer, intent(in) :: ilevel
+  integer, intent(in) :: rtype
+
+  integer(kind=4) :: head_idx, tail_idx, num_parts
+  integer :: num_threads, num_blocks, idim, k
+  integer :: blk, nblk
+  real(kind=8) :: dx_loc, vol_loc, dx_inv, skip1, skip2, skip3
+  real(kind=8) :: q_h(1:ndim+1)
+  real(kind=8), device :: q_d(1:ndim+1)
+
+  ! rtype gate: matches the host's "deposit DM into rho" branch.
+  if (rtype /= 0 .and. rtype /= 1) return
+
+  call nvtxStartRange("gpu_cic_part_small", color=4) ! purple
+
+  ! Coarsest level: accumulate global monopole and dipole (same as large path).
+  if (ilevel == sim%r%levelmin .and. sim%p%npart > 0) then
+     num_threads = 256
+     num_blocks  = (sim%p%npart + num_threads - 1) / num_threads
+     q_d = 0.0_dp
+     call nvtxStartRange("gpu_cic_part_small:multipole", color=4)
+     call multipole_q_kernel<<<num_blocks, num_threads>>>(xp, mp, q_d, &
+          & 1, sim%p%npart, sim%r%npartmax)
+     call nvtxEndRange()
+     q_h = q_d
+     do idim = 1, ndim+1
+        sim%g%multipole%q(idim) = sim%g%multipole%q(idim) + q_h(idim)
+     end do
+  endif
+
+  ! Particle index range for the deposit: everything at or below ilevel.
+  head_idx = sim%p%headp(ilevel)
+  tail_idx = sim%p%tailp(sim%r%nlevelmax)
+  num_parts = tail_idx - head_idx + 1
+  if (num_parts <= 0) then
+     call nvtxEndRange()
+     return
+  endif
+
+  dx_loc  = sim%r%boxlen/2**ilevel
+  vol_loc = dx_loc**ndim
+  dx_inv  = 1.0_dp/dx_loc
+  skip1 = sim%m%skip(1)
+  skip2 = sim%m%skip(2)
+  skip3 = sim%m%skip(3)
+
+  nblk = 256
+  blk  = (num_parts + nblk - 1) / nblk
+
+  ! Build source-cell runs: leader markers -> inclusive scan (run id in
+  ! prefix_sum) -> per-run tail slot (in isp_swap).
+  call nvtxStartRange("gpu_cic_part_small:runs", color=4)
+  call init_leader_marker_part_small<<<blk, nblk>>>(sortp, idp_swap, &
+       & prefix_sum, head_idx, num_parts)
+  call gpu_scan(head_idx, num_parts)
+  call fill_run_tail_part_small<<<blk, nblk>>>(prefix_sum, isp_swap, &
+       & head_idx, num_parts)
+  call nvtxEndRange()
+
+  ! Per stencil offset: prefix sum the weighted contributions and deposit one
+  ! value per source-cell run.
+  call nvtxStartRange("gpu_cic_part_small:deposit", color=4)
+  do k = 1, twotondim
+     ! rho contribution (mp * w / vol_loc)
+     call fill_contrib_part_small<<<blk, nblk>>>(sortp, xp, mp, xp_swap, &
+          & skip1, skip2, skip3, dx_inv, vol_loc, k, 0, sim%r%mass_cut_refine, &
+          & head_idx, num_parts, sim%r%npartmax)
+     call gpu_scan_dp(xp_swap, head_idx, num_parts)
+     call deposit_runs_part_small<<<blk, nblk>>>(sortp, xp, xp_swap, &
+          & prefix_sum, isp_swap, &
+          & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
+          & box_ckey_min, box_ckey_max, periodic, rho, &
+          & skip1, skip2, skip3, dx_inv, k, ilevel, head_idx, num_parts, sim%r%npartmax)
+
+     ! nref contribution (w, gated), only when the refinement gate is active.
+     if (sim%r%m_refine(ilevel) >= 0.0_dp) then
+        call fill_contrib_part_small<<<blk, nblk>>>(sortp, xp, mp, xp_swap, &
+             & skip1, skip2, skip3, dx_inv, vol_loc, k, 1, sim%r%mass_cut_refine, &
+             & head_idx, num_parts, sim%r%npartmax)
+        call gpu_scan_dp(xp_swap, head_idx, num_parts)
+        call deposit_runs_part_small<<<blk, nblk>>>(sortp, xp, xp_swap, &
+             & prefix_sum, isp_swap, &
+             & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
+             & box_ckey_min, box_ckey_max, periodic, nref, &
+             & skip1, skip2, skip3, dx_inv, k, ilevel, head_idx, num_parts, sim%r%npartmax)
+     endif
+  end do
+  call nvtxEndRange()
+
+  call nvtxEndRange()
+
+end subroutine gpu_cic_part_small
 
 !> Per-level particle Courant reduction. Computes vmax = MAX|vp| and
 !> ekin = SUM 0.5*mp*|vp|^2 over particles in level ilevel from device vp/mp

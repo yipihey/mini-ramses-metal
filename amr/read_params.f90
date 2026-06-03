@@ -327,6 +327,7 @@ subroutine m_read_params(pst)
   ! level >=cg_levelmin uses conjugate gradient
   logical :: fast_solver=.false.   ! Fast solver with MPI pre-fetch (memory intensive)
   integer :: part_mass_deposition_scheme=1     ! part mass deposition schemes (CIC 1, TSC 2, PCS 3)
+  integer :: part_dep_algo=1   ! GPU CIC particle deposition algorithm (1: large 27-offset, 2: small 8-offset)
   integer :: part_force_interpolation_scheme=1 ! part force interpolation schemes (CIC 1, TSC 2, PCS 3)
   integer :: star_mass_deposition_scheme=1     ! star mass deposition schemes
   integer :: star_force_interpolation_scheme=1 ! star force interpolation schemes
@@ -572,7 +573,7 @@ subroutine m_read_params(pst)
   ! Poisson solver parameters
   namelist/poisson_params/epsilon,gravity_type,gravity_params &
        & ,cg_levelmin,cic_levelmax,fast_solver,gravity_test &
-       & ,part_mass_deposition_scheme,part_force_interpolation_scheme &
+       & ,part_mass_deposition_scheme,part_dep_algo,part_force_interpolation_scheme &
        & ,star_mass_deposition_scheme,star_force_interpolation_scheme &
        & ,sink_mass_deposition_scheme,sink_force_interpolation_scheme &
        & ,tree_mass_deposition_scheme,tree_force_interpolation_scheme
@@ -835,6 +836,11 @@ subroutine m_read_params(pst)
   if(nlevelmax<levelmin)then
      write(*,*)'Error in the namelist:'
      write(*,*)'levelmax should not be lower than levelmin'
+     nml_ok=.false.
+  end if
+  if(part_dep_algo/=1 .and. part_dep_algo/=2)then
+     write(*,*)'Error in the namelist:'
+     write(*,*)'part_dep_algo must be 1 (large) or 2 (small)'
      nml_ok=.false.
   end if
   if(ngridmax==0)then
@@ -1288,6 +1294,7 @@ subroutine m_read_params(pst)
   s%r%cg_levelmin=cg_levelmin
   s%r%fast_solver=fast_solver
   s%r%part_mass_deposition_scheme=part_mass_deposition_scheme
+  s%r%part_dep_algo=part_dep_algo
   s%r%part_force_interpolation_scheme=part_force_interpolation_scheme
   s%r%star_mass_deposition_scheme=star_mass_deposition_scheme
   s%r%star_force_interpolation_scheme=star_force_interpolation_scheme

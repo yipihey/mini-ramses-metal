@@ -54,6 +54,8 @@ module gpu_runner
   integer(kind=4), device, allocatable, dimension(:) :: swap_local, swap_global
   integer(kind=4), device, allocatable, dimension(:) :: prefix_sum
   integer(kind=4), device, allocatable, dimension(:) :: partial_sums_0, partial_sums_1, partial_sums_2
+  !> Real(dp) partial-sum workspace for the dark matter CIC small-stencil deposit
+  real(kind=dp), device, allocatable, dimension(:) :: partial_sums_dp_0, partial_sums_dp_1, partial_sums_dp_2
 
   !> Arrays to hold the multigrid variables on the device
   type(oct), device, allocatable, dimension(:) :: grid_mg
@@ -1103,6 +1105,86 @@ contains
     endif
 
   end subroutine gpu_scan
+
+  !> @brief
+  !> Perform an inclusive prefix sum (scan) in place on the real(dp) array data
+  !>
+  !> @detail
+  !> Mirrors gpu_scan but operates on a real(dp) array passed as argument, using
+  !> the real(dp) partial-sum workspace. Scans num_octs elements starting at
+  !> index head_idx. Used by the DM CIC small-stencil deposit to accumulate
+  !> per-offset particle weight contributions.
+  !>
+  subroutine gpu_scan_dp(data, head_idx, num_octs)
+    real(kind=dp), device :: data(*)
+    integer(kind=4) :: head_idx
+    integer(kind=4) :: num_octs
+    !
+    integer(kind=4) :: block_size, grid_size_0, grid_size_1, grid_size_2
+    integer(kind=4) :: offset, size
+    integer(kind=4) :: num_max_0, num_max_1, num_max_2
+
+    block_size = 256
+    num_max_0 = block_size**2
+    num_max_1 = block_size**3
+    num_max_2 = huge(1_4)
+
+    if(num_octs <= num_max_0)then
+
+       grid_size_0 = (num_octs + block_size - 1) / block_size
+       call block_scan_dp<<<grid_size_0, block_size>>>(data, head_idx, num_octs, partial_sums_dp_0)
+       if (grid_size_0 > 1) then
+          call block_scan_dp<<<1, grid_size_0>>>(partial_sums_dp_0, 1, grid_size_0)
+          offset = head_idx + block_size
+          size = num_octs - block_size
+          call uniform_add_dp<<<grid_size_0 - 1, block_size>>>(data, offset, size, partial_sums_dp_0)
+       end if
+
+    else if(num_octs <= num_max_1)then
+
+       grid_size_0 = (num_octs + block_size - 1) / block_size
+       call block_scan_dp<<<grid_size_0, block_size>>>(data, head_idx, num_octs, partial_sums_dp_0)
+       grid_size_1 = (grid_size_0 + block_size - 1) / block_size
+       call block_scan_dp<<<grid_size_1, block_size>>>(partial_sums_dp_0, 1, grid_size_0, partial_sums_dp_1)
+       if (grid_size_1 > 1) then
+          call block_scan_dp<<<1, grid_size_1>>>(partial_sums_dp_1, 1, grid_size_1)
+          offset = 1 + block_size
+          size = grid_size_0 - block_size
+          call uniform_add_dp<<<grid_size_1 - 1, block_size>>>(partial_sums_dp_0, offset, size, partial_sums_dp_1)
+       end if
+       offset = head_idx + block_size
+       size = num_octs - block_size
+       call uniform_add_dp<<<grid_size_0 - 1, block_size>>>(data, offset, size, partial_sums_dp_0)
+
+    else if(num_octs <= num_max_2)then
+
+       grid_size_0 = (num_octs + block_size - 1) / block_size
+       call block_scan_dp<<<grid_size_0, block_size>>>(data, head_idx, num_octs, partial_sums_dp_0)
+       grid_size_1 = (grid_size_0 + block_size - 1) / block_size
+       call block_scan_dp<<<grid_size_1, block_size>>>(partial_sums_dp_0, 1, grid_size_0, partial_sums_dp_1)
+       grid_size_2 = (grid_size_1 + block_size - 1) / block_size
+       call block_scan_dp<<<grid_size_2, block_size>>>(partial_sums_dp_1, 1, grid_size_1, partial_sums_dp_2)
+       if (grid_size_2 > 1) then
+          call block_scan_dp<<<1, grid_size_2>>>(partial_sums_dp_2, 1, grid_size_2)
+          offset = 1 + block_size
+          size = grid_size_1 - block_size
+          call uniform_add_dp<<<grid_size_2 - 1, block_size>>>(partial_sums_dp_1, offset, size, partial_sums_dp_2)
+       end if
+       offset = 1 + block_size
+       size =  grid_size_0 - block_size
+       call uniform_add_dp<<<grid_size_1 - 1, block_size>>>(partial_sums_dp_0, offset, size, partial_sums_dp_1)
+       offset = head_idx + block_size
+       size = num_octs - block_size
+       call uniform_add_dp<<<grid_size_0 - 1, block_size>>>(data, offset, size, partial_sums_dp_0)
+
+    else
+
+       write(*,*)'Too many parts for prefix sum...'
+       stop
+
+    endif
+
+  end subroutine gpu_scan_dp
 
   !> @brief
   !> Initialize the hash table
