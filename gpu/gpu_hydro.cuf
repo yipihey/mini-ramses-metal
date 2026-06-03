@@ -1949,6 +1949,7 @@ contains
   ! ##########################################################################
 
   ! =========================================================================
+#ifndef PAPER
   attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, dt, dx, slope, riemann, constant_gravity)
@@ -2033,6 +2034,7 @@ contains
     endif
 
   end subroutine hydro_integrator_kernel
+#endif
   ! =========================================================================
 
   ! =========================================================================
@@ -2828,7 +2830,8 @@ contains
   end subroutine compute_slopes
 
    ! =========================================================================
-   ! > @brief Paoper hydro kernel solves HD in planes to minimise usage of shared memory without recomputing anything.
+#ifdef PAPER
+   ! > @brief Paper hydro kernel solves HD in planes to minimise usage of shared memory without recomputing anything.
   attributes(global) subroutine hydro_integrator_paper_kernel(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, dt, dx, slope, riemann, constant_gravity)
@@ -3182,6 +3185,7 @@ contains
     end do ! iz loop
 
   end subroutine hydro_integrator_paper_kernel
+#endif
   ! =========================================================================
 
 end module hydro_device

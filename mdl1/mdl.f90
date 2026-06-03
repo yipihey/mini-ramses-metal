@@ -325,7 +325,7 @@ contains
     call MPI_COMM_SIZE(MPI_COMM_WORLD,mdl%ncpu,info)
     mdl%myid=mdl%myid+1 ! Careful with this...
     if(mdl_self(mdl)==1)then
-       write(*,'(" Launching MPI with ntask = ",I6)')mdl%ncpu
+       write(*,'(" Launching MPI with ntask = ",I0)')mdl%ncpu
     endif
 #else
     write(*,'(" Serial execution (no MPI).")')
@@ -336,12 +336,12 @@ contains
     err_code = cudaGetDeviceCount(mdl%ngpu) ! Get the number of GPUs available
     mdl%mydev = mod(mdl%myid, mdl%ngpu) ! Determine which GPU this rank will use
     err_code = cudaSetDevice(mdl%mydev) ! Set the device for this rank
-    if(mdl%myid==1)write(*,'(" Launching CUDA with ndevice/task =",I6)')mdl%ngpu
+    if(mdl%myid==1)write(*,'(" Launching CUDA with ndevice/task = ",I0)')mdl%ngpu
     err_code = cudaGetDeviceProperties(prop,0)
     write(*,'(" Device Name: ",A)')trim(prop%name)
     write(*,'(" Compute Capability: ",i0,".",i0)')prop%major,prop%minor
-    write(*,'(" Shared Memory per Block: ",i16)')prop%sharedMemPerBlock
-    write(*,'(" Maximum Shared Memory per Block: ",i8)')prop%sharedMemPerBlockOptIn
+    write(*,'(" Shared Memory per Block: ",i0)')prop%sharedMemPerBlock
+    write(*,'(" Maximum Shared Memory per Block: ",i0)')prop%sharedMemPerBlockOptIn
 #endif
   end subroutine mdl_initialize
   !##############################################################

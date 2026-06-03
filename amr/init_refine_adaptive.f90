@@ -35,9 +35,9 @@ subroutine m_init_refine_adaptive(pst)
      if(pst%s%r%filetype=='grafic_zoom'.and.pst%s%r%initfile(istep+1).eq.' ')exit
 
      if(istep<pst%s%r%nlevelmax)then
-        write(*,*)'Building initial fine grid at level ',istep+1
+        write(*,'(" Building initial fine grid at level ",I0)')istep+1
      else if(istep==pst%s%r%nlevelmax)then
-        write(*,*)'Finalizing initial grid at level ',istep
+        write(*,'(" Finalizing initial grid at level ",I0)')istep
      else
         write(*,*)'Finalizing initial grid at all levels'
      endif

@@ -721,12 +721,12 @@ subroutine m_read_params(pst)
   write(*,*)'        (c) CEA 1999-2007, UZH 2008-2021, PU 2022-2025         '
   write(*,*)' '
 
-  write(*,'(" Working with ndim = ",I1)')ndim
+  write(*,'(" Working with ndim = ",I0)')ndim
 #ifdef GRAV
   write(*,'(" Using gravity solver")')
 #endif
 #ifdef HYDRO
-  write(*,'(" Using hydro solver with nvar = ",I3)')nvar
+  write(*,'(" Using hydro solver with nvar = ",I0)')nvar
   ! Check nvar is not too small
   if(nvar<5)then
      write(*,*)'You should have: nvar>=5'
@@ -735,7 +735,7 @@ subroutine m_read_params(pst)
   endif
 #endif
 #ifdef RT
-  write(*,'(" Using radiation solver with nrtgrp = ",I2)')nrtgrp
+  write(*,'(" Using radiation solver with nrtgrp = ",I0)')nrtgrp
 #endif
 
   ! Write information about git version
