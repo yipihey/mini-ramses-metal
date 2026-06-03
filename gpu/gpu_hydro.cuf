@@ -2267,6 +2267,11 @@ contains
     integer, parameter :: mf = m + 2*nb ! size of local stencil incl ghost cells
     integer, parameter :: mf2 = mf**2   ! 2D size of local stencil incl ghost cells
 
+    ! Density and pressure floors
+    real(kind=dp), parameter :: smallr = 1d-10
+    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
+    real(kind=dp), parameter :: smallp = smallr * smallc_squared
+
     ! Local device arrays (shared memory)
     real(dp), shared :: q_storage(1:m+4,1:m+4,nvar,3)
     real(dp), shared :: qds(2:m+3,2:m+3,nvar,3)
@@ -2397,6 +2402,11 @@ contains
           if (ix >= 3 .and. ix <= m+2 .and. iy >= 3 .and. iy <= m+2) then
              do ivar = 1, nvar
                 qR(ix,iy,ivar) = qdt(ix,iy,ifwd(ivar,3)) - hdx * qds(ix,iy,ifwd(ivar,3),3)
+                if (ivar == i_rho) then
+                   if (qR(ix,iy,i_rho) < smallr) qR(ix,iy,i_rho) = q_storage(ix,iy,i_rho,ic)
+                else if (ivar == i_ene) then
+                   if (qR(ix,iy,i_ene) < smallp) qR(ix,iy,i_ene) = q_storage(ix,iy,i_ene,ic)
+                end if
              end do
           end if
           !call syncthreads()
@@ -2466,6 +2476,13 @@ contains
              do ivar = 1, nvar
                 qL(ix,iy,ivar) = qdt(ix-1,iy,ivar) + hdx * qds(ix-1,iy,ivar,1)
                 qR(ix,iy,ivar) = qdt(ix  ,iy,ivar) - hdx * qds(ix  ,iy,ivar,1)
+                if (ivar == i_rho) then
+                   if (qL(ix,iy,i_rho) < smallr) qL(ix,iy,i_rho) = q_storage(ix-1,iy,i_rho,ic)
+                   if (qR(ix,iy,i_rho) < smallr) qR(ix,iy,i_rho) = q_storage(ix,iy,i_rho,ic)
+                else if (ivar == i_ene) then
+                   if (qL(ix,iy,i_ene) < smallp) qL(ix,iy,i_ene) = q_storage(ix-1,iy,i_ene,ic)
+                   if (qR(ix,iy,i_ene) < smallp) qR(ix,iy,i_ene) = q_storage(ix,iy,i_ene,ic)
+                end if
              end do
           end if
           !call syncthreads()
@@ -2519,6 +2536,13 @@ contains
              do ivar = 1, nvar
                 qL(ix,iy,ivar) = qdt(ix,iy-1,ifwd(ivar,2)) + hdx * qds(ix,iy-1,ifwd(ivar,2),2)
                 qR(ix,iy,ivar) = qdt(ix,iy  ,ifwd(ivar,2)) - hdx * qds(ix,iy  ,ifwd(ivar,2),2)
+                if (ivar == i_rho) then
+                   if (qL(ix,iy,i_rho) < smallr) qL(ix,iy,i_rho) = q_storage(ix,iy-1,i_rho,ic)
+                   if (qR(ix,iy,i_rho) < smallr) qR(ix,iy,i_rho) = q_storage(ix,iy,i_rho,ic)
+                else if (ivar == i_ene) then
+                   if (qL(ix,iy,i_ene) < smallp) qL(ix,iy,i_ene) = q_storage(ix,iy-1,i_ene,ic)
+                   if (qR(ix,iy,i_ene) < smallp) qR(ix,iy,i_ene) = q_storage(ix,iy,i_ene,ic)
+                end if
              end do
           end if
           !call syncthreads()
@@ -2574,6 +2598,11 @@ contains
           if (ix >= 3 .and. ix <= m+3 .and. iy >= 3 .and. iy <= m+3) then
              do ivar = 1, nvar
                 qL(ix,iy,ivar) = qdt(ix,iy,ifwd(ivar,3)) + hdx * qds(ix,iy,ifwd(ivar,3),3)
+                if (ivar == i_rho) then
+                   if (qL(ix,iy,i_rho) < smallr) qL(ix,iy,i_rho) = q_storage(ix,iy,i_rho,ic)
+                else if (ivar == i_ene) then
+                   if (qL(ix,iy,i_ene) < smallp) qL(ix,iy,i_ene) = q_storage(ix,iy,i_ene,ic)
+                end if
              end do
           end if
           !call syncthreads()
