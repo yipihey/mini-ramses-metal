@@ -15,6 +15,7 @@ module gpu_runner
   integer(kind=8), device, allocatable, dimension(:) :: key_off
   integer(kind=4), device, allocatable, dimension(:,:) :: box_ckey_min, box_ckey_max
   integer(kind=4), device, allocatable, dimension(:,:,:) :: bound_ckey_min, bound_ckey_max
+  real(kind=8), device, allocatable, dimension(:)::d_skip ! Coordinates of lower left corner of the box
 
   !> Arrays to hold the grid on the device
   type(oct), device, allocatable, dimension(:) :: grid
