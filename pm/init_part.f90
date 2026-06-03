@@ -104,9 +104,7 @@ subroutine init_part(r,g,m,p)
 #ifdef OUTPUT_PARTICLE_POTENTIAL
   allocate(phip(1:r%npartmax))
 #endif
-  ! Gather/scatter scratch (device-only). idp_swap (64-bit) doubles as the
-  ! gpu_cic_part source map -- it must be 64-bit because the packed
-  ! (igrid<<5 | icell) word overflows 32 bits once igrid ~ ngridmax ~ 2^27.
+  ! gpu_cic_part source map.
   allocate(xp_swap (1:r%npartmax))
   allocate(isp_swap(1:r%npartmax))
   allocate(idp_swap(1:r%npartmax))

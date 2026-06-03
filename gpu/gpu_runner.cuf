@@ -1604,16 +1604,8 @@ contains
        call compute_father_swap_table<<<num_blocks, num_threads>>>(swap_local, prefix_sum, head_idx, num_octs)
        call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
-
+ 
        ! Make new MG octs.
-       ! NOTE: the kernel signature is make_father_octs(grid, grid_mg, phi, f, ...)
-       ! with phi(1:twotondim,*) [2D potential] and f(1:twotondim,1:ndim,*) [3D force].
-       ! The MG potential array is phi_mg (2D) and the MG force array is f_mg (3D),
-       ! so they MUST be passed in the order phi_mg, f_mg. Passing them swapped made
-       ! the kernel index the 2D phi_mg with a 3D (stride twotondim*ndim) access,
-       ! writing ~ndim times past the end of phi_mg -> illegal device memory access
-       ! (only fatal once the overflow reaches an unmapped page, e.g. large grids
-       ! or HYDRO=0 builds where uold/unew no longer pad the allocation).
        call nvtxStartRange("GPU build_mg", color=2)!yellow
        if (ifine == ilevel) then
           call make_father_octs<<<num_blocks_2, num_threads_2>>>(grid, grid_mg, phi_mg, f_mg, swap_local, &

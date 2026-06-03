@@ -667,7 +667,7 @@ end subroutine gpu_sort_part
 !>
 !> The pack layout is:
 !>   bits  0..4  : icell  (1..twotondim, i.e. 1..8 in 3D)
-!>   bits  5..   : igrid  (1-based oct index, up to ngridmax ~ 2^27)
+!>   bits  5..63   : igrid  (1-based oct index, up to ngridmax ~ 2^59)
 !> The word is 64-bit because ishft(igrid,5) for igrid ~ 2^27 reaches 2^32 and
 !> would overflow a 32-bit signed integer, so the map is carried in idp_swap
 !> (integer(kind=8)), not the 32-bit isp_swap scratch.
@@ -759,11 +759,6 @@ attributes(global) subroutine build_src_part_kernel(xp_d, &
   !    occupies exactly those 5 bits (icell <= twotondim <= 8 < 32), so
   !    ior() merges the two fields without overlap. Decoding (in the deposit
   !    kernel) is iand(.,31) for icell and ishft(.,-5) for igrid.
-  !    NOTE: the word MUST be 64-bit: igrid runs up to ngridmax (~2**27 for a
-  !    512^3 base grid), so ishft(igrid,5) reaches 2**32 and overflows a 32-bit
-  !    signed word. A corrupted pack here decodes to a garbage igrid in the
-  !    deposit kernel and faults on grid_d(igrid)/rho_d(:,igrid) (illegal
-  !    memory access). The map is carried in idp_swap (integer(kind=8)).
   isp_swap_d(ipart) = ior(ishft(int(igrid, 8), 5), int(icell, 8))
 
 end subroutine build_src_part_kernel
