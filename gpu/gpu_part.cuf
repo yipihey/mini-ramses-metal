@@ -114,7 +114,7 @@ end subroutine ensure_scan_capacity_part
 attributes(global) subroutine bucket_part_kernel(xp, bucket_part_d, &
      & grid, hash_key_d, hash_val_d, hash_size_d, ckey_max_d, key_off_d, &
      & skip1, skip2, skip3, dx_loc, ilevel, head_idx, num_parts, leading)
-  integer(kind=4), intent(in), value :: leading
+  integer(kind=8), intent(in), value :: leading
   real(kind=dp), device :: xp(*)
   integer(kind=4), device :: bucket_part_d(*)
   type(oct), device :: grid(*)
@@ -266,7 +266,7 @@ end subroutine write_swap_global_hilbert_partition
 !> Column gather/scatter via xp_swap.
 attributes(global) subroutine sort_gather_part_real_col(buf, src, swap_global_d, &
      & head_idx, num_parts, leading, idim)
-  integer(kind=4), intent(in), value :: leading
+  integer(kind=8), intent(in), value :: leading
   integer(kind=4), intent(in), value :: idim
   real(kind=dp), device :: buf(*)
   real(kind=dp), device :: src(*)
@@ -274,7 +274,8 @@ attributes(global) subroutine sort_gather_part_real_col(buf, src, swap_global_d,
   integer(kind=4), intent(in), value :: head_idx
   integer(kind=4), intent(in), value :: num_parts
 
-  integer :: thread_idx, block_idx, idx, old_idx, off
+  integer :: thread_idx, block_idx, idx, old_idx
+  integer(kind=8) :: off
   thread_idx = threadIdx%x - 1
   block_idx  = blockIdx%x  - 1
   idx = thread_idx + block_idx * blockDim%x
@@ -287,14 +288,15 @@ end subroutine sort_gather_part_real_col
 
 attributes(global) subroutine sort_scatter_part_real_col(dst, buf, &
      & head_idx, num_parts, leading, idim)
-  integer(kind=4), intent(in), value :: leading
+  integer(kind=8), intent(in), value :: leading
   integer(kind=4), intent(in), value :: idim
   real(kind=dp), device :: dst(*)
   real(kind=dp), device :: buf(*)
   integer(kind=4), intent(in), value :: head_idx
   integer(kind=4), intent(in), value :: num_parts
 
-  integer :: thread_idx, block_idx, idx, off
+  integer :: thread_idx, block_idx, idx
+  integer(kind=8) :: off
   thread_idx = threadIdx%x - 1
   block_idx  = blockIdx%x  - 1
   idx = thread_idx + block_idx * blockDim%x
@@ -412,7 +414,8 @@ subroutine gpu_split_part(sim, ilevel)
   type(ramses_t), intent(inout) :: sim
   integer, intent(in) :: ilevel
 
-  integer(kind=4) :: head_idx, num_parts, n_fine, n_coarse, ilev, leading
+  integer(kind=4) :: head_idx, num_parts, n_fine, n_coarse, ilev
+  integer(kind=8) :: leading
   integer(kind=4), device :: n_fine_dev
   integer :: num_threads, num_blocks, idim
   real(kind=8) :: dx_loc, skip1, skip2, skip3
@@ -546,7 +549,7 @@ end subroutine gpu_split_part
 !> image, and the Hilbert key is computed at the deposit level.
 attributes(global) subroutine compute_hkey_part_kernel(xp, hkey_part_d, &
      & skip1, skip2, skip3, dx_inv, head_idx, num_parts, leading, level, shift)
-  integer(kind=4), intent(in), value :: leading
+  integer(kind=8), intent(in), value :: leading
   real(kind=dp),   device :: xp(*)
   integer(kind=8), device :: hkey_part_d(*)
   real(kind=8), intent(in), value :: skip1, skip2, skip3
@@ -673,7 +676,7 @@ subroutine gpu_sort_part(sim, ilevel)
   ! Compute Hilbert keys and store them in idp_swap
   call nvtxStartRange("gpu_sort_part:hkey", color=4)
   call compute_hkey_part_kernel<<<num_blocks, num_threads>>>(xp, idp_swap, &
-       & skip1, skip2, skip3, dx_inv, head_idx, num_parts, sim%r%npartmax, level, &
+       & skip1, skip2, skip3, dx_inv, head_idx, num_parts, int(sim%r%npartmax,8), level, &
        & shift)
   call nvtxEndRange()
 
@@ -713,7 +716,8 @@ end subroutine gpu_sort_part
 !> Multipole reduction over [1, npart]: q(1)=sum(mp), q(idim+1)=sum(mp*xp).
 attributes(global) subroutine multipole_q_kernel(xp_d, mp_d, multipole_q_d, &
      & head_idx, num_parts, leading)
-  integer(kind=4), intent(in), value :: leading, num_parts, head_idx
+  integer(kind=4), intent(in), value :: num_parts, head_idx
+  integer(kind=8), intent(in), value :: leading
   real(kind=dp), device :: xp_d(*)
   real(kind=dp), device :: mp_d(*)
   real(kind=8), device :: multipole_q_d(1:ndim+1)
@@ -750,7 +754,8 @@ end subroutine multipole_q_kernel
 !> [head_idx, head_idx+num_parts-1].
 attributes(global) subroutine gpu_newdt_part_kernel(vp_d, mp_d, &
      & vmax_d, ekin_d, head_idx, num_parts, leading)
-  integer(kind=4), intent(in), value :: head_idx, num_parts, leading
+  integer(kind=4), intent(in), value :: head_idx, num_parts
+  integer(kind=8), intent(in), value :: leading
   real(kind=dp),   device :: vp_d(*), mp_d(*)
   real(kind=8),    device :: vmax_d
   real(kind=8),    device :: ekin_d
@@ -822,7 +827,8 @@ attributes(global) subroutine cic_part_large_kernel(sortp_d, &
      & xp_d, mp_d, rho_d, nref_d, &
      & skip1, skip2, skip3, dx_loc, vol_loc, &
      & m_refine_at_level, mass_cut_refine, ilevel, leading)
-  integer(kind=4), intent(in), value :: head_idx, num_parts, leading, ilevel
+  integer(kind=4), intent(in), value :: head_idx, num_parts, ilevel
+  integer(kind=8), intent(in), value :: leading
   integer(kind=4), device :: sortp_d(*)
   integer(kind=8), device :: hash_key_d(*)
   integer(kind=4), device :: hash_val_d(*)
@@ -1196,7 +1202,7 @@ subroutine gpu_cic_part_large(sim, ilevel, rtype)
      q_d = 0.0_dp
      call nvtxStartRange("gpu_cic_part_large:multipole", color=4)
      call multipole_q_kernel<<<num_blocks, num_threads>>>(xp, mp, q_d, &
-          & 1, sim%p%npart, sim%r%npartmax)
+          & 1, sim%p%npart, int(sim%r%npartmax,8))
      call nvtxEndRange()
      q_h = q_d
 
@@ -1242,7 +1248,7 @@ subroutine gpu_cic_part_large(sim, ilevel, rtype)
        & box_ckey_min, box_ckey_max, periodic, &
        & xp, mp, rho, nref, &
        & skip1, skip2, skip3, dx_loc, vol_loc, &
-       & sim%r%m_refine(ilevel), sim%r%mass_cut_refine, ilevel, sim%r%npartmax)
+       & sim%r%m_refine(ilevel), sim%r%mass_cut_refine, ilevel, int(sim%r%npartmax,8))
   call nvtxEndRange()
 
   call nvtxEndRange()
@@ -1277,7 +1283,8 @@ attributes(global) subroutine cic_part_medium_kernel(sortp_d, &
      & xp_d, mp_d, rho_d, nref_d, &
      & skip1, skip2, skip3, dx_loc, vol_loc, &
      & m_refine_at_level, mass_cut_refine, ilevel, leading)
-  integer(kind=4), intent(in), value :: head_idx, num_parts, leading, ilevel
+  integer(kind=4), intent(in), value :: head_idx, num_parts, ilevel
+  integer(kind=8), intent(in), value :: leading
   integer(kind=4), device :: sortp_d(*)
   integer(kind=8), device :: hash_key_d(*)
   integer(kind=4), device :: hash_val_d(*)
@@ -1531,7 +1538,7 @@ subroutine gpu_cic_part_medium(sim, ilevel, rtype)
      q_d = 0.0_dp
      call nvtxStartRange("gpu_cic_part_medium:multipole", color=4)
      call multipole_q_kernel<<<num_blocks, num_threads>>>(xp, mp, q_d, &
-          & 1, sim%p%npart, sim%r%npartmax)
+          & 1, sim%p%npart, int(sim%r%npartmax,8))
      call nvtxEndRange()
      q_h = q_d
 
@@ -1565,7 +1572,7 @@ subroutine gpu_cic_part_medium(sim, ilevel, rtype)
        & box_ckey_min, box_ckey_max, &
        & xp, mp, rho, nref, &
        & skip1, skip2, skip3, dx_loc, vol_loc, &
-       & sim%r%m_refine(ilevel), sim%r%mass_cut_refine, ilevel, sim%r%npartmax)
+       & sim%r%m_refine(ilevel), sim%r%mass_cut_refine, ilevel, int(sim%r%npartmax,8))
   call nvtxEndRange()
 
   call nvtxEndRange()
@@ -1650,7 +1657,8 @@ attributes(global) subroutine fill_contrib_part_small(sortp_d, xp_d, mp_d, contr
   real(kind=dp),   device :: mp_d(*)
   real(kind=dp),   device :: contrib_d(*)
   real(kind=8), intent(in), value :: skip1, skip2, skip3, dx_inv, vol_loc, mass_cut_refine
-  integer(kind=4), intent(in), value :: k, mode, head_idx, num_parts, leading
+  integer(kind=4), intent(in), value :: k, mode, head_idx, num_parts
+  integer(kind=8), intent(in), value :: leading
 
   integer :: thread_idx, block_idx, idx, g, ipart, idim, bit, kk
   real(kind=8) :: skip(1:3), xs, fr(1:3), w, mp_i
@@ -1726,7 +1734,8 @@ attributes(global) subroutine deposit_runs_part_small(sortp_d, xp_d, contrib_d, 
   integer(kind=4), device :: box_ckey_max_d(1:3, *)
   real(kind=dp),   device :: out_d(1:twotondim, *)
   real(kind=8), intent(in), value :: skip1, skip2, skip3, dx_inv
-  integer(kind=4), intent(in), value :: k, ilevel, head_idx, num_parts, leading
+  integer(kind=4), intent(in), value :: k, ilevel, head_idx, num_parts
+  integer(kind=8), intent(in), value :: leading
 
   integer :: thread_idx, block_idx, idx, g, ipart, idim, bit, kk, rid
   integer :: tail_slot, g_t, igrid, icell
@@ -1846,7 +1855,7 @@ subroutine gpu_cic_part_small(sim, ilevel, rtype)
      q_d = 0.0_dp
      call nvtxStartRange("gpu_cic_part_small:multipole", color=4)
      call multipole_q_kernel<<<num_blocks, num_threads>>>(xp, mp, q_d, &
-          & 1, sim%p%npart, sim%r%npartmax)
+          & 1, sim%p%npart, int(sim%r%npartmax,8))
      call nvtxEndRange()
      q_h = q_d
      do idim = 1, ndim+1
@@ -1890,25 +1899,25 @@ subroutine gpu_cic_part_small(sim, ilevel, rtype)
      ! rho contribution (mp * w / vol_loc)
      call fill_contrib_part_small<<<blk, nblk>>>(sortp, xp, mp, xp_swap, &
           & skip1, skip2, skip3, dx_inv, vol_loc, k, 0, sim%r%mass_cut_refine, &
-          & head_idx, num_parts, sim%r%npartmax)
+          & head_idx, num_parts, int(sim%r%npartmax,8))
      call gpu_scan_dp(xp_swap, head_idx, num_parts)
      call deposit_runs_part_small<<<blk, nblk>>>(sortp, xp, xp_swap, &
           & prefix_sum, isp_swap, &
           & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
           & box_ckey_min, box_ckey_max, rho, &
-          & skip1, skip2, skip3, dx_inv, k, ilevel, head_idx, num_parts, sim%r%npartmax)
+          & skip1, skip2, skip3, dx_inv, k, ilevel, head_idx, num_parts, int(sim%r%npartmax,8))
 
      ! nref contribution (w, gated), only when the refinement gate is active.
      if (sim%r%m_refine(ilevel) >= 0.0_dp) then
         call fill_contrib_part_small<<<blk, nblk>>>(sortp, xp, mp, xp_swap, &
              & skip1, skip2, skip3, dx_inv, vol_loc, k, 1, sim%r%mass_cut_refine, &
-             & head_idx, num_parts, sim%r%npartmax)
+             & head_idx, num_parts, int(sim%r%npartmax,8))
         call gpu_scan_dp(xp_swap, head_idx, num_parts)
         call deposit_runs_part_small<<<blk, nblk>>>(sortp, xp, xp_swap, &
              & prefix_sum, isp_swap, &
              & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
              & box_ckey_min, box_ckey_max, nref, &
-             & skip1, skip2, skip3, dx_inv, k, ilevel, head_idx, num_parts, sim%r%npartmax)
+             & skip1, skip2, skip3, dx_inv, k, ilevel, head_idx, num_parts, int(sim%r%npartmax,8))
      endif
   end do
   call nvtxEndRange()
@@ -1927,7 +1936,8 @@ subroutine gpu_newdt_part(sim, ilevel, vmax, ekin)
   integer, intent(in) :: ilevel
   real(kind=8), intent(inout) :: vmax, ekin
 
-  integer(kind=4) :: head_idx, num_parts, leading
+  integer(kind=4) :: head_idx, num_parts
+  integer(kind=8) :: leading
   integer :: num_threads, num_blocks
   real(kind=8), device :: vmax_dev
   real(kind=8), device :: ekin_dev
@@ -2078,7 +2088,7 @@ attributes(global) subroutine kick_drift_part_kernel(xp_d, vp_d, levelp_d, &
      box_ckey_min_d, box_ckey_max_d, box_size_d, periodic_d, ngridmax, &
      dtnew_d, dtold_d, skip1, skip2, skip3, dx_loc, &
      action_part, ilevel, head_idx, num_parts, leading)
-  integer(kind=4), intent(in), value :: leading
+  integer(kind=8), intent(in), value :: leading
   real(kind=dp),   device :: xp_d(*)
   real(kind=dp),   device :: vp_d(*)
   integer(kind=4), device :: levelp_d(*)
@@ -2217,7 +2227,7 @@ subroutine gpu_kick_drift_part(sim, ilevel, action_part)
           & f, hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
           & box_ckey_min, box_ckey_max, box_size, periodic, sim%r%ngridmax, &
           & dtnew_part_d, dtold_part_d, &
-          & skip1, skip2, skip3, dx_loc, action_part, ilevel, head_idx, num_parts, sim%r%npartmax)
+          & skip1, skip2, skip3, dx_loc, action_part, ilevel, head_idx, num_parts, int(sim%r%npartmax,8))
      call nvtxEndRange()
 
   endif
