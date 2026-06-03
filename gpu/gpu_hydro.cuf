@@ -657,6 +657,138 @@ contains
 
   ! ==========================================================================
   !> @brief
+  !> GPU implementation of the 2D HLL edge EMF solver. This is a direct port of
+  !> CPU riemann2d_hll_fast (godunov_utils.f90), using the four edge corner states
+  !> qLL/qLR/qRL/qRR and returning the unscaled electric field.
+  !>
+  !> @param[in] qLL   : Left-bottom corner state
+  !> @param[in] qLR   : Left-top corner state
+  !> @param[in] qRL   : Right-bottom corner state
+  !> @param[in] qRR   : Right-top corner state
+  !> @param[in] gamma : The adiabatic index
+  !>
+  !> @return
+  !> E : The unscaled edge EMF
+  attributes(device) function riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma) result(E)
+    type(primitive_mhd_t), intent(in) :: qLL, qLR, qRL, qRR
+    real(kind=dp), value :: gamma
+    real(kind=dp) :: E
+    real(kind=dp), parameter :: smallr = 1d-10
+    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
+    type(primitive_mhd_t) :: stateLL, stateLR, stateRL, stateRR
+    real(kind=dp) :: smallp
+    real(kind=dp) :: ELL, ERL, ELR, ERR, SL, SR, SB, ST
+    real(kind=dp) :: cLLx, cRLx, cLRx, cRRx, cLLy, cRLy, cLRy, cRRy
+    real(kind=dp) :: uLL, uRL, uLR, uRR, vLL, vRL, vLR, vRR
+    real(kind=dp) :: b2LL, b2LR, b2RL, b2RR
+    real(kind=dp) :: c2LL, c2LR, c2RL, c2RR
+    real(kind=dp) :: d2LL, d2LR, d2RL, d2RR
+
+    smallp = smallc_squared / gamma
+
+    stateLL = qLL
+    stateLR = qLR
+    stateRL = qRL
+    stateRR = qRR
+
+    stateLL%density = max(stateLL%density, smallr)
+    stateLR%density = max(stateLR%density, smallr)
+    stateRL%density = max(stateRL%density, smallr)
+    stateRR%density = max(stateRR%density, smallr)
+    stateLL%pressure = max(stateLL%pressure, smallp * stateLL%density)
+    stateLR%pressure = max(stateLR%pressure, smallp * stateLR%density)
+    stateRL%pressure = max(stateRL%pressure, smallp * stateRL%density)
+    stateRR%pressure = max(stateRR%pressure, smallp * stateRR%density)
+
+    ! vx*by - vy*bx at the four edge centers.
+    ELL = stateLL%velocity_x * stateLL%By - stateLL%velocity_y * stateLL%Bx
+    ERL = stateRL%velocity_x * stateRL%By - stateRL%velocity_y * stateRL%Bx
+    ELR = stateLR%velocity_x * stateLR%By - stateLR%velocity_y * stateLR%Bx
+    ERR = stateRR%velocity_x * stateRR%By - stateRR%velocity_y * stateRR%Bx
+
+    ! Compute 4 fast magnetosonic velocities relative to x direction.
+    uLL = stateLL%velocity_x
+    uLR = stateLR%velocity_x
+    uRL = stateRL%velocity_x
+    uRR = stateRR%velocity_x
+
+    b2LL = compute_bsquared(stateLL%Bx, stateLL%By, stateLL%Bz)
+    c2LL = gamma * stateLL%pressure / stateLL%density
+    d2LL = 0.5d0 * (b2LL / stateLL%density + c2LL)
+    cLLx = sqrt(d2LL + sqrt(d2LL**2 - c2LL * stateLL%Bx * stateLL%Bx / stateLL%density))
+
+    b2LR = compute_bsquared(stateLR%Bx, stateLR%By, stateLR%Bz)
+    c2LR = gamma * stateLR%pressure / stateLR%density
+    d2LR = 0.5d0 * (b2LR / stateLR%density + c2LR)
+    cLRx = sqrt(d2LR + sqrt(d2LR**2 - c2LR * stateLR%Bx * stateLR%Bx / stateLR%density))
+
+    b2RL = compute_bsquared(stateRL%Bx, stateRL%By, stateRL%Bz)
+    c2RL = gamma * stateRL%pressure / stateRL%density
+    d2RL = 0.5d0 * (b2RL / stateRL%density + c2RL)
+    cRLx = sqrt(d2RL + sqrt(d2RL**2 - c2RL * stateRL%Bx * stateRL%Bx / stateRL%density))
+
+    b2RR = compute_bsquared(stateRR%Bx, stateRR%By, stateRR%Bz)
+    c2RR = gamma * stateRR%pressure / stateRR%density
+    d2RR = 0.5d0 * (b2RR / stateRR%density + c2RR)
+    cRRx = sqrt(d2RR + sqrt(d2RR**2 - c2RR * stateRR%Bx * stateRR%Bx / stateRR%density))
+
+    ! Compute 4 fast magnetosonic velocities relative to y direction.
+    vLL = stateLL%velocity_y
+    vLR = stateLR%velocity_y
+    vRL = stateRL%velocity_y
+    vRR = stateRR%velocity_y
+
+    cLLy = sqrt(d2LL + sqrt(d2LL**2 - c2LL * stateLL%By * stateLL%By / stateLL%density))
+    cLRy = sqrt(d2LR + sqrt(d2LR**2 - c2LR * stateLR%By * stateLR%By / stateLR%density))
+    cRLy = sqrt(d2RL + sqrt(d2RL**2 - c2RL * stateRL%By * stateRL%By / stateRL%density))
+    cRRy = sqrt(d2RR + sqrt(d2RR**2 - c2RR * stateRR%By * stateRR%By / stateRR%density))
+
+    SL = min(min(uLL, uLR, uRL, uRR) - max(cLLx, cLRx, cRLx, cRRx), 0.0_dp)
+    SR = max(max(uLL, uLR, uRL, uRR) + max(cLLx, cLRx, cRLx, cRRx), 0.0_dp)
+    SB = min(min(vLL, vLR, vRL, vRR) - max(cLLy, cLRy, cRLy, cRRy), 0.0_dp)
+    ST = max(max(vLL, vLR, vRL, vRR) + max(cLLy, cLRy, cRLy, cRRy), 0.0_dp)
+
+    E = (SL * SB * ERR - SL * ST * ERL - SR * SB * ELR + SR * ST * ELL) / (SR - SL) / (ST - SB) &
+         & - ST * SB / (ST - SB) * (stateRR%Bx - stateLL%Bx) &
+         & + SR * SL / (SR - SL) * (stateRR%By - stateLL%By)
+
+    return
+  end function riemann2d_hll_emf
+  ! ==========================================================================
+
+  ! ==========================================================================
+  !> @brief
+  !> Dispatch GPU 2D MHD EMF solvers. Only 2D HLL is implemented for now; all
+  !> other solver ids intentionally fall back to 2D HLL until their ports are added.
+  !>
+  !> @param[in] qLL       : Left-bottom corner state
+  !> @param[in] qLR       : Left-top corner state
+  !> @param[in] qRL       : Right-bottom corner state
+  !> @param[in] qRR       : Right-top corner state
+  !> @param[in] gamma     : The adiabatic index
+  !> @param[in] riemann2d : 2D solver id
+  !>
+  !> @return
+  !> E : The unscaled edge EMF
+  attributes(device) function riemann2d_emf(qLL, qLR, qRL, qRR, gamma, riemann2d) result(E)
+    type(primitive_mhd_t), intent(in) :: qLL, qLR, qRL, qRR
+    real(kind=dp), value :: gamma
+    integer, value :: riemann2d
+    real(kind=dp) :: E
+
+    if (riemann2d .eq. solver2d_hllf) then
+       E = riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma)
+    else
+       ! TODO: add solver2d_hlld / hlla / simple here.
+       E = riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma)   ! fall back to 2D HLL
+    endif
+
+    return
+  end function riemann2d_emf
+  ! ==========================================================================
+
+  ! ==========================================================================
+  !> @brief
   !> Convert a zero based 1D index into zero based 3D indices
   !>
   !> @param[in] index : The 1D index to convert
