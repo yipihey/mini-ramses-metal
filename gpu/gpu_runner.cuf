@@ -103,36 +103,38 @@ contains
     integer(kind=4) :: head_idx, num_octs
     integer :: num_threads, num_blocks
     real(kind=dp) :: gamma, dx, courant_factor
-    real(kind=8), device :: mass_d, ekin_d, eint_d, emag_d, dt_d
+    real(kind=8), device, dimension(5) :: d_data !mass, ekin, eint, emag, dt
+    real(kind=8), dimension(5) :: h_data
 
     courant_factor = sim%r%courant_factor
     gamma = sim%r%gamma
     dx = sim%r%boxlen/2**ilevel
     dt = courant_factor*dx/sim%r%smallc
 
-    ! host to device
-    dt_d = dt
-    mass_d = 0d0
-    ekin_d = 0d0
-    eint_d = 0d0
-    emag_d = 0d0
+    ! initialize device memory for reduction
+    d_data(:) = 0d0
+    d_data(5) = dt
 
     head_idx = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
     num_threads = 256
     num_blocks = (num_octs * twotondim + num_threads - 1 ) / num_threads
     call nvtxStartRange("GPU cmpdt", color=0)!green
-    call cmpdt_kernel<<<num_blocks, num_threads>>>(grid, uold, f, constant_gravity, head_idx, num_octs, &
-         & mass_d, ekin_d, eint_d, emag_d, dt_d, dx, gamma, courant_factor)
-    call GPU_Error_Check(__FILE__, __LINE__)
+    call cmpdt_kernel<<<num_blocks, num_threads>>>(grid, uold, f, &
+        & constant_gravity, head_idx, num_octs, d_data, dx, gamma, &
+        & courant_factor)
     call nvtxEndRange()
 
-    ! device to host
-    dt = dt_d
-    mass = mass_d
-    ekin = ekin_d
-    eint = eint_d
-    emag = emag_d
+    ! move results to host
+    h_data(:) = d_data(:)
+
+    mass = h_data(1)
+    ekin = h_data(2)
+    eint = h_data(3)
+    emag = h_data(4)
+    dt = h_data(5)
+
+    call GPU_Error_Check(__FILE__, __LINE__)
 
   end subroutine gpu_cmpdt
 
