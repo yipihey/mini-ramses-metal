@@ -81,7 +81,7 @@ subroutine m_update_time(pst,ilevel,done)
         do i=r%levelmin,r%nlevelmax
            if(m%noct_tot(i)>0)write(*,999)i,m%noct_tot(i),m%noct_min(i),m%noct_max(i),m%noct_tot(i)/g%ncpu
         end do
-999     format(' Level ',I0,' has ',I0,' grids (',3(I0,','),')')
+999     format(' Level ',I0,' has ',I0,' grids (',I0,',',I0,',',I0,')')
 
         !------------------------
         ! Output timing data

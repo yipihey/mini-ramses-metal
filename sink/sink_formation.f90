@@ -46,7 +46,7 @@ recursive subroutine m_sink_formation(pst)
   call r_deallocate_clump(pst)
 
   ttend = mdl_wtime(pst%s%mdl)
-  print '(A,F14.7)',' Time elapsed in creating sinks:',ttend-ttstart
+  print '(A,F0.7)',' Time elapsed in creating sinks: ',ttend-ttstart
 
 end subroutine m_sink_formation
 !###########################################################
