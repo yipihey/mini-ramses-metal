@@ -274,7 +274,11 @@ contains
   !>
   subroutine gpu_godunov(sim, ilevel)
     use nvtx
+#ifdef PAPER
+    use hydro_device, only: hydro_integrator_paper_kernel
+#else
     use hydro_device, only: hydro_integrator_kernel
+#endif
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout)::sim
     integer, intent(in)::ilevel
@@ -302,9 +306,15 @@ contains
     endif
 
     call nvtxStartRange("GPU Godunov", color=0)!green
+#ifdef PAPER
+    call hydro_integrator_paper_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
+         & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
+         & gamma, dt, dx, slope, riemann, constant_gravity)
+#else
     call hydro_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
          & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
          & gamma, dt, dx, slope, riemann, constant_gravity)
+#endif
     call GPU_Error_Check(__FILE__, __LINE__)
     call nvtxEndRange()
 
