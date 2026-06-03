@@ -189,7 +189,7 @@ subroutine init_file(mdl,r,g,m)
   ! Write initial conditions parameters
   if(g%myid==1)then
      do ilevel=r%levelmin,g%nlevelmax_part
-        write*,'(" Initial conditions for level ",I0)')ilevel
+        write(*,'(" Initial conditions for level ",I0)')ilevel
         write(*,'(" n1= ",I0," n2= ",I0," n3= ",I0)') &
              & g%n1(ilevel),&
              & g%n2(ilevel),&
