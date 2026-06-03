@@ -94,6 +94,7 @@ module amr_commons
      integer :: cg_levelmin=999    ! Min level for CG solver
      logical :: fast_solver = .false. ! Fast solver with MPI pre-fetch (memory intensive)
      integer :: part_mass_deposition_scheme=1     ! part mass deposition schemes (CIC 1, TSC 2, PCS 3)
+     integer :: part_dep_algo=1   ! GPU CIC particle deposition algorithm (1: large 27-offset, 2: medium shifted 8-offset, 3: small shifted 8-offset prefix-sum)
      integer :: part_force_interpolation_scheme=1 ! part force interpolation schemes (CIC 1, TSC 2, PCS 3)
      integer :: star_mass_deposition_scheme=1     ! star mass deposition schemes
      integer :: star_force_interpolation_scheme=1 ! star force interpolation schemes
