@@ -327,7 +327,7 @@ subroutine m_read_params(pst)
   ! level >=cg_levelmin uses conjugate gradient
   logical :: fast_solver=.false.   ! Fast solver with MPI pre-fetch (memory intensive)
   integer :: part_mass_deposition_scheme=1     ! part mass deposition schemes (CIC 1, TSC 2, PCS 3)
-  integer :: part_dep_algo=1   ! GPU CIC particle deposition algorithm (1: large 27-offset, 2: small 8-offset)
+  integer :: part_dep_algo=1   ! GPU CIC particle deposition algorithm (1: large 27-offset, 2: medium shifted 8-offset, 3: small shifted 8-offset prefix-sum)
   integer :: part_force_interpolation_scheme=1 ! part force interpolation schemes (CIC 1, TSC 2, PCS 3)
   integer :: star_mass_deposition_scheme=1     ! star mass deposition schemes
   integer :: star_force_interpolation_scheme=1 ! star force interpolation schemes
@@ -838,9 +838,9 @@ subroutine m_read_params(pst)
      write(*,*)'levelmax should not be lower than levelmin'
      nml_ok=.false.
   end if
-  if(part_dep_algo/=1 .and. part_dep_algo/=2)then
+  if(part_dep_algo<1 .or. part_dep_algo>3)then
      write(*,*)'Error in the namelist:'
-     write(*,*)'part_dep_algo must be 1 (large) or 2 (small)'
+     write(*,*)'part_dep_algo must be 1 (large), 2 (medium) or 3 (small)'
      nml_ok=.false.
   end if
   if(ngridmax==0)then
