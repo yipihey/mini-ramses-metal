@@ -81,7 +81,7 @@ subroutine m_update_time(pst,ilevel,done)
         do i=r%levelmin,r%nlevelmax
            if(m%noct_tot(i)>0)write(*,999)i,m%noct_tot(i),m%noct_min(i),m%noct_max(i),m%noct_tot(i)/g%ncpu
         end do
-999     format(' Level ',I2,' has ',I11,' grids (',3(I8,','),')')
+999     format(' Level ',I0,' has ',I0,' grids (',3(I0,','),')')
 
         !------------------------
         ! Output timing data
@@ -107,9 +107,9 @@ subroutine m_update_time(pst,ilevel,done)
         end if
         if(r%star)write(*,'(" Total mass in stars=",1PE14.7)')g%mass_star_tot
         if(r%sink)write(*,'(" Total mass in sinks=",1PE14.7)')g%mass_sink_tot
-777     format(' Main step=',i6,' mcons=',1pe9.2,' econs=',1pe9.2,' epot=',1pe9.2,' ekin=',1pe9.2)
-778     format(' Main step=',i6,' mcons=',1pe9.2,' econs=',1pe9.2,' epot=',1pe9.2,' ekin=',1pe9.2,' eint=',1pe9.2)
-779     format(' Main step=',i6,' mcons=',1pe9.2,' econs=',1pe9.2,' epot=',1pe9.2,' ekin=',1pe9.2,' eint=',1pe9.2,' emag=',1pe9.2)
+777     format(' Main step= ',i0,' mcons=',1pe9.2,' econs=',1pe9.2,' epot=',1pe9.2,' ekin=',1pe9.2)
+778     format(' Main step= ',i0,' mcons=',1pe9.2,' econs=',1pe9.2,' epot=',1pe9.2,' ekin=',1pe9.2,' eint=',1pe9.2)
+779     format(' Main step= ',i0,' mcons=',1pe9.2,' econs=',1pe9.2,' epot=',1pe9.2,' ekin=',1pe9.2,' eint=',1pe9.2,' emag=',1pe9.2)
 
         !----------------------------------------------
         ! Output fine step information and used memory
@@ -141,7 +141,7 @@ subroutine m_update_time(pst,ilevel,done)
      if(g%t>=r%tout(r%noutput).or.g%aexp>=r%aout(r%noutput).or.g%nstep_coarse>=r%nstepmax)then
         write(*,*)'Run completed'
         ttend = mdl_wtime(mdl)
-        print '(A,F14.7)',' Total elapsed time:',ttend-ttstart
+        print '(A,F0.7)',' Total elapsed time: ',ttend-ttstart
         done=.true.
         return
         !call mdl_abort(mdl)
@@ -174,7 +174,7 @@ subroutine m_update_time(pst,ilevel,done)
         endif
      end if
   end if
-888 format(' Fine step=',i7,' t=',1pe12.5,' dt=',1pe10.3,' a=',1pe10.3,' mem=',0pF4.1,'% ',0pF4.1,'% ',0pF4.1,'%')
+888 format(' Fine step= ',i0,' t=',1pe12.5,' dt=',1pe10.3,' a=',1pe10.3,' mem=',0pF4.1,'% ',0pF4.1,'% ',0pF4.1,'%')
  
   !------------------------
   ! Update time variables
