@@ -24,7 +24,7 @@ subroutine m_input_part_grafic(pst)
       ! Compute total number of particles in file
       if(TRIM(s%r%initfile(s%r%levelmin)).NE.' ')then
          s%p%npart_tot=s%g%n1(s%r%levelmin)*s%g%n2(s%r%levelmin)*s%g%n3(s%r%levelmin)
-         write(*,'(A,I0)')'Found npart_tot= ',s%p%npart_tot
+         write(*,'(A,I0)')' Found npart_tot= ',s%p%npart_tot
       else
          s%p%npart_tot=0
       endif
@@ -45,7 +45,7 @@ subroutine m_input_part_grafic(pst)
       ! Compute total number of particles in file
       if(TRIM(s%r%initfile(s%r%levelmin)).NE.' ')then
          s%trac%npart_tot=s%g%n1(s%r%levelmin)*s%g%n2(s%r%levelmin)*s%g%n3(s%r%levelmin)
-         write(*,'(A,I0)')'Found ntrac_tot= ',s%trac%npart_tot
+         write(*,'(A,I0)')' Found ntrac_tot= ',s%trac%npart_tot
       else
          s%trac%npart_tot=0
       endif
@@ -66,7 +66,7 @@ subroutine m_input_part_grafic(pst)
      ! Compute total number of particles in file
      if(TRIM(s%r%initfile(s%r%levelmin)).NE.' ')then
         s%dust%npart_tot=s%g%n1(s%r%levelmin)*s%g%n2(s%r%levelmin)*s%g%n3(s%r%levelmin)
-        write(*,'(A,I0)')'Found ndust_tot= ',s%dust%npart_tot
+        write(*,'(A,I0)')' Found ndust_tot= ',s%dust%npart_tot
      else
         s%dust%npart_tot=0
      endif
