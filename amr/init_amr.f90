@@ -91,7 +91,6 @@ subroutine init_amr(r,g,m,type)
   character(len=*)::type
   ! Local variables
   integer::idim,ilevel,icpu,igrid,ibound,ilevelmin
-  integer::max_mhd_integrator_blocks
   integer::nborarrsize
   integer(kind=8)::max_key
   real(kind=8)::dx
@@ -221,12 +220,6 @@ subroutine init_amr(r,g,m,type)
      allocate(bnew(1:twotondim,1:6,1:m%ngridmax+m%ncachemax))
      bold=0d0
      bnew=0d0
-     if(r%mhd)then
-        ! Matches gpu_godunov's num_blocks=num_subgrids basis, bounded here by main-grid capacity.
-        ! TODO(C7): confirm against final mhd_integrator_kernel launch grid.
-        max_mhd_integrator_blocks = (m%ngridmax + nsubgridtondim - 1) / nsubgridtondim
-        allocate(mhd_corner_scratch(1:4,1:max_mhd_integrator_blocks))
-     endif
 #endif
 #ifdef GRAV
      allocate(rho(1:twotondim,1:m%ngridmax+m%ncachemax))

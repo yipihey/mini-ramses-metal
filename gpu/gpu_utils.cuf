@@ -27,24 +27,9 @@ module gpu_utils
      logical      , dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: refined
   end type subgrid_6x6x6cell_primitive
 
-  !> @brief
-  !> MHD counterpart of subgrid_6x6x6cell_primitive: a 6 by 6 by 6 subgrid of
-  !> primitive variables that additionally carries the *cell-centred* magnetic
-  !> field (Bx, By, Bz) computed as 0.5*(B_left + B_right) per axis from the
-  !> face-centred B field. Same 0-indexed layout and same `refined` mask as the
-  !> hydro version. Used by the (future) MHD integrator kernel in place of
-  !> subgrid_6x6x6cell_primitive.
-  type, public :: subgrid_6x6x6cell_primitive_mhd
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: density
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_x
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_y
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_z
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: pressure
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: Bx
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: By
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: Bz
-     logical      , dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: refined
-  end type subgrid_6x6x6cell_primitive_mhd
+  ! (MHD cube subgrid type subgrid_6x6x6cell_primitive_mhd removed in the
+  ! plane-sweep cleanup; the MHD kernel uses a flat nprim-wide plane ring instead.
+  ! See mhd_plan.md Stage B1.)
 
   !> @brief
   !> Contains a 6 by 6 by 6 subgrid of conserved variables. Intended to act as a subgrid
