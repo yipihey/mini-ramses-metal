@@ -282,9 +282,9 @@ subroutine writemem(usedmem)
      write(*,997)usedmem/1024.
   endif
 
-997 format(' Used memory:',F6.1,' kb')
-998 format(' Used memory:',F6.1,' Mb')
-999 format(' Used memory:',F6.1,' Gb')
+997 format(' Used memory: ',F0.1,' kb')
+998 format(' Used memory: ',F0.1,' Mb')
+999 format(' Used memory: ',F0.1,' Gb')
 
 end subroutine writemem
 
