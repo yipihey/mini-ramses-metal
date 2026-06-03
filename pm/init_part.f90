@@ -108,6 +108,8 @@ subroutine init_part(r,g,m,p)
   allocate(xp_swap (1:r%npartmax))
   allocate(isp_swap(1:r%npartmax))
   allocate(idp_swap(1:r%npartmax))
+  allocate(hkeys_out(1:r%npartmax))
+  allocate(ids_in(1:r%npartmax))
   ! Prefix sum arrays
   scan_size = max(r%npartmax, m%ngridmax + m%ncachemax)
   call ensure_scan_capacity_part(scan_size)

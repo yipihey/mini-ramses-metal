@@ -230,7 +230,8 @@ MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 	 boundaries.o output_hydro.o output_poisson.o output_part.o output_rt.o output_amr.o movie.o \
 	 sort.o nbors_utils.o hydro_flag.o marshal.o
 ifeq ($(COMPILER),NVHPC)
-MODOBJ += cub_inclusive_scan_c.o cub_inclusive_scan_f.o gpu_utils.o gpu_hydro.o \
+MODOBJ += cub_module_radix_sort_c.o cub_module_radix_sort_f.o \
+   cub_inclusive_scan_c.o cub_inclusive_scan_f.o gpu_utils.o gpu_hydro.o \
    gpu_cooling.o gpu_rho.o gpu_mg.o gpu_refine.o gpu_flag.o gpu_runner.o \
    gpu_part.o gpu_manager.o
 endif
@@ -269,6 +270,12 @@ cub_inclusive_scan_c.o: cub_inclusive_scan.h cub_inclusive_scan.cu
 #############################################################################
 cub_inclusive_scan_f.o: cub_inclusive_scan.cuf cub_inclusive_scan_c.o
 	nvfortran $(FFLAGS) -c cub_inclusive_scan_c.o $(GPU_PATH)/cub_inclusive_scan.cuf -o cub_inclusive_scan_f.o
+#############################################################################
+cub_module_radix_sort_c.o: cub_module_radix_sort.h cub_module_radix_sort.cu
+	nvcc -arch=$(CUDA_ARCH) -O3 -lineinfo -c $(GPU_PATH)/cub_module_radix_sort.cu -o cub_module_radix_sort_c.o
+#############################################################################
+cub_module_radix_sort_f.o: cub_module_radix_sort.cuf cub_module_radix_sort_c.o
+	nvfortran $(FFLAGS) -c cub_module_radix_sort_c.o $(GPU_PATH)/cub_module_radix_sort.cuf -o cub_module_radix_sort_f.o
 
 %.o:%.cuf
 	$(F90) $(FFLAGS) -c $^ -o $@ $(LIBS)

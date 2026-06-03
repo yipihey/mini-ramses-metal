@@ -14,7 +14,7 @@ module part_device
        & xp, vp, mp, phip, levelp, sortp, idp, &
 !       & jp, zp, tp, tm, size_p, charge, idm, idt, &
        & xp_swap, isp_swap, idp_swap, &
-       & gpu_scan, gpu_scan_dp, d_skip
+       & gpu_scan, gpu_scan_dp, d_skip, ids_in, hkeys_out
   implicit none
 
   ! Local hash/hilbert/reduce includes.
@@ -645,13 +645,15 @@ end subroutine write_sortp_part
 !> GPU sort_part.
 subroutine gpu_sort_part(sim, ilevel)
   use nvtx
+  use cub_module, only: radix_sort
   use ramses_commons, only: ramses_t
   use refine_device, only: init_global_swap_table_kernel, &
        & compute_local_swap_table, update_global_swap_table
+  implicit none
   type(ramses_t), intent(inout) :: sim
   integer, intent(in) :: ilevel
 
-  integer(kind=4) :: head_idx, tail_idx, num_parts
+  integer(kind=4) :: head_idx, tail_idx, num_parts, val
   integer :: num_threads, num_blocks
   integer :: ibit, level
   real(kind=8) :: dx, dx_inv, shift
@@ -682,7 +684,6 @@ subroutine gpu_sort_part(sim, ilevel)
   end if
 
   call nvtxStartRange("gpu_sort_part", color=4) ! purple
-
   ! Compute Hilbert keys and store them in idp_swap
   call nvtxStartRange("gpu_sort_part:hkey", color=4)
   call compute_hkey_part_kernel<<<num_blocks, num_threads>>>(xp, idp_swap, &
@@ -690,6 +691,12 @@ subroutine gpu_sort_part(sim, ilevel)
        & int(sim%r%npartmax,8), level, shift)
   call nvtxEndRange()
 
+#define CUB_SORT
+#if defined(CUB_SORT)
+  call radix_sort(c_loc(idp_swap(head_idx)), c_loc(hkeys_out(head_idx)), &
+                & c_loc(ids_in(head_idx)), c_loc(sortp(head_idx)), &
+                & head_idx, num_parts, 0,  ndim * level - 1)
+#else
   ! Init sortp
   call nvtxStartRange("gpu_sort_part:init_sortp", color=4)
   call init_global_swap_table_kernel<<<num_blocks, num_threads>>>(sortp, &
@@ -719,7 +726,7 @@ subroutine gpu_sort_part(sim, ilevel)
 
      call nvtxEndRange()
   end do
-
+#endif
   call nvtxEndRange()
 
 end subroutine gpu_sort_part

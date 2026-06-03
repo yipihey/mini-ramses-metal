@@ -34,7 +34,7 @@ module gpu_runner
   real(kind=dp),   device, allocatable, dimension(:,:) :: xp, vp
   real(kind=dp),   device, allocatable, dimension(:)   :: mp, phip
   integer(kind=4), device, allocatable, dimension(:)   :: levelp
-  integer(kind=4), device, allocatable, dimension(:)   :: sortp
+  integer(kind=4), device, allocatable, dimension(:)   :: sortp, ids_in
   integer(i8b),    device, allocatable, dimension(:)   :: idp
 
 !!$  real(kind=dp),   device, allocatable, dimension(:,:) :: jp
@@ -44,7 +44,7 @@ module gpu_runner
 
   !> xp_swap/isp_swap/idp_swap: gather/scatter scratch and other tasks.
   real(kind=dp),   device, allocatable, dimension(:) :: xp_swap
-  integer(kind=8), device, allocatable, dimension(:) :: idp_swap
+  integer(kind=8), device, allocatable, dimension(:) :: idp_swap, hkeys_in, hkeys_out
   integer(kind=4), device, allocatable, dimension(:) :: isp_swap
 
   !> Arrays to hold the hash table on the device
