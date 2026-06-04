@@ -38,8 +38,9 @@ contains
   include 'gpu_reduce.cuf'
 
 !> Grow scan buffers to at least min_capacity.
-subroutine ensure_scan_capacity_part(min_capacity)
-  integer(kind=4), intent(in) :: min_capacity
+subroutine ensure_scan_capacity_part(min_capacity, part_dep_algo)
+  implicit none
+  integer(kind=4), intent(in) :: min_capacity, part_dep_algo
   integer(kind=4), parameter :: block_size = 256
   integer(kind=4) :: gs0, gs1, gs2
 
