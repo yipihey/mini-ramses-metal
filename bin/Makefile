@@ -38,6 +38,7 @@ PATCH =
 CUDA_PROFILE = 0
 PAPER = 0
 CUB_SORT_PART = 1
+CUB_SORT_REFINE = 1
 CUB_SCAN_REFINE = 1
 DEBUG = 0
 HDF5 = 0
@@ -173,6 +174,9 @@ ifeq ($(COMPILER),NVHPC)
    endif
    ifneq ($(CUB_SORT_PART),0)
       DEFINES += -DCUB_SORT_PART
+   endif
+   ifneq ($(CUB_SORT_REFINE),0)
+      DEFINES += -DCUB_SORT_REFINE
    endif
    ifneq ($(CUB_SCAN_REFINE),0)
       DEFINES += -DCUB_SCAN_REFINE

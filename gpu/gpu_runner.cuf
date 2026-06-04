@@ -22,7 +22,7 @@ module gpu_runner
   type(oct), device, allocatable, dimension(:) :: grid
   integer(kind=4), device, allocatable, dimension(:) :: father
   integer(kind=4), device, allocatable, dimension(:,:) :: nbor
-  integer(kind=4), device, allocatable, dimension(:,:) :: flag1, flag2
+  integer(kind=4), device, allocatable, target, dimension(:,:) :: flag1, flag2
 
   !> Arrays to hold the hydro variables on the device
   real(kind=dp), device, allocatable, dimension(:,:,:) :: uold, unew
@@ -525,6 +525,9 @@ contains
     use cache_commons
     use cache
     use cub_inclusive_scan_mod
+    use cub_module, only: radix_sort
+    use iso_fortran_env
+    implicit none
     type(ramses_t), intent(inout) :: sim
     integer, intent(in) :: ilevel
     integer, intent(out) :: nmake, nkill
@@ -537,6 +540,11 @@ contains
     integer(kind=4) :: ilev, ind, ibit, ibucket, skip_bit, noct_level
 
     integer(kind=4), device :: ifree_d, ifree_cache_d, new_noct_d
+
+    integer(kind=8), pointer, device, dimension(:) :: hkeys_in, hkeys_out
+    integer(kind=8) :: noct_max, hkey_size
+    integer(kind=4) :: nrnd, nthr, nblk
+
     character(len=64) :: descr
 
     ! Wipe clean cache memory for all higher levels
@@ -691,6 +699,32 @@ contains
           ! Compute kernel size and offset
           head_idx = sim%m%head(ilev)
           num_octs = sim%m%noct(ilev)
+
+#if defined(CUB_SORT_REFINE)
+          ! repurpose flag2 bytes for our CUB radix sort
+          ! note the first dimension is 1:twotondim which ensures required 8-byte alignment
+          noct_max = sim%m%ngridmax+sim%m%ncachemax
+          hkey_size = int(noct_max, kind=8) * int(twotondim, kind=8) / 2_8
+          call c_f_pointer(c_loc(flag2(1,1)), hkeys_in, [hkey_size])
+          call c_f_pointer(c_loc(flag2(1,noct_max/2)), hkeys_out, [hkey_size])
+
+          ! pull keys out of the grid
+          nrnd = 16
+          nthr = 128
+          nblk = (((num_octs + nrnd - 1) / nrnd) + nthr - 1) / nthr
+          call gather_keys_2<<<nblk,nthr>>>(grid, swap_global, head_idx, num_octs, hkeys_in)
+
+          ! sort Hilbert keys
+          ! hkeys_in has keys to sort by, hkeys_out is the sorted keys.
+          ! swap_global has the input permutation array. swap_Local has the
+          ! sorted permutations.
+          call radix_sort(c_loc(hkeys_in(head_idx)), c_loc(hkeys_out(head_idx)), &
+                        & c_loc(swap_global(head_idx)), c_loc(swap_local(head_idx)), &
+                        & head_idx, num_octs, 0, ndim * ilev)
+
+          ! copy result into the right place
+          swap_global(head_idx:head_idx+num_octs-1) = swap_local(head_idx:head_idx+num_octs-1)
+#else
           num_threads = 128
           num_blocks = (num_octs + num_threads - 1) / num_threads
 
@@ -705,27 +739,20 @@ contains
                   & head_idx, num_octs, ibit)
 
              ! Compute prefix sum
-#if defined(CUB_SCAN_REFINE)
-             call cub_inclusive_sum(c_loc(prefix_sum), head_idx, num_octs)
-#else
              call gpu_scan(head_idx, num_octs)
-#endif
+
              ! Compute local swap table
-             ! Update global swap table
-#if defined(FUSE_HILBERT)
-             call compute_and_update_swap_table<<<num_blocks, num_threads>>>(swap_local, swap_global, prefix_sum, &
-                  & head_idx, num_octs)
-#else
              call compute_local_swap_table<<<num_blocks, num_threads>>>(swap_local, swap_global, prefix_sum, &
                   & head_idx, num_octs)
 
+             ! Update global swap table
              call update_global_swap_table<<<num_blocks, num_threads>>>(swap_global, swap_local, &
                   & head_idx, num_octs)
-#endif
+
              call nvtxEndRange()
           end do
-
-       endif
+#endif
+      end if
 
     end do
 

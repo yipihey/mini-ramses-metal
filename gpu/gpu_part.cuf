@@ -659,7 +659,8 @@ subroutine gpu_sort_part(sim, ilevel)
   integer, intent(in) :: ilevel
 
   integer(kind=4) :: head_idx, tail_idx, num_parts, val
-  integer :: num_threads, num_blocks
+  integer :: num_threads, num_blocks, nblks
+  integer, parameter :: nrnd = 16, nthr = 128
   integer :: ibit, level
   real(kind=8) :: dx, dx_inv, shift
   character(len=32) :: nvtx_lbl
@@ -697,11 +698,13 @@ subroutine gpu_sort_part(sim, ilevel)
   call nvtxEndRange()
 
 #if defined(CUB_SORT_PART)
-  ! idp_swap has keys to sort by. isp_swap is empty array where indices are
-  ! created. sortp has the sorted indices. xp_swap will have the sorted keys. we
-  ! don't need input indices or sorted keys but cub requires no overlap on
-  ! input and output buffers so we need to provide space for these. xp_swap and
-  ! isp_swap just happen to be available and the right size.
+  ! generate the input sequence [head_idx ... head_idx + num_parts - 1]
+  nblks = (((num_parts + nrnd - 1)/nrnd) + nthr - 1)/nthr
+  call init_global_swap_table_kernel_u8<<<nblks,nthr>>>(isp_swap, head_idx, num_parts)
+
+  ! idp_swap has keys to sort by. isp_swap is the input indices sequence
+  ! sortp has the sorted indices. hkeyp will have the sorted keys. we don't
+  ! need sorted keys but cub requires no overlap on input and output buffers.
   call radix_sort(c_loc(idp_swap(head_idx)), c_loc(hkeyp(head_idx)), &
                 & c_loc(isp_swap(head_idx)), c_loc(sortp(head_idx)), &
                 & head_idx, num_parts, 0, ndim * level)

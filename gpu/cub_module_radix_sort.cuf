@@ -1,10 +1,18 @@
 module cub_module
   interface
-    !> sorts keys_in.
+    !> sorts pairs keys_in, idx_in by keys_in.
     !> @param[in] keys_in keys to sort
     !> @param[out] keys_out array for the sorted keys
     !> @param[in] idx_in an empty array of the same length as keys_in
     !> @param[out] idx_out array for the sorted indices
+    !> @param[in] head_idx starting index for generating idx_in array
+    !> @param[in] num_elem number of elements to sort
+    !> @param[in] start_bit first bit to apply radix sort to
+    !> @param[in] end_bit last bit to apply radix sort to (exclusive)
+    !> note: CUB requires that there is no overlap among any of the passsed arrays.
+    !>       CUDA requires that addresses are aligned to the number of
+    !>       bytes of the contained type. Alignment checks are applied when
+    !>       NDEBUG is not defined
     subroutine radix_sort(keys_in, keys_out, idx_in,  idx_out, &
                           head_idx, num_elem, start_bit, end_bit) bind(c, name="cub_module_radix_sort")
       use cudafor
