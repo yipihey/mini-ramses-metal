@@ -4,7 +4,6 @@
 # Compilation time parameters
 COMPILER = GNU
 CUDA_ARCH = sm_80
-CUDA_PROFILE = 0
 NDIM = 3
 MPI = 0
 HYDRO = 1
@@ -36,6 +35,7 @@ NHILBERT = 1
 NVECTOR = 32
 NPRE = 8
 PATCH =
+CUDA_PROFILE = 0
 PAPER = 0
 CUB_SORT_PART = 1
 CUB_SCAN_REFINE = 1
