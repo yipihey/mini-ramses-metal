@@ -99,6 +99,7 @@ module metal_gravity_module
   real(8) :: gt_mg_lvl(0:30) = 0      ! per-level MG wall (DIAG: where the fine-level cost lives)
   integer(8) :: gt_mg_cnt(0:30) = 0   ! per-level solve count
   real(8) :: gt_norm = 0              ! DIAG: time in mtl_mg_residual_norm2 (the per-iter readback drain)
+  real(8) :: gt_setup = 0             ! DIAG: MG prologue (build + make_mask/rhs/initial_phi + restrict_mask drains)
   integer(8), private :: tk0, tkr
   integer, allocatable, private :: g_box_min(:), g_box_max(:)
 
@@ -641,6 +642,7 @@ contains
     real(dp) :: err, last_err, i_res, res, rho_tot, eps
     character(len=8) :: probe
     logical :: mg_monitor
+    integer(8) :: ts0, ts1, tsr      ! DIAG: setup-phase timer
     associate(r=>pst%s%r, g=>pst%s%g)
     bnd = r%bound_levelmin
     rho_tot = g%rho_tot
@@ -669,6 +671,7 @@ contains
     ! AFTER the prologue left the prologue using the PREVIOUS step's oct range -> on any
     ! refinement (mesh-change) step the initial phi / mask / RHS were written to the
     ! wrong octs -> garbage refined-level solve -> ekin blow-up at refinement onset. ---
+    call system_clock(ts0, tsr)            ! DIAG: time the prologue (build + make_* + restrict_mask)
     do ifine = ilevel, bnd+1, -1
        call mtl_mg_build(ilevel, ifine, head, n, n, g_box_min, g_box_max, &
             p0, p1, p2, is_base, real(dx,c_float), hascoarse, real(tfrac,c_float))
@@ -725,6 +728,7 @@ contains
     ! replaces the fixed g_ncyc count so the Metal solve converges to the SAME
     ! tolerance as the CPU (the per-iteration residual readback is intrinsic to the
     ! tolerance test; correctness/parity over the async-pipeline perf optimisation).
+    call system_clock(ts1); gt_setup = gt_setup + dble(ts1-ts0)/tsr   ! DIAG: end prologue timing
     iter  = 0
     err   = 1.0_dp
     i_res = 0.0_dp
@@ -1481,6 +1485,8 @@ contains
     end block
     write(*,'(A,F8.2,A)') '   pois:   of which resid-norm READBACK = ', gt_norm, &
          '  (the per-iteration convergence drain)'
+    write(*,'(A,F8.2,A)') '   pois:   of which SETUP (build+mask+rhs)= ', gt_setup, &
+         '  (prologue; redundantly rebuilt each subcycle solve)'
     block
       integer :: L
       write(*,'(A)') '   pois: multigrid per-level  (level: wall_s  nsolves  s/solve):'
