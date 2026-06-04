@@ -89,9 +89,28 @@ void dispatch1d(id<MTLComputeCommandEncoder> e, id<MTLComputePipelineState> p, i
 // the GPU queue full instead of paying a round-trip latency per dispatch.
 static id<MTLCommandBuffer> g_lastcb = nil;
 static inline void submit_async(id<MTLCommandBuffer> cb) { [cb commit]; g_lastcb = cb; }
+
+// V-cycle command-buffer batching (Stage 4).  The per-iteration multigrid GPU ops
+// (gauss_seidel/smooth, cmp_residual, restrict_residual, reset_corr,
+// interpolate_correct -- including the whole recursive coarse-grid correction) are
+// pure GPU sequences with no host readback between them.  Instead of each paying a
+// [g_queue commandBuffer]/commit (~50 per deep-level solve, which dominate the
+// heavily-subcycled L11-L13 cost), they ENCODE INTO ONE shared command buffer via
+// cb_get()/cb_done(); it is committed once by mg_flush().  Every MG readback flushes
+// first: residual_norm2 calls mg_flush() before its reduction submit, and
+// restrict_mask/gauge_pin/I-O go through mtl_drain() which flushes too.  Each op still
+// uses its own encoder (encoders serialize within a command buffer, automatic hazard
+// tracking), so the result is numerically IDENTICAL -- this only removes commit
+// overhead.  g_batch_cb==nil between flushes; cb_get() lazily (re)opens it.
+static id<MTLCommandBuffer> g_batch_cb = nil;
+static inline id<MTLCommandBuffer> cb_get(void)  { if (!g_batch_cb) g_batch_cb = [g_queue commandBuffer]; return g_batch_cb; }
+static inline void cb_done(id<MTLCommandBuffer> cb) { (void)cb; }            // defer; committed by mg_flush()
+static inline void mg_flush(void) { if (g_batch_cb) { [g_batch_cb commit]; g_lastcb = g_batch_cb; g_batch_cb = nil; } }
+
 // Block until all submitted GPU work has completed (serial queue -> waiting on
-// the last command buffer drains everything before it).
-extern "C" void mtl_drain(void) { if (g_lastcb) { [g_lastcb waitUntilCompleted]; g_lastcb = nil; } }
+// the last command buffer drains everything before it).  Flush any open MG batch
+// first so its deferred work is committed and waited on.
+extern "C" void mtl_drain(void) { mg_flush(); if (g_lastcb) { [g_lastcb waitUntilCompleted]; g_lastcb = nil; } }
 
 //---------------------------------------------------------------------------
 // HOST-side hash (the GPU table is read-only via hash_get; all insertion is
@@ -1728,7 +1747,7 @@ void mtl_mg_gauss_seidel(int ilevel, int ifine, int safe, int redstep) {
         MgParams P{}; P.head_idx=MGHEAD(ifine); P.num_octs=MGNUM(ifine); P.ngridmax=MGNGM(ifine);
         P.use_ghost = (ifine==ilevel)?g_mgc.has_coarse:0; P.tfrac=(ifine==ilevel)?g_mgc.tfrac:0.0f;
         P.dx = MGDX(ifine); P.redstep = redstep;
-        id<MTLCommandBuffer> cb=[g_queue commandBuffer];
+        id<MTLCommandBuffer> cb=cb_get();
         id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
         [e setComputePipelineState:pso("gauss_seidel")];
         [e setBuffer:MGPHI(ifine) offset:0 atIndex:0]; [e setBuffer:MGF(ifine) offset:0 atIndex:1];
@@ -1737,7 +1756,7 @@ void mtl_mg_gauss_seidel(int ilevel, int ifine, int safe, int redstep) {
         [e setBuffer:B.grid offset:0 atIndex:5]; [e setBuffer:B.father offset:0 atIndex:6];
         [e setBuffer:B.phi_old offset:0 atIndex:7];
         [e dispatchThreads:MTLSizeMake(HALF,MGNUM(ifine),1) threadsPerThreadgroup:MTLSizeMake(HALF,16,1)];
-        [e endEncoding]; submit_async(cb);
+        [e endEncoding]; cb_done(cb);
     }
 }
 
@@ -1754,7 +1773,7 @@ void mtl_mg_smooth(int ilevel, int ifine, int safe, int nsweep) {
         MgParams P{}; P.head_idx=MGHEAD(ifine); P.num_octs=MGNUM(ifine); P.ngridmax=MGNGM(ifine);
         P.use_ghost = (ifine==ilevel)?g_mgc.has_coarse:0; P.tfrac=(ifine==ilevel)?g_mgc.tfrac:0.0f;
         P.dx = MGDX(ifine);
-        id<MTLCommandBuffer> cb=[g_queue commandBuffer];
+        id<MTLCommandBuffer> cb=cb_get();
         id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
         [e setComputePipelineState:pso("gauss_seidel")];
         [e setBuffer:MGPHI(ifine) offset:0 atIndex:0]; [e setBuffer:MGF(ifine) offset:0 atIndex:1];
@@ -1770,7 +1789,7 @@ void mtl_mg_smooth(int ilevel, int ifine, int safe, int nsweep) {
                     threadsPerThreadgroup:MTLSizeMake(HALF,16,1)];
             }
         }
-        [e endEncoding]; submit_async(cb);
+        [e endEncoding]; cb_done(cb);
     }
 }
 
@@ -1781,7 +1800,7 @@ void mtl_mg_cmp_residual(int ilevel, int ifine) {
         MgParams P{}; P.head_idx=MGHEAD(ifine); P.num_octs=MGNUM(ifine); P.ngridmax=MGNGM(ifine);
         P.use_ghost = (ifine==ilevel)?g_mgc.has_coarse:0; P.tfrac=(ifine==ilevel)?g_mgc.tfrac:0.0f;
         P.dx = MGDX(ifine);
-        id<MTLCommandBuffer> cb=[g_queue commandBuffer];
+        id<MTLCommandBuffer> cb=cb_get();
         id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
         [e setComputePipelineState:pso("cmp_residual")];
         [e setBuffer:MGPHI(ifine) offset:0 atIndex:0]; [e setBuffer:MGF(ifine) offset:0 atIndex:1];
@@ -1789,7 +1808,7 @@ void mtl_mg_cmp_residual(int ilevel, int ifine) {
         [e setBuffer:B.grid offset:0 atIndex:4]; [e setBuffer:B.father offset:0 atIndex:5];
         [e setBuffer:B.phi_old offset:0 atIndex:6];
         [e dispatchThreads:MTLSizeMake(TWOTONDIM,MGNUM(ifine),1) threadsPerThreadgroup:MTLSizeMake(TWOTONDIM,8,1)];
-        [e endEncoding]; submit_async(cb);
+        [e endEncoding]; cb_done(cb);
     }
 }
 
@@ -1798,14 +1817,14 @@ void mtl_mg_restrict_residual(int ilevel, int ifine) {
     if (MGNUM(ifine) <= 0) return;
     @autoreleasepool {
         MgParams P{}; P.head_idx=MGHEAD(ifine); P.num_octs=MGNUM(ifine); P.head_father=MGHFA(ifine);
-        id<MTLCommandBuffer> cb=[g_queue commandBuffer];
+        id<MTLCommandBuffer> cb=cb_get();
         id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
         [e setComputePipelineState:pso("restrict_residual")];
         [e setBuffer:MGGR(ifine) offset:0 atIndex:0]; [e setBuffer:MG.father_mg offset:0 atIndex:1];
         [e setBuffer:MGF(ifine) offset:0 atIndex:2]; [e setBuffer:MG.f_mg offset:0 atIndex:3];
         [e setBytes:&P length:sizeof(P) atIndex:4];
         dispatch1d(e, pso("restrict_residual"), MGNUM(ifine));
-        [e endEncoding]; submit_async(cb);
+        [e endEncoding]; cb_done(cb);
     }
 }
 
@@ -1815,10 +1834,10 @@ void mtl_mg_reset_corr(int ilevel, int ifine) {
     @autoreleasepool {
         size_t off = (size_t)(MGHEAD(ifine)-1)*TWOTONDIM*sizeof(float);
         size_t len = (size_t)n*TWOTONDIM*sizeof(float);
-        id<MTLCommandBuffer> cb=[g_queue commandBuffer];
+        id<MTLCommandBuffer> cb=cb_get();
         id<MTLBlitCommandEncoder> bl=[cb blitCommandEncoder];
         [bl fillBuffer:MGPHI(ifine) range:NSMakeRange(off,len) value:0];
-        [bl endEncoding]; submit_async(cb);
+        [bl endEncoding]; cb_done(cb);
     }
 }
 
@@ -1827,7 +1846,7 @@ void mtl_mg_interpolate_correct(int ilevel, int ifine) {
     if (MGNUM(ifine) <= 0) return;
     @autoreleasepool {
         MgParams P{}; P.head_idx=MGHEAD(ifine); P.num_octs=MGNUM(ifine); P.head_father=MGHFA(ifine);
-        id<MTLCommandBuffer> cb=[g_queue commandBuffer];
+        id<MTLCommandBuffer> cb=cb_get();
         id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
         [e setComputePipelineState:pso("interpolate_correct")];
         [e setBuffer:MGGR(ifine) offset:0 atIndex:0]; [e setBuffer:MG.father_mg offset:0 atIndex:1];
@@ -1835,7 +1854,7 @@ void mtl_mg_interpolate_correct(int ilevel, int ifine) {
         [e setBuffer:MG.phi_mg offset:0 atIndex:4]; [e setBuffer:MGF(ifine) offset:0 atIndex:5];
         [e setBytes:&P length:sizeof(P) atIndex:6];
         [e dispatchThreads:MTLSizeMake(TWOTONDIM,MGNUM(ifine),1) threadsPerThreadgroup:MTLSizeMake(TWOTONDIM,8,1)];
-        [e endEncoding]; submit_async(cb);
+        [e endEncoding]; cb_done(cb);
     }
 }
 
@@ -1912,6 +1931,7 @@ double mtl_mg_norm_at(int ilevel, int ifine) {
 // Fine-level residual L2 norm (sum r^2 over unmasked cells); host sums partials.
 double mtl_mg_residual_norm2(int ilevel) {
     int n = MG.n_fine, ntg = (n + 255) / 256;
+    mg_flush();   // commit the deferred V-cycle batch so its residual (B.f) is computed before the reduction reads it
     @autoreleasepool {
         MgParams P{}; P.head_idx=MG.fine_head; P.num_octs=n;
         id<MTLCommandBuffer> cb=[g_queue commandBuffer];
