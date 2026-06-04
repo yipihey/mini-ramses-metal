@@ -499,6 +499,182 @@ contains
     call m_refine_fine(pst, ilevel)
   end subroutine ramses_refine_fine
 
+  !==========================================================================
+  ! Per-routine wrappers for the HYDRO slice.  Mirrors the gravity slice above:
+  ! each rebuilds a serial pst and calls the production routine on the live state
+  ! so a Julia call is the real `r%hydro` code path the time loop runs (see the
+  ! `if(r%hydro)` block in amr_step).  The conservative state lives in
+  ! m%uold/m%unew (twotondim,nvar,noct); ramses_get_hydro / ramses_set_hydro move
+  ! one variable at a time, ckey-keyed like ramses_get_field.  Hydro is CPU-only
+  ! today — these are the per-routine handles the Metal hydro port will diff
+  ! against (the same harness that cracked the gravity solve).
+  !==========================================================================
+
+  ! Number of conservative hydro variables nvar (= 5+nener by default, or NVAR).
+  ! No handle needed — it is a compile-time parameter; lets Julia size buffers.
+  function ramses_nvar() result(nv) bind(C, name="ramses_nvar")
+    use hydro_parameters, only: nvar
+    integer(c_int) :: nv
+    nv = nvar
+  end function ramses_nvar
+
+  ! GETTER for one hydro variable: read m%uold(:,ivar,:) (field=0) or
+  ! m%unew(:,ivar,:) (field=1) at ilevel, ivar in 1..nvar.  Layout matches
+  ! ramses_get_field: ckey is ndim*noct, val is twotondim*noct.  Returns noct.
+  function ramses_get_hydro(handle, field, ivar, ilevel, nmax, ckey, val) result(noct) &
+       bind(C, name="ramses_get_hydro")
+    use hydro_parameters, only: nvar
+    integer(c_int), value :: handle, field, ivar, ilevel, nmax
+    integer(c_int), intent(out) :: ckey(*)     ! ndim*nmax
+    real(c_double), intent(out) :: val(*)       ! twotondim*nmax
+    integer(c_int) :: noct
+    type(ramses_t), pointer :: s
+    integer :: o, c, j, d, hd, no
+    noct = 0
+    if (handle < 1 .or. handle > CAPI_MAXSTATE) return
+    if (ivar < 1 .or. ivar > nvar) return
+    s => capi_reg(handle)%p
+    if (.not. associated(s)) return
+    hd = s%m%head(ilevel)
+    no = min(s%m%noct(ilevel), nmax)
+    do j = 1, no
+       o = hd + j - 1
+       do d = 1, ndim
+          ckey(ndim*(j-1)+d) = s%m%grid(o)%ckey(d)
+       end do
+       do c = 1, twotondim
+          if (field == 0) then
+             val(twotondim*(j-1)+c) = real(s%m%uold(c, ivar, o), c_double)
+          else
+             val(twotondim*(j-1)+c) = real(s%m%unew(c, ivar, o), c_double)
+          end if
+       end do
+    end do
+    noct = no
+  end function ramses_get_hydro
+
+  ! SETTER (inverse of ramses_get_hydro): write m%uold/m%unew(:,ivar,:) at ilevel
+  ! from caller arrays, matched by ckey via the grid hash.  Returns octs written.
+  function ramses_set_hydro(handle, field, ivar, ilevel, n, ckey, val) result(nset) &
+       bind(C, name="ramses_set_hydro")
+    use hash, only: hash_getp
+    use hydro_parameters, only: nvar
+    integer(c_int), value :: handle, field, ivar, ilevel, n
+    integer(c_int), intent(in) :: ckey(*)      ! ndim*n
+    real(c_double), intent(in) :: val(*)        ! twotondim*n
+    integer(c_int) :: nset
+    type(ramses_t), pointer :: s
+    integer :: j, c, o, d
+    integer(8) :: hkey(0:ndim)
+    nset = 0
+    if (handle < 1 .or. handle > CAPI_MAXSTATE) return
+    if (ivar < 1 .or. ivar > nvar) return
+    s => capi_reg(handle)%p
+    if (.not. associated(s)) return
+    do j = 1, n
+       hkey(0) = ilevel
+       do d = 1, ndim
+          hkey(d) = ckey(ndim*(j-1)+d)
+       end do
+       o = hash_getp(s%m%grid_dict, hkey)
+       if (o <= 0) cycle
+       do c = 1, twotondim
+          if (field == 0) then
+             s%m%uold(c, ivar, o) = real(val(twotondim*(j-1)+c), dp)
+          else
+             s%m%unew(c, ivar, o) = real(val(twotondim*(j-1)+c), dp)
+          end if
+       end do
+       nset = nset + 1
+    end do
+  end function ramses_set_hydro
+
+  ! Hyperbolic solver (unsplit Godunov): the heavy hydro kernel, THE target of
+  ! the Metal port.  Reads m%uold, writes fluxes into m%unew (amr_step calls it
+  ! with input_size=1 after set_unew copies uold->unew).
+  subroutine ramses_godunov_fine(handle, ilevel) bind(C, name="ramses_godunov_fine")
+    use godunov_fine_module, only: r_godunov_fine
+    integer(c_int), value :: handle, ilevel
+    type(pst_t) :: pst; logical :: ok
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    call r_godunov_fine(pst, ilevel, 1)
+  end subroutine ramses_godunov_fine
+
+  ! unew <- uold (start of the hydro update).
+  subroutine ramses_set_unew(handle, ilevel) bind(C, name="ramses_set_unew")
+    use godunov_fine_module, only: r_set_unew
+    integer(c_int), value :: handle, ilevel
+    type(pst_t) :: pst; logical :: ok
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    call r_set_unew(pst, ilevel, 1)
+  end subroutine ramses_set_unew
+
+  ! uold <- unew (commit the hydro update).
+  subroutine ramses_set_uold(handle, ilevel) bind(C, name="ramses_set_uold")
+    use godunov_fine_module, only: r_set_uold
+    integer(c_int), value :: handle, ilevel
+    type(pst_t) :: pst; logical :: ok
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    call r_set_uold(pst, ilevel, 1)
+  end subroutine ramses_set_uold
+
+  ! Add gravity source terms to unew with the new force (half time step).
+  subroutine ramses_gravity_hydro_fine(handle, ilevel) bind(C, name="ramses_gravity_hydro_fine")
+    use synchro_hydro_fine_module, only: r_gravity_hydro_fine
+    integer(c_int), value :: handle, ilevel
+    type(pst_t) :: pst; logical :: ok
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    call r_gravity_hydro_fine(pst, ilevel, 1)
+  end subroutine ramses_gravity_hydro_fine
+
+  ! Add the non-gravity hydro source terms to unew.
+  subroutine ramses_source_hydro_fine(handle, ilevel) bind(C, name="ramses_source_hydro_fine")
+    use source_hydro_fine_module, only: r_source_hydro_fine
+    integer(c_int), value :: handle, ilevel
+    type(pst_t) :: pst; logical :: ok
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    call r_source_hydro_fine(pst, ilevel, 1)
+  end subroutine ramses_source_hydro_fine
+
+  ! Add gravity source terms to uold over time step dteff (the +-0.5*dt
+  ! synchro half-steps in amr_step; pass the signed dteff from Julia).
+  subroutine ramses_synchro_hydro_fine(handle, ilevel, dteff) bind(C, name="ramses_synchro_hydro_fine")
+    use synchro_hydro_fine_module, only: m_synchro_hydro_fine
+    integer(c_int), value :: handle, ilevel
+    real(c_double), value :: dteff
+    type(pst_t) :: pst; logical :: ok
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    call m_synchro_hydro_fine(pst, ilevel, real(dteff, 8))
+  end subroutine ramses_synchro_hydro_fine
+
+  ! Restriction operator: average fine uold up to the coarser level (ilevel<nlevelmax).
+  subroutine ramses_upload_fine(handle, ilevel) bind(C, name="ramses_upload_fine")
+    use upload_module, only: m_upload_fine
+    integer(c_int), value :: handle, ilevel
+    type(pst_t) :: pst; logical :: ok
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    call m_upload_fine(pst, ilevel)
+  end subroutine ramses_upload_fine
+
+  ! Cooling / heating update (no-op unless cooling/neq_chem/isothermal is on).
+  subroutine ramses_cooling_fine(handle, ilevel) bind(C, name="ramses_cooling_fine")
+    use cooling_fine_module, only: r_cooling_fine
+    integer(c_int), value :: handle, ilevel
+    type(pst_t) :: pst; logical :: ok
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    call r_cooling_fine(pst, ilevel, 1)
+  end subroutine ramses_cooling_fine
+
+  ! Recompute the per-level time step (Courant + particle dt) into g%dtnew(ilevel);
+  ! read it back with ramses_get_dt.
+  subroutine ramses_newdt_fine(handle, ilevel) bind(C, name="ramses_newdt_fine")
+    use newdt_fine_module, only: m_newdt_fine
+    integer(c_int), value :: handle, ilevel
+    type(pst_t) :: pst; logical :: ok
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    call m_newdt_fine(pst, ilevel)
+  end subroutine ramses_newdt_fine
+
   ! Run ONE production AMR step at ilevel — the full recursive subcycle the time
   ! loop calls: refine + rho + Poisson + force + kick + drift + newdt +
   ! update_time.  CPU runs the host path; the Metal library routes deposit/solve/

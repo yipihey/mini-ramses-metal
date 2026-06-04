@@ -47,6 +47,25 @@ void ramses_flag_fine(int handle, int ilevel, int icount);
 void ramses_refine_fine(int handle, int ilevel);
 void ramses_metal_poisson(int handle, int ilevel, int icount); /* Metal library only */
 
+/* ---- Per-routine wrappers for the HYDRO slice (CPU today; Metal port target) */
+/* Conservative state m%uold/m%unew has shape (twotondim,nvar,noct).  Move one
+ * variable at a time: field 0=uold 1=unew, ivar in 1..nvar.  ckey is ndim*noct,
+ * val is twotondim*noct (same layout as ramses_get_field).  Returns noct. */
+int  ramses_nvar(void);
+int  ramses_get_hydro(int handle, int field, int ivar, int ilevel, int nmax,
+                      int *ckey, double *val);
+int  ramses_set_hydro(int handle, int field, int ivar, int ilevel, int n,
+                      const int *ckey, const double *val);
+void ramses_godunov_fine(int handle, int ilevel);        /* unsplit Godunov solver */
+void ramses_set_unew(int handle, int ilevel);            /* unew <- uold */
+void ramses_set_uold(int handle, int ilevel);            /* uold <- unew */
+void ramses_gravity_hydro_fine(int handle, int ilevel);  /* grav source -> unew */
+void ramses_source_hydro_fine(int handle, int ilevel);   /* other source -> unew */
+void ramses_synchro_hydro_fine(int handle, int ilevel, double dteff); /* grav source -> uold */
+void ramses_upload_fine(int handle, int ilevel);         /* restriction to coarser */
+void ramses_cooling_fine(int handle, int ilevel);        /* cooling/heating */
+void ramses_newdt_fine(int handle, int ilevel);          /* Courant + particle dt */
+
 #ifdef __cplusplus
 }
 #endif
