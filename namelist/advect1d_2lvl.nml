@@ -1,0 +1,45 @@
+Two-level periodic 1D advection for the AMR CPU-vs-Metal godunov diff: the central
+density bump triggers one level of refinement (level 4 -> 5), so the coarse
+level-4 cells at the refinement boundary exercise zero_fine_fluxes (fluxes at
+faces touching a refined cell are zeroed).  Periodic -> no boundary octs.
+Compile: make NDIM=1 HYDRO=1 COMPILER=METAL
+
+&RUN_PARAMS
+hydro=.true.
+ncontrol=10000
+/
+
+&AMR_PARAMS
+levelmin=4
+levelmax=5
+ngridmax=4000
+nexpand=1
+boxlen=1.0
+/
+
+&INIT_PARAMS
+nregion=2
+region_type(1)='square'
+region_type(2)='square'
+x_center=0.5,0.5
+length_x=1.0,0.2
+d_region=1.0,2.0
+u_region=1.0,1.0
+p_region=1.0,1.0
+/
+
+&OUTPUT_PARAMS
+tout=1.0
+/
+
+&HYDRO_PARAMS
+gamma=1.4
+courant_factor=0.8
+slope_type=2
+riemann='hllc'
+/
+
+&REFINE_PARAMS
+err_grad_d=0.05
+interpol_type=1
+/

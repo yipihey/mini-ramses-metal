@@ -11,6 +11,7 @@ import ctypes as C, os, sys, math
 
 LIB = sys.argv[1] if len(sys.argv) > 1 else "bin/libramses1d_metal.dylib"
 NML = sys.argv[2] if len(sys.argv) > 2 else "namelist/advect1d_uniform.nml"
+WANT_L = int(sys.argv[3]) if len(sys.argv) > 3 else 0   # 0 = auto (first populated)
 NDIM = 1
 TWOTONDIM = 1 << NDIM
 
@@ -49,10 +50,13 @@ def set_uold(ivar, L, ck, data):
     vb = (C.c_double * len(data))(*data)
     return lib.ramses_set_hydro(h, 0, ivar, L, n, cb, vb)
 
-# pick the populated (uniform) level
-L = next((lv for lv in range(1, 21) if lib.ramses_get_hydro(h, 0, 1, lv, NMAX, ckey, val) > 0), -1)
-if L < 0:
-    print("FAIL: no populated level"); sys.exit(2)
+# report all populated levels, then pick the target (WANT_L, or first populated)
+pop = [(lv, lib.ramses_get_hydro(h, 0, 1, lv, NMAX, ckey, val)) for lv in range(1, 21)]
+pop = [(lv, n) for lv, n in pop if n > 0]
+print("populated levels:", ", ".join(f"L{lv}={n}" for lv, n in pop))
+L = WANT_L if WANT_L else (pop[0][0] if pop else -1)
+if L < 0 or all(lv != L for lv, _ in pop):
+    print(f"FAIL: target level {L} not populated"); sys.exit(2)
 noct, _, _ = get(0, 1, L)
 # compute a real timestep so the Godunov update is non-trivial (both paths read g%dtnew)
 lib.ramses_newdt_fine(h, L)
