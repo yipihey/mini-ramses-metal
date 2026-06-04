@@ -642,11 +642,16 @@ contains
     eps = r%epsilon
     is_base = merge(1, 0, ilevel == r%levelmin)
 
-    ! Plateau early-exit factor (read once).  Default 0.99 = exit the V-cycle loop
-    ! once a cycle improves the relative residual by < 1%.  <=0 disables (grind to
-    ! eps/MAXITER, the prior faithful-but-wasteful behaviour).
+    ! Plateau early-exit factor (read once).  DEFAULT 0.0 = OFF so the GPU V-cycle
+    ! loop uses the IDENTICAL eps/MAXITER convergence logic as the CPU multigrid()
+    ! -- keep both paths the same (residuals + cycle counts) to reason about and to
+    ! preserve the unit-tested parity.  Opt in with RAMSES_MG_PLATEAU>0 (e.g. 0.99 =
+    ! exit once a V-cycle improves the rel-residual by <1%) for a ~5% perf win; it is
+    ! physically neutral but DIVERGES the GPU convergence logic from the CPU, so it is
+    ! an experiment knob, not the default.  The real fix is to make the GPU base MG
+    ! reach the CPU's residual floor (then it converges in ~4 cycles like the CPU).
     if (plat_factor < 0.0_dp) then
-       plat_factor = 0.99_dp
+       plat_factor = 0.0_dp
        call get_environment_variable("RAMSES_MG_PLATEAU", pe)
        if (len_trim(pe) > 0) read(pe,*) plat_factor
     end if
