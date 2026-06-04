@@ -56,6 +56,23 @@ kernel void godunov_1d_test(device const float* gin  [[buffer(0)]],
     gout[5]=du[1].density; gout[6]=du[1].momentum_x; gout[7]=du[1].momentum_y; gout[8]=du[1].momentum_z; gout[9]=du[1].energy;
 }
 
+// interpol_hydro coarse-fine ghost prolongation.
+// in: [0]=interpol_var [1]=interpol_type [2]=smallr, then (1+2*NDIM) cells * 5.
+// out: TWOTONDIM cells * 5.
+kernel void interpol_test(device const float* in  [[buffer(0)]],
+                          device       float* out [[buffer(1)]],
+                          uint gid [[thread_position_in_grid]]) {
+    if (gid != 0) return;
+    int nv = (int)in[0], nt = (int)in[1]; float smallr = in[2];
+    HConserved u1[1 + 2*NDIM];
+    for (int j = 0; j < 1 + 2*NDIM; ++j) { int o = 3 + j*5; u1[j] = {in[o],in[o+1],in[o+2],in[o+3],in[o+4]}; }
+    HConserved u2[TWOTONDIM];
+    interpol_hydro_oct(u1, nv, nt, smallr, u2);
+    for (int c = 0; c < TWOTONDIM; ++c) { int o = c*5;
+        out[o]=u2[c].density; out[o+1]=u2[c].momentum_x; out[o+2]=u2[c].momentum_y;
+        out[o+3]=u2[c].momentum_z; out[o+4]=u2[c].energy; }
+}
+
 // 3D Godunov update of an 8-cell oct from its 6x6x6 primitive subgrid.
 // gin: [0]=gamma [1]=dtdx [2]=slope [3]=riemann, then 216 cells * 5 prim floats.
 // gout: du[8] * 5 = 40 floats.

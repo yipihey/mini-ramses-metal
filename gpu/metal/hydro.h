@@ -472,4 +472,46 @@ inline void godunov_oct_3d_amr(thread const HPrimitive sg[216], thread const boo
     #undef RIDX
 }
 
+//----------------------------------------------------------------------------
+// interpol_hydro (interpol_hydro.f90): the coarse-fine ghost prolongation the
+// Godunov reads at a refinement boundary (godfine1:534).  From a coarse stencil
+// u1[0..2*NDIM] -- center (0) + the 2*NDIM face neighbours, ordering dir 2i-1 = -,
+// 2i = + in dim i (the iii/hhh order) -- produce the TWOTONDIM fine sub-cell
+// conserved states.  interpol_var: 0 interpolate conserved (rho,rhou,E); 1 with
+// E as internal energy (E->eint, interpolate, eint->E).  interpol_type: 0 inject,
+// 1 minmod (the RAMSES defaults).  moncen(2)/central(3) -- the multidimensional
+// corner limiter -- are NOT yet ported (fall back to minmod; assert in tests).
+//----------------------------------------------------------------------------
+inline float il_slope(float center, float left, float right, int interpol_type) {
+    if (interpol_type == 0) return 0.0f;                 // straight injection
+    float dl = 0.5f * (right - center);                  // compute_limiter_minmod
+    float dr = 0.5f * (center - left);
+    if (dl * dr <= 0.0f) return 0.0f;
+    return min(fabs(dl), fabs(dr)) * (dl / fabs(dl));
+}
+
+inline void interpol_hydro_oct(thread const HConserved u1[1 + 2*NDIM], int interpol_var,
+                               int interpol_type, float smallr, thread HConserved u2[TWOTONDIM]) {
+    HConserved s[1 + 2*NDIM];
+    for (int j = 0; j < 1 + 2*NDIM; ++j) s[j] = u1[j];
+    if (interpol_var == 1)                               // total -> internal energy
+        for (int j = 0; j < 1 + 2*NDIM; ++j)
+            s[j].energy -= 0.5f * magnitude_squared(s[j].momentum_x, s[j].momentum_y, s[j].momentum_z)
+                           / max(s[j].density, smallr);
+    for (int c = 1; c <= TWOTONDIM; ++c) {
+        int b = c - 1;
+        float xc[3] = { (float)(b & 1) - 0.5f, (float)((b >> 1) & 1) - 0.5f, (float)((b >> 2) & 1) - 0.5f };
+        #define IL_COMP(field) { float a0 = s[0].field, v = a0;                          \
+            for (int idim = 0; idim < NDIM; ++idim)                                       \
+                v += il_slope(a0, s[2*idim+1].field, s[2*idim+2].field, interpol_type) * xc[idim]; \
+            u2[b].field = v; }
+        IL_COMP(density) IL_COMP(momentum_x) IL_COMP(momentum_y) IL_COMP(momentum_z) IL_COMP(energy)
+        #undef IL_COMP
+    }
+    if (interpol_var == 1)                               // internal -> total energy
+        for (int c = 0; c < TWOTONDIM; ++c)
+            u2[c].energy += 0.5f * magnitude_squared(u2[c].momentum_x, u2[c].momentum_y, u2[c].momentum_z)
+                            / max(u2[c].density, smallr);
+}
+
 #endif // RAMSES_HYDRO_H

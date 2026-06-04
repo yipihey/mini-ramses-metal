@@ -165,6 +165,20 @@ static void god3d_amr(const P* sg, const bool* ref, double g,double dtdx,int slo
   #undef RI
 }
 
+// host replica of interpol_hydro_oct
+static double il_slope_h(double c,double l,double r,int t){ if(t==0)return 0;
+  double dl=0.5*(r-c),dr=0.5*(c-l); if(dl*dr<=0)return 0; return fmin(fabs(dl),fabs(dr))*(dl/fabs(dl)); }
+static void interpol_h(const C* u1,int nv,int nt,double smallr,C* u2){
+  C s[1+2*NDIM]; for(int j=0;j<1+2*NDIM;++j)s[j]=u1[j];
+  if(nv==1) for(int j=0;j<1+2*NDIM;++j) s[j].e-=0.5*mag2(s[j].mx,s[j].my,s[j].mz)/fmax(s[j].d,smallr);
+  #define H(f) { double a0=s[0].f,v=a0; for(int idm=0;idm<NDIM;++idm) v+=il_slope_h(a0,s[2*idm+1].f,s[2*idm+2].f,nt)*xc[idm]; u2[b].f=v; }
+  for(int cc=1;cc<=TWOTONDIM;++cc){ int b=cc-1; double xc[3]={(double)(b&1)-0.5,(double)((b>>1)&1)-0.5,(double)((b>>2)&1)-0.5};
+    H(d) H(mx) H(my) H(mz) H(e)
+  }
+  #undef H
+  if(nv==1) for(int cc=0;cc<TWOTONDIM;++cc) u2[cc].e+=0.5*mag2(u2[cc].mx,u2[cc].my,u2[cc].mz)/fmax(u2[cc].d,smallr);
+}
+
 static int g_fail = 0;
 static void chk(const char* name, double got, double ref, double rtol) {
     double err = fabs(got-ref), den = fmax(1.0, fabs(ref));
@@ -414,6 +428,38 @@ int main(int argc, char** argv) {
                 for(int vv=0;vv<5;vv++){ char b[48]; snprintf(b,sizeof b,"reflux.%s",vn[vv]);
                     chk(b, Nn[UHc(pcell,vv+1,FATHER)], ex[vv], 5e-4); }
             }
+        }
+
+        // ---- 1e) interpol_hydro coarse-fine ghost prolongation -----------
+        {
+            id<MTLComputePipelineState> ips = pso("interpol_test");
+            const int NS = 1 + 2*NDIM;
+            auto run_il = [&](int nv,int nt,double smallr, C* u1, float out[TWOTONDIM*5]){
+                float gi[3 + (1+2*NDIM)*5]; gi[0]=nv; gi[1]=nt; gi[2]=(float)smallr;
+                for(int j=0;j<NS;++j){ int o=3+j*5; gi[o]=u1[j].d;gi[o+1]=u1[j].mx;gi[o+2]=u1[j].my;gi[o+3]=u1[j].mz;gi[o+4]=u1[j].e; }
+                id<MTLBuffer> bi=[dev newBufferWithBytes:gi length:sizeof(gi) options:MTLResourceStorageModeShared];
+                id<MTLBuffer> bo=[dev newBufferWithLength:TWOTONDIM*5*sizeof(float) options:MTLResourceStorageModeShared];
+                id<MTLCommandBuffer> cb=[q commandBuffer]; id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
+                [e setComputePipelineState:ips]; [e setBuffer:bi offset:0 atIndex:0]; [e setBuffer:bo offset:0 atIndex:1];
+                [e dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+                [e endEncoding];[cb commit];[cb waitUntilCompleted];
+                for(int i=0;i<TWOTONDIM*5;++i) out[i]=((float*)bo.contents)[i];
+            };
+            auto cmp_il=[&](const char* tag,int nv,int nt, C* u1){
+                float gpu[TWOTONDIM*5]; run_il(nv,nt,1e-10,u1,gpu);
+                C u2[TWOTONDIM]; interpol_h(u1,nv,nt,1e-10,u2);
+                const char* vn[5]={"d","mx","my","mz","e"};
+                for(int c=0;c<TWOTONDIM;++c){ double r[5]={u2[c].d,u2[c].mx,u2[c].my,u2[c].mz,u2[c].e};
+                    for(int vv=0;vv<5;vv++){ char b[40]; snprintf(b,sizeof b,"%s.c%d.%s",tag,c,vn[vv]); chk(b,gpu[c*5+vv],r[vv],RF); } }
+            };
+            // a smoothly varying coarse stencil (center + 2*NDIM face neighbours)
+            C u1[1+2*NDIM];
+            u1[0]={1.0, 0.2, -0.1, 0.05, 2.0};
+            for(int id=0;id<NDIM;++id){ u1[2*id+1]={1.0-0.1*(id+1),0.2-0.02*(id+1),-0.1,0.05,2.0-0.15*(id+1)};
+                                        u1[2*id+2]={1.0+0.12*(id+1),0.2+0.03*(id+1),-0.1,0.05,2.0+0.18*(id+1)}; }
+            cmp_il("il.minmod", 0, 1, u1);   // interpol_var=0 interpol_type=1 (the default)
+            cmp_il("il.inject", 0, 0, u1);   // straight injection
+            cmp_il("il.var1",   1, 1, u1);   // internal-energy form
         }
 
         // ---- 2) set_unew / set_uold copy kernels -------------------------
