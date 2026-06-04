@@ -98,6 +98,7 @@ module metal_gravity_module
              gt_pmar=0, gt_kick=0, gt_kmar=0, gt_refine=0
   real(8) :: gt_mg_lvl(0:30) = 0      ! per-level MG wall (DIAG: where the fine-level cost lives)
   integer(8) :: gt_mg_cnt(0:30) = 0   ! per-level solve count
+  real(8) :: gt_norm = 0              ! DIAG: time in mtl_mg_residual_norm2 (the per-iter readback drain)
   integer(8), private :: tk0, tkr
   integer, allocatable, private :: g_box_min(:), g_box_max(:)
 
@@ -738,7 +739,11 @@ contains
        call mtl_mg_cmp_residual(ilevel, ilevel)
 
        ! Compute initial residual norm (first iteration)
-       if (iter == 1) i_res = mtl_mg_residual_norm2(ilevel)
+       if (iter == 1) then
+          block; integer(8)::tn0,tn1,tnr; call system_clock(tn0,tnr)
+          i_res = mtl_mg_residual_norm2(ilevel)
+          call system_clock(tn1); gt_norm = gt_norm + dble(tn1-tn0)/tnr; end block
+       end if
 
        ! Coarse-grid correction (one recursive V-cycle)
        if (ilevel > levelmin_mg) then
@@ -756,7 +761,9 @@ contains
 
        ! Update fine residual + norm for the convergence test
        call mtl_mg_cmp_residual(ilevel, ilevel)
+       block; integer(8)::tn0,tn1,tnr; call system_clock(tn0,tnr)
        res = mtl_mg_residual_norm2(ilevel)
+       call system_clock(tn1); gt_norm = gt_norm + dble(tn1-tn0)/tnr; end block
 
        last_err = err
        err = sqrt(res / (i_res + 1.0d-20*rho_tot**2))
@@ -1472,6 +1479,8 @@ contains
       write(*,'(A,F8.2,A,F8.2,A,F8.2,A)') '   pois: multigrid total     = ', gt_mg, &
            '  (hierarchy-build=', th, ', V-cycle=', tv, ')'
     end block
+    write(*,'(A,F8.2,A)') '   pois:   of which resid-norm READBACK = ', gt_norm, &
+         '  (the per-iteration convergence drain)'
     block
       integer :: L
       write(*,'(A)') '   pois: multigrid per-level  (level: wall_s  nsolves  s/solve):'
