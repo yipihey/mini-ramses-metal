@@ -202,4 +202,193 @@ inline HConserved riemann_fluxes(thread HPrimitive& L, thread HPrimitive& R,
     else                             return hll_fluxes(L, R, gamma, true);  // LLF
 }
 
+//----------------------------------------------------------------------------
+// MUSCL-Hancock reconstruction + 1D Godunov update.  The 3D trace_3d
+// (gpu_hydro.cuf:400) reduces EXACTLY to this in 1D: the transverse (y,z) slopes
+// vanish, leaving the x source terms below, and no velocity rotation is needed
+// since the sweep normal is already x.  This is the unit-testable core of the
+// integrator; the 3D directional sweeps + the 27-oct subgrid gather build on it.
+//----------------------------------------------------------------------------
+
+// MUSCL-Hancock trace of one cell `m` from its x-stencil (l,m,r).  Returns the
+// two reconstructed interface states: qL = state at the cell's i+1/2 (right) face
+// (= cell+slope), qR = state at its i-1/2 (left) face (= cell-slope), each after
+// the half-step source prediction.  Faithful to trace_3d with y,z slopes = 0.
+inline void trace_cell_1d(HPrimitive l, HPrimitive m, HPrimitive r,
+                          float gamma, float dtdx, int slope,
+                          thread HPrimitive& qL, thread HPrimitive& qR) {
+    const float smallr = 1e-10f;
+    const float smallp = 1e-10f * (1e-10f * 1e-10f);   // smallr*smallc_squared (trace_3d:417)
+
+    HPrimitive s;   // 0.5 * limited x-slope
+    s.density    = 0.5f * slope_moncen(l.density,    m.density,    r.density,    slope);
+    s.velocity_x = 0.5f * slope_moncen(l.velocity_x, m.velocity_x, r.velocity_x, slope);
+    s.velocity_y = 0.5f * slope_moncen(l.velocity_y, m.velocity_y, r.velocity_y, slope);
+    s.velocity_z = 0.5f * slope_moncen(l.velocity_z, m.velocity_z, r.velocity_z, slope);
+    s.pressure   = 0.5f * slope_moncen(l.pressure,   m.pressure,   r.pressure,   slope);
+
+    HPrimitive src;   // x-direction source terms (trace_3d:460-479, y,z dropped)
+    src.density    = -m.velocity_x * s.density    - s.velocity_x * m.density;
+    src.velocity_x = -m.velocity_x * s.velocity_x - s.pressure / m.density;
+    src.velocity_y = -m.velocity_x * s.velocity_y;
+    src.velocity_z = -m.velocity_x * s.velocity_z;
+    src.pressure   = -m.velocity_x * s.pressure   - s.velocity_x * gamma * m.pressure;
+
+    HPrimitive p;   // half-step predicted cell-centered state
+    p.density    = m.density    + dtdx * src.density;
+    p.velocity_x = m.velocity_x + dtdx * src.velocity_x;
+    p.velocity_y = m.velocity_y + dtdx * src.velocity_y;
+    p.velocity_z = m.velocity_z + dtdx * src.velocity_z;
+    p.pressure   = m.pressure   + dtdx * src.pressure;
+
+    qL.density    = p.density    + s.density;
+    qL.velocity_x = p.velocity_x + s.velocity_x;
+    qL.velocity_y = p.velocity_y + s.velocity_y;
+    qL.velocity_z = p.velocity_z + s.velocity_z;
+    qL.pressure   = p.pressure   + s.pressure;
+    if (qL.density  < smallr) qL.density  = m.density;    // 1st-order fallback (orig value)
+    if (qL.pressure < smallp) qL.pressure = m.pressure;
+
+    qR.density    = p.density    - s.density;
+    qR.velocity_x = p.velocity_x - s.velocity_x;
+    qR.velocity_y = p.velocity_y - s.velocity_y;
+    qR.velocity_z = p.velocity_z - s.velocity_z;
+    qR.pressure   = p.pressure   - s.pressure;
+    if (qR.density  < smallr) qR.density  = m.density;
+    if (qR.pressure < smallp) qR.pressure = m.pressure;
+}
+
+// One-direction Godunov update of a 2-cell oct given its 6-cell primitive
+// subgrid sg[0..5] (central oct = sg[2], sg[3]; sg[0..1], sg[4..5] are halo from
+// the neighbour octs).  Writes the conservative update du[0], du[1] for the two
+// central cells (= unew increment, gpu_hydro.cuf conservative_update).  dtdx=dt/dx.
+inline void godunov_oct_1d(thread const HPrimitive sg[6], float gamma, float dtdx,
+                           int slope, int riemann, thread HConserved du[2]) {
+    HPrimitive qL[4], qR[4];   // traces for subgrid cells 1..4 -> index c-1
+    for (int c = 1; c <= 4; ++c)
+        trace_cell_1d(sg[c-1], sg[c], sg[c+1], gamma, dtdx, slope, qL[c-1], qR[c-1]);
+
+    // Flux at the face between cells (c, c+1): L = qL of c, R = qR of c+1.
+    HPrimitive a, b;
+    a = qL[0]; b = qR[1]; HConserved fa = riemann_fluxes(a, b, gamma, riemann); // face 1|2
+    a = qL[1]; b = qR[2]; HConserved fb = riemann_fluxes(a, b, gamma, riemann); // face 2|3
+    a = qL[2]; b = qR[3]; HConserved fc = riemann_fluxes(a, b, gamma, riemann); // face 3|4
+
+    // Central cell 2 sees faces (1|2, 2|3); cell 3 sees (2|3, 3|4).
+    du[0].density    = (fa.density    - fb.density)    * dtdx;
+    du[0].momentum_x = (fa.momentum_x - fb.momentum_x) * dtdx;
+    du[0].momentum_y = (fa.momentum_y - fb.momentum_y) * dtdx;
+    du[0].momentum_z = (fa.momentum_z - fb.momentum_z) * dtdx;
+    du[0].energy     = (fa.energy     - fb.energy)     * dtdx;
+    du[1].density    = (fb.density    - fc.density)    * dtdx;
+    du[1].momentum_x = (fb.momentum_x - fc.momentum_x) * dtdx;
+    du[1].momentum_y = (fb.momentum_y - fc.momentum_y) * dtdx;
+    du[1].momentum_z = (fb.momentum_z - fc.momentum_z) * dtdx;
+    du[1].energy     = (fb.energy     - fc.energy)     * dtdx;
+}
+
+//----------------------------------------------------------------------------
+// 3D MUSCL-Hancock Godunov (faithful to trace_3d + riemann_driver +
+// conservative_update).  Operates on a 6x6x6 primitive subgrid sg[i+6j+36k]
+// (central oct = the {2,3}^3 block) and writes du for the 8 central cells.
+// The transverse sweeps reuse the x-normal Riemann solver by rotating the
+// velocity triple (the riemann_driver permutation, gpu_hydro.cuf:858-909).
+//----------------------------------------------------------------------------
+struct HTrace { HPrimitive qLx, qRx, qLy, qRy, qLz, qRz; };
+
+inline HPrimitive hp_add(HPrimitive a, HPrimitive b, float s) {   // a + s*b
+    HPrimitive r;
+    r.density=a.density+s*b.density; r.velocity_x=a.velocity_x+s*b.velocity_x;
+    r.velocity_y=a.velocity_y+s*b.velocity_y; r.velocity_z=a.velocity_z+s*b.velocity_z;
+    r.pressure=a.pressure+s*b.pressure; return r;
+}
+
+// Trace one subgrid cell (i,j,k) (1<=i,j,k<=4): all 6 face interface states.
+inline HTrace trace_cell_3d(thread const HPrimitive sg[216], int i, int j, int k,
+                            float gamma, float dtdx, int slope) {
+    const float smallr = 1e-10f, smallp = 1e-10f * (1e-10f * 1e-10f);
+    #define SG3(a,b,c) sg[(a) + 6*(b) + 36*(c)]
+    HPrimitive m = SG3(i,j,k);
+    HPrimitive sx, sy, sz;
+    sx.density   =0.5f*slope_moncen(SG3(i-1,j,k).density,   m.density,   SG3(i+1,j,k).density,   slope);
+    sx.velocity_x=0.5f*slope_moncen(SG3(i-1,j,k).velocity_x,m.velocity_x,SG3(i+1,j,k).velocity_x,slope);
+    sx.velocity_y=0.5f*slope_moncen(SG3(i-1,j,k).velocity_y,m.velocity_y,SG3(i+1,j,k).velocity_y,slope);
+    sx.velocity_z=0.5f*slope_moncen(SG3(i-1,j,k).velocity_z,m.velocity_z,SG3(i+1,j,k).velocity_z,slope);
+    sx.pressure  =0.5f*slope_moncen(SG3(i-1,j,k).pressure,  m.pressure,  SG3(i+1,j,k).pressure,  slope);
+    sy.density   =0.5f*slope_moncen(SG3(i,j-1,k).density,   m.density,   SG3(i,j+1,k).density,   slope);
+    sy.velocity_x=0.5f*slope_moncen(SG3(i,j-1,k).velocity_x,m.velocity_x,SG3(i,j+1,k).velocity_x,slope);
+    sy.velocity_y=0.5f*slope_moncen(SG3(i,j-1,k).velocity_y,m.velocity_y,SG3(i,j+1,k).velocity_y,slope);
+    sy.velocity_z=0.5f*slope_moncen(SG3(i,j-1,k).velocity_z,m.velocity_z,SG3(i,j+1,k).velocity_z,slope);
+    sy.pressure  =0.5f*slope_moncen(SG3(i,j-1,k).pressure,  m.pressure,  SG3(i,j+1,k).pressure,  slope);
+    sz.density   =0.5f*slope_moncen(SG3(i,j,k-1).density,   m.density,   SG3(i,j,k+1).density,   slope);
+    sz.velocity_x=0.5f*slope_moncen(SG3(i,j,k-1).velocity_x,m.velocity_x,SG3(i,j,k+1).velocity_x,slope);
+    sz.velocity_y=0.5f*slope_moncen(SG3(i,j,k-1).velocity_y,m.velocity_y,SG3(i,j,k+1).velocity_y,slope);
+    sz.velocity_z=0.5f*slope_moncen(SG3(i,j,k-1).velocity_z,m.velocity_z,SG3(i,j,k+1).velocity_z,slope);
+    sz.pressure  =0.5f*slope_moncen(SG3(i,j,k-1).pressure,  m.pressure,  SG3(i,j,k+1).pressure,  slope);
+    #undef SG3
+
+    float divu = sx.velocity_x + sy.velocity_y + sz.velocity_z;
+    HPrimitive src;
+    src.density    = -m.velocity_x*sx.density   -m.velocity_y*sy.density   -m.velocity_z*sz.density   - divu*m.density;
+    src.velocity_x = -m.velocity_x*sx.velocity_x-m.velocity_y*sy.velocity_x-m.velocity_z*sz.velocity_x- sx.pressure/m.density;
+    src.velocity_y = -m.velocity_x*sx.velocity_y-m.velocity_y*sy.velocity_y-m.velocity_z*sz.velocity_y- sy.pressure/m.density;
+    src.velocity_z = -m.velocity_x*sx.velocity_z-m.velocity_y*sy.velocity_z-m.velocity_z*sz.velocity_z- sz.pressure/m.density;
+    src.pressure   = -m.velocity_x*sx.pressure  -m.velocity_y*sy.pressure  -m.velocity_z*sz.pressure  - divu*gamma*m.pressure;
+
+    HPrimitive p = hp_add(m, src, dtdx);   // half-step predicted state
+
+    HTrace t;
+    t.qLx=hp_add(p,sx, 1.0f); t.qRx=hp_add(p,sx,-1.0f);
+    t.qLy=hp_add(p,sy, 1.0f); t.qRy=hp_add(p,sy,-1.0f);
+    t.qLz=hp_add(p,sz, 1.0f); t.qRz=hp_add(p,sz,-1.0f);
+    // first-order fallback to the ORIGINAL cell value (trace_3d:498)
+    thread HPrimitive* q[6] = {&t.qLx,&t.qRx,&t.qLy,&t.qRy,&t.qLz,&t.qRz};
+    for (int n=0;n<6;++n){ if(q[n]->density<smallr) q[n]->density=m.density; if(q[n]->pressure<smallp) q[n]->pressure=m.pressure; }
+    return t;
+}
+
+inline HConserved flux_x(HPrimitive L, HPrimitive R, float g, int riem) {
+    return riemann_fluxes(L, R, g, riem);
+}
+inline HConserved flux_y(HPrimitive L, HPrimitive R, float g, int riem) {   // rotate (u,v,w)->(v,w,u)
+    HPrimitive Lr={L.density,L.velocity_y,L.velocity_z,L.velocity_x,L.pressure};
+    HPrimitive Rr={R.density,R.velocity_y,R.velocity_z,R.velocity_x,R.pressure};
+    HConserved f=riemann_fluxes(Lr,Rr,g,riem);
+    HConserved o={f.density,f.momentum_z,f.momentum_x,f.momentum_y,f.energy};
+    return o;
+}
+inline HConserved flux_z(HPrimitive L, HPrimitive R, float g, int riem) {   // rotate (u,v,w)->(w,u,v)
+    HPrimitive Lr={L.density,L.velocity_z,L.velocity_x,L.velocity_y,L.pressure};
+    HPrimitive Rr={R.density,R.velocity_z,R.velocity_x,R.velocity_y,R.pressure};
+    HConserved f=riemann_fluxes(Lr,Rr,g,riem);
+    HConserved o={f.density,f.momentum_y,f.momentum_z,f.momentum_x,f.energy};
+    return o;
+}
+
+inline HConserved cdiff(HConserved a, HConserved b, float s) {   // (a-b)*s
+    HConserved r={ (a.density-b.density)*s, (a.momentum_x-b.momentum_x)*s,
+                   (a.momentum_y-b.momentum_y)*s, (a.momentum_z-b.momentum_z)*s,
+                   (a.energy-b.energy)*s }; return r;
+}
+inline HConserved cadd(HConserved a, HConserved b) {
+    HConserved r={a.density+b.density,a.momentum_x+b.momentum_x,a.momentum_y+b.momentum_y,
+                  a.momentum_z+b.momentum_z,a.energy+b.energy}; return r;
+}
+
+// du for the 8 central cells (cell index = 1 + ci + 2*cj + 4*ck, ci,cj,ck in {0,1}).
+inline void godunov_oct_3d(thread const HPrimitive sg[216], float gamma, float dtdx,
+                           int slope, int riemann, thread HConserved du[8]) {
+    for (int ck=0; ck<2; ++ck) for (int cj=0; cj<2; ++cj) for (int ci=0; ci<2; ++ci) {
+        int I=ci+2, J=cj+2, K=ck+2;
+        HConserved fxl=flux_x(trace_cell_3d(sg,I-1,J,K,gamma,dtdx,slope).qLx, trace_cell_3d(sg,I,J,K,gamma,dtdx,slope).qRx, gamma,riemann);
+        HConserved fxr=flux_x(trace_cell_3d(sg,I,J,K,gamma,dtdx,slope).qLx, trace_cell_3d(sg,I+1,J,K,gamma,dtdx,slope).qRx, gamma,riemann);
+        HConserved fyl=flux_y(trace_cell_3d(sg,I,J-1,K,gamma,dtdx,slope).qLy, trace_cell_3d(sg,I,J,K,gamma,dtdx,slope).qRy, gamma,riemann);
+        HConserved fyr=flux_y(trace_cell_3d(sg,I,J,K,gamma,dtdx,slope).qLy, trace_cell_3d(sg,I,J+1,K,gamma,dtdx,slope).qRy, gamma,riemann);
+        HConserved fzl=flux_z(trace_cell_3d(sg,I,J,K-1,gamma,dtdx,slope).qLz, trace_cell_3d(sg,I,J,K,gamma,dtdx,slope).qRz, gamma,riemann);
+        HConserved fzr=flux_z(trace_cell_3d(sg,I,J,K,gamma,dtdx,slope).qLz, trace_cell_3d(sg,I,J,K+1,gamma,dtdx,slope).qRz, gamma,riemann);
+        HConserved d = cadd(cadd(cdiff(fxl,fxr,dtdx), cdiff(fyl,fyr,dtdx)), cdiff(fzl,fzr,dtdx));
+        du[ci + 2*cj + 4*ck] = d;
+    }
+}
+
 #endif // RAMSES_HYDRO_H

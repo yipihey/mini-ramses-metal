@@ -65,6 +65,73 @@ static C hll(P L,P R,double g,bool llf){
            hllf(sl,sr,lf.e,rf.e,Lc.e,Rc.e) };
 }
 
+enum { S_LLF=1, S_HLL=2, S_HLLC=3 };
+static C rdispatch(P a, P b, double g, int riemann){
+  if(riemann==S_HLL)  return hll(a,b,g,false);
+  if(riemann==S_HLLC) return hllc(a,b,g);
+  return hll(a,b,g,true);  // LLF
+}
+// host double replica of trace_cell_1d / godunov_oct_1d (the parity reference)
+static void trace1d(P l,P m,P r,double g,double dtdx,int slope,P& qL,P& qR){
+  double smallr=1e-10, smallp=1e-10*(1e-10*1e-10);
+  P s={0.5*moncen(l.r,m.r,r.r,slope),0.5*moncen(l.u,m.u,r.u,slope),
+       0.5*moncen(l.v,m.v,r.v,slope),0.5*moncen(l.w,m.w,r.w,slope),0.5*moncen(l.p,m.p,r.p,slope)};
+  P src={ -m.u*s.r - s.u*m.r, -m.u*s.u - s.p/m.r, -m.u*s.v, -m.u*s.w, -m.u*s.p - s.u*g*m.p };
+  P pp={m.r+dtdx*src.r,m.u+dtdx*src.u,m.v+dtdx*src.v,m.w+dtdx*src.w,m.p+dtdx*src.p};
+  qL={pp.r+s.r,pp.u+s.u,pp.v+s.v,pp.w+s.w,pp.p+s.p};
+  if(qL.r<smallr)qL.r=m.r; if(qL.p<smallp)qL.p=m.p;
+  qR={pp.r-s.r,pp.u-s.u,pp.v-s.v,pp.w-s.w,pp.p-s.p};
+  if(qR.r<smallr)qR.r=m.r; if(qR.p<smallp)qR.p=m.p;
+}
+static void god1d(P sg[6],double g,double dtdx,int slope,int riemann,C du[2]){
+  P qL[4],qR[4];
+  for(int c=1;c<=4;++c) trace1d(sg[c-1],sg[c],sg[c+1],g,dtdx,slope,qL[c-1],qR[c-1]);
+  C fa=rdispatch(qL[0],qR[1],g,riemann), fb=rdispatch(qL[1],qR[2],g,riemann), fc=rdispatch(qL[2],qR[3],g,riemann);
+  du[0]={(fa.d-fb.d)*dtdx,(fa.mx-fb.mx)*dtdx,(fa.my-fb.my)*dtdx,(fa.mz-fb.mz)*dtdx,(fa.e-fb.e)*dtdx};
+  du[1]={(fb.d-fc.d)*dtdx,(fb.mx-fc.mx)*dtdx,(fb.my-fc.my)*dtdx,(fb.mz-fc.mz)*dtdx,(fb.e-fc.e)*dtdx};
+}
+
+// ---- host double replica of the 3D Godunov (trace_cell_3d + sweeps) ---------
+struct Tr{ P qLx,qRx,qLy,qRy,qLz,qRz; };
+static P padd(P a,P b,double s){ return {a.r+s*b.r,a.u+s*b.u,a.v+s*b.v,a.w+s*b.w,a.p+s*b.p}; }
+static Tr trace3d(const P* sg,int i,int j,int k,double g,double dtdx,int slope){
+  double smallr=1e-10, smallp=1e-10*(1e-10*1e-10);
+  #define G(a,b,c) sg[(a)+6*(b)+36*(c)]
+  P m=G(i,j,k);
+  P sx={0.5*moncen(G(i-1,j,k).r,m.r,G(i+1,j,k).r,slope),0.5*moncen(G(i-1,j,k).u,m.u,G(i+1,j,k).u,slope),0.5*moncen(G(i-1,j,k).v,m.v,G(i+1,j,k).v,slope),0.5*moncen(G(i-1,j,k).w,m.w,G(i+1,j,k).w,slope),0.5*moncen(G(i-1,j,k).p,m.p,G(i+1,j,k).p,slope)};
+  P sy={0.5*moncen(G(i,j-1,k).r,m.r,G(i,j+1,k).r,slope),0.5*moncen(G(i,j-1,k).u,m.u,G(i,j+1,k).u,slope),0.5*moncen(G(i,j-1,k).v,m.v,G(i,j+1,k).v,slope),0.5*moncen(G(i,j-1,k).w,m.w,G(i,j+1,k).w,slope),0.5*moncen(G(i,j-1,k).p,m.p,G(i,j+1,k).p,slope)};
+  P sz={0.5*moncen(G(i,j,k-1).r,m.r,G(i,j,k+1).r,slope),0.5*moncen(G(i,j,k-1).u,m.u,G(i,j,k+1).u,slope),0.5*moncen(G(i,j,k-1).v,m.v,G(i,j,k+1).v,slope),0.5*moncen(G(i,j,k-1).w,m.w,G(i,j,k+1).w,slope),0.5*moncen(G(i,j,k-1).p,m.p,G(i,j,k+1).p,slope)};
+  #undef G
+  double divu=sx.u+sy.v+sz.w;
+  P src={ -m.u*sx.r-m.v*sy.r-m.w*sz.r-divu*m.r,
+          -m.u*sx.u-m.v*sy.u-m.w*sz.u-sx.p/m.r,
+          -m.u*sx.v-m.v*sy.v-m.w*sz.v-sy.p/m.r,
+          -m.u*sx.w-m.v*sy.w-m.w*sz.w-sz.p/m.r,
+          -m.u*sx.p-m.v*sy.p-m.w*sz.p-divu*g*m.p };
+  P p=padd(m,src,dtdx);
+  Tr t={padd(p,sx,1),padd(p,sx,-1),padd(p,sy,1),padd(p,sy,-1),padd(p,sz,1),padd(p,sz,-1)};
+  P* q[6]={&t.qLx,&t.qRx,&t.qLy,&t.qRy,&t.qLz,&t.qRz};
+  for(int n=0;n<6;n++){ if(q[n]->r<smallr)q[n]->r=m.r; if(q[n]->p<smallp)q[n]->p=m.p; }
+  return t;
+}
+static C cdf(C a,C b,double s){ return {(a.d-b.d)*s,(a.mx-b.mx)*s,(a.my-b.my)*s,(a.mz-b.mz)*s,(a.e-b.e)*s}; }
+static C cad(C a,C b){ return {a.d+b.d,a.mx+b.mx,a.my+b.my,a.mz+b.mz,a.e+b.e}; }
+static C fx_(P L,P R,double g,int riem){ return rdispatch(L,R,g,riem); }
+static C fy_(P L,P R,double g,int riem){ P Lr={L.r,L.v,L.w,L.u,L.p},Rr={R.r,R.v,R.w,R.u,R.p}; C f=rdispatch(Lr,Rr,g,riem); return {f.d,f.mz,f.mx,f.my,f.e}; }
+static C fz_(P L,P R,double g,int riem){ P Lr={L.r,L.w,L.u,L.v,L.p},Rr={R.r,R.w,R.u,R.v,R.p}; C f=rdispatch(Lr,Rr,g,riem); return {f.d,f.my,f.mz,f.mx,f.e}; }
+static void god3d(const P* sg,double g,double dtdx,int slope,int riem,C du[8]){
+  for(int ck=0;ck<2;ck++)for(int cj=0;cj<2;cj++)for(int ci=0;ci<2;ci++){
+    int I=ci+2,J=cj+2,K=ck+2;
+    C fxl=fx_(trace3d(sg,I-1,J,K,g,dtdx,slope).qLx,trace3d(sg,I,J,K,g,dtdx,slope).qRx,g,riem);
+    C fxr=fx_(trace3d(sg,I,J,K,g,dtdx,slope).qLx,trace3d(sg,I+1,J,K,g,dtdx,slope).qRx,g,riem);
+    C fyl=fy_(trace3d(sg,I,J-1,K,g,dtdx,slope).qLy,trace3d(sg,I,J,K,g,dtdx,slope).qRy,g,riem);
+    C fyr=fy_(trace3d(sg,I,J,K,g,dtdx,slope).qLy,trace3d(sg,I,J+1,K,g,dtdx,slope).qRy,g,riem);
+    C fzl=fz_(trace3d(sg,I,J,K-1,g,dtdx,slope).qLz,trace3d(sg,I,J,K,g,dtdx,slope).qRz,g,riem);
+    C fzr=fz_(trace3d(sg,I,J,K,g,dtdx,slope).qLz,trace3d(sg,I,J,K+1,g,dtdx,slope).qRz,g,riem);
+    du[ci+2*cj+4*ck]=cad(cad(cdf(fxl,fxr,dtdx),cdf(fyl,fyr,dtdx)),cdf(fzl,fzr,dtdx));
+  }
+}
+
 static int g_fail = 0;
 static void chk(const char* name, double got, double ref, double rtol) {
     double err = fabs(got-ref), den = fmax(1.0, fabs(ref));
@@ -123,6 +190,65 @@ int main(int argc, char** argv) {
         C pf = { L.r*L.u, L.r*L.u*L.u+L.p, L.r*L.u*L.v, L.r*L.u*L.w, (cenergy(L,g)+L.p)*L.u };
         chk("idL.d",o[22],pf.d,RF); chk("idL.mx",o[23],pf.mx,RF); chk("idL.my",o[24],pf.my,RF);
         chk("idL.mz",o[25],pf.mz,RF); chk("idL.e",o[26],pf.e,RF);
+
+        // ---- 1b) 1D Godunov update (trace + riemann + flux differencing) --
+        id<MTLComputePipelineState> g1d = pso("godunov_1d_test");
+        auto run_god1d = [&](P sg[6], double gam, double dtdx, int slope, int riem, float duout[10]){
+            float gi[34]; gi[0]=gam; gi[1]=dtdx; gi[2]=slope; gi[3]=riem;
+            for(int c=0;c<6;c++){ int o=4+c*5; gi[o]=sg[c].r; gi[o+1]=sg[c].u; gi[o+2]=sg[c].v; gi[o+3]=sg[c].w; gi[o+4]=sg[c].p; }
+            id<MTLBuffer> bi=[dev newBufferWithBytes:gi length:sizeof(gi) options:MTLResourceStorageModeShared];
+            id<MTLBuffer> bo=[dev newBufferWithLength:10*sizeof(float) options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cb=[q commandBuffer]; id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
+            [e setComputePipelineState:g1d]; [e setBuffer:bi offset:0 atIndex:0]; [e setBuffer:bo offset:0 atIndex:1];
+            [e dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+            [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+            for(int i=0;i<10;i++) duout[i]=((float*)bo.contents)[i];
+        };
+        auto cmp_god = [&](const char* tag, P sg[6], double gam, double dtdx, int slope, int riem){
+            float gpu[10]; run_god1d(sg, gam, dtdx, slope, riem, gpu);
+            C du[2]; god1d(sg, gam, dtdx, slope, riem, du);
+            double ref[10]={du[0].d,du[0].mx,du[0].my,du[0].mz,du[0].e, du[1].d,du[1].mx,du[1].my,du[1].mz,du[1].e};
+            const char* nm[10]={"c2.d","c2.mx","c2.my","c2.mz","c2.e","c3.d","c3.mx","c3.my","c3.mz","c3.e"};
+            for(int i=0;i<10;i++){ char b[40]; snprintf(b,sizeof b,"%s.%s",tag,nm[i]); chk(b,gpu[i],ref[i],RF); }
+        };
+        // Sod-like jump (HLLC, minmod) — vs host-double replica
+        { P sg[6]={{1,0,0,0,1},{1,0,0,0,1},{1,0,0,0,1},{0.125,0,0,0,0.1},{0.125,0,0,0,0.1},{0.125,0,0,0,0.1}};
+          cmp_god("sodHLLC", sg, 1.4, 0.1, 1, S_HLLC); }
+        // smooth ramp with transverse velocity (moncen, HLL) — exercises slopes + advection
+        { P sg[6]; for(int c=0;c<6;c++){ double x=c; sg[c]={1.0+0.1*x, 0.2, 0.3, -0.1, 1.0+0.05*x}; }
+          cmp_god("rampHLL", sg, 1.4, 0.15, 2, S_HLL); }
+        // uniform state -> zero update (LLF)
+        { P sg[6]; for(int c=0;c<6;c++) sg[c]={1.3,0.4,-0.2,0.1,0.9};
+          float gpu[10]; run_god1d(sg,1.4,0.2,2,S_LLF,gpu);
+          for(int i=0;i<10;i++) if(fabs(gpu[i])>1e-6){ printf("    [FAIL] uniform du[%d]=%.3e != 0\n",i,gpu[i]); g_fail++; } }
+
+        // ---- 1c) 3D Godunov update (directional sweeps + velocity rotation)
+        id<MTLComputePipelineState> g3d = pso("godunov_3d_test");
+        auto run_god3d = [&](P sg[216], double gam, double dtdx, int slope, int riem, float duout[40]){
+            float gi[4+216*5]; gi[0]=gam; gi[1]=dtdx; gi[2]=slope; gi[3]=riem;
+            for(int c=0;c<216;c++){ int o=4+c*5; gi[o]=sg[c].r; gi[o+1]=sg[c].u; gi[o+2]=sg[c].v; gi[o+3]=sg[c].w; gi[o+4]=sg[c].p; }
+            id<MTLBuffer> bi=[dev newBufferWithBytes:gi length:sizeof(gi) options:MTLResourceStorageModeShared];
+            id<MTLBuffer> bo=[dev newBufferWithLength:40*sizeof(float) options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cb=[q commandBuffer]; id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
+            [e setComputePipelineState:g3d]; [e setBuffer:bi offset:0 atIndex:0]; [e setBuffer:bo offset:0 atIndex:1];
+            [e dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+            [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+            for(int i=0;i<40;i++) duout[i]=((float*)bo.contents)[i];
+        };
+        // 3D field: x-Sod jump + small transverse velocities (exercises all 3 sweeps + rotation)
+        { P sg[216];
+          for(int k=0;k<6;k++)for(int j=0;j<6;j++)for(int i=0;i<6;i++){
+              bool left = i<3;
+              sg[i+6*j+36*k] = { left?1.0:0.2, 0.05*(j-2), -0.03*(k-2), 0.02*(i-2), left?1.0:0.3 }; }
+          float gpu[40]; run_god3d(sg,1.4,0.1,1,S_HLLC,gpu);
+          C du[8]; god3d(sg,1.4,0.1,1,S_HLLC,du);
+          double ref[40]; for(int n=0;n<8;n++){ ref[n*5]=du[n].d;ref[n*5+1]=du[n].mx;ref[n*5+2]=du[n].my;ref[n*5+3]=du[n].mz;ref[n*5+4]=du[n].e; }
+          const char* vn[5]={"d","mx","my","mz","e"};
+          for(int n=0;n<8;n++)for(int vv=0;vv<5;vv++){ char b[40]; snprintf(b,sizeof b,"g3d.c%d.%s",n,vn[vv]); chk(b,gpu[n*5+vv],ref[n*5+vv],RF); } }
+        // 3D uniform -> zero update
+        { P sg[216]; for(int c=0;c<216;c++) sg[c]={1.1,0.3,-0.2,0.15,0.7};
+          float gpu[40]; run_god3d(sg,1.4,0.2,2,S_HLLC,gpu);
+          for(int i=0;i<40;i++) if(fabs(gpu[i])>1e-6){ printf("    [FAIL] 3D uniform du[%d]=%.3e != 0\n",i,gpu[i]); g_fail++; } }
 
         // ---- 2) set_unew / set_uold copy kernels -------------------------
         const int noct=3;
