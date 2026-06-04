@@ -170,7 +170,7 @@ ifeq ($(COMPILER),INTEL)
    endif
 endif
 #############################################################################
-# NVHPC compiler
+# NVHPC compiler (optional -gpu=$(CUDA_ARCH),fastmath in FFLAGS and LIBS)
 ifeq ($(COMPILER),NVHPC)
    FFLAGS = -cpp -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx $(DEFINES)
    LIBS = -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx -lstdc++
