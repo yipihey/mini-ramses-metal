@@ -87,32 +87,34 @@ subroutine ensure_scan_capacity_part(min_capacity)
 
   ! Real(dp) partial-sum workspace, mirroring the integer tiers above. Used by
   ! the DM CIC small-stencil deposit's per-offset gpu_scan_dp passes.
-  if (allocated(partial_sums_dp_0)) then
-     if (size(partial_sums_dp_0) < gs0) then
-        deallocate(partial_sums_dp_0)
+  if (part_dep_algo == 3) then
+     if (allocated(partial_sums_dp_0)) then
+        if (size(partial_sums_dp_0) < gs0) then
+           deallocate(partial_sums_dp_0)
+           allocate(partial_sums_dp_0(1:gs0))
+        endif
+     else
         allocate(partial_sums_dp_0(1:gs0))
      endif
-  else
-     allocate(partial_sums_dp_0(1:gs0))
-  endif
 
-  if (allocated(partial_sums_dp_1)) then
-     if (size(partial_sums_dp_1) < gs1) then
-        deallocate(partial_sums_dp_1)
+     if (allocated(partial_sums_dp_1)) then
+        if (size(partial_sums_dp_1) < gs1) then
+           deallocate(partial_sums_dp_1)
+           allocate(partial_sums_dp_1(1:gs1))
+        endif
+     else
         allocate(partial_sums_dp_1(1:gs1))
      endif
-  else
-     allocate(partial_sums_dp_1(1:gs1))
-  endif
 
-  if (allocated(partial_sums_dp_2)) then
-     if (size(partial_sums_dp_2) < gs2) then
-        deallocate(partial_sums_dp_2)
+     if (allocated(partial_sums_dp_2)) then
+        if (size(partial_sums_dp_2) < gs2) then
+           deallocate(partial_sums_dp_2)
+           allocate(partial_sums_dp_2(1:gs2))
+        endif
+     else
         allocate(partial_sums_dp_2(1:gs2))
      endif
-  else
-     allocate(partial_sums_dp_2(1:gs2))
-  endif
+   endif !(part_dep_algo == 3)
 
 end subroutine ensure_scan_capacity_part
 
