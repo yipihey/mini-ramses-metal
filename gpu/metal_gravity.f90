@@ -180,6 +180,27 @@ contains
                end do
             end do
           end block
+          ! One-shot seed of resident B.phi / B.phi_old from the CPU mesh.  On a
+          ! RESTART the host m%phi holds the loaded converged potential; without this
+          ! device B.phi is the memset-0 (alloc) value, so the FIRST step's pre-solve
+          ! phi_old snapshot captures 0 -> a finer subcycle's coarse-fine boundary
+          ! time-extrapolation reads phi_old~0 -> a large one-time over-energization
+          ! kick at restart (coarse phi_old rel-rms 1.0, refined phi blown ~50%).
+          ! After this, the GPU owns B.phi (each solve overwrites it; the resident
+          ! value carries to the next step's phi_old).  (Fresh-start m%phi=0 here too,
+          ! matching the old behaviour; only restarts had a nonzero phi to lose.)
+          block
+            real(c_float), pointer :: mp(:), mpo(:)
+            integer :: o, c
+            call c_f_pointer(mtl_ptr_phi(),     mp,  [g_ncell*twotondim])
+            call c_f_pointer(mtl_ptr_phi_old(), mpo, [g_ncell*twotondim])
+            do o = 1, num_octs
+               do c = 1, twotondim
+                  mp ((o-1)*twotondim + c) = real(m%phi(c, o),     c_float)
+                  mpo((o-1)*twotondim + c) = real(m%phi_old(c, o), c_float)
+               end do
+            end do
+          end block
           b_grid_seeded = .true.
        end if
        call mtl_conn_rebuild_hash(num_octs, r%nlevelmax, g_box_min, g_box_max)
