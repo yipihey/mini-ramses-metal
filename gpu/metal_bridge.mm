@@ -41,6 +41,9 @@ struct Buffers {
     // Mesh (filled by host r_set_grid_device, read back by r_transfer_grid_host)
     id<MTLBuffer> grid, nbor, father, hash_key, hash_val, ckey_max, key_off, box_min, box_max;
     id<MTLBuffer> rho, nref, phi, f, phi_old;             // fields (float)
+    id<MTLBuffer> uold, unew;                             // hydro conserved state (twotondim*nvar)
+    id<MTLBuffer> reflux_lo, reflux_hi;                   // coarse-fine reflux fixed-point accumulators
+    id<MTLBuffer> hydro_red;                              // cmpdt reduction [dt,mass,ekin,eint,emag] (HYDRO_RED_N)
     id<MTLBuffer> flag1, flag2;                           // refinement map (int)
     id<MTLBuffer> rho_lo, rho_hi, nref_lo, nref_hi;       // fixed-point deposit accumulators
     // Particles (+ swap buffers for the on-GPU reorder)
@@ -406,6 +409,14 @@ void mtl_alloc_buffers(int ncell, int npartmax, int hash_size, int nlevelmax) {
     B.phi_old  = newbuf<float>(nc*TWOTONDIM);
     memset(B.phi_old.contents, 0, nc*TWOTONDIM*sizeof(float)); // valid before first save (tfrac=0 anyway)
     B.f        = newbuf<float>(nc*TWOTONDIM*NF);
+    // Hydro conserved state + coarse-fine reflux fixed-point accumulators + cmpdt reduction.
+    B.uold      = newbuf<float>(nc*TWOTONDIM*NHVAR);
+    B.unew      = newbuf<float>(nc*TWOTONDIM*NHVAR);
+    B.reflux_lo = newbuf<unsigned>(nc*TWOTONDIM*NHVAR);
+    B.reflux_hi = newbuf<unsigned>(nc*TWOTONDIM*NHVAR);
+    B.hydro_red = newbuf<unsigned>(HYDRO_RED_N);
+    memset(B.uold.contents, 0, nc*TWOTONDIM*NHVAR*sizeof(float));
+    memset(B.unew.contents, 0, nc*TWOTONDIM*NHVAR*sizeof(float));
     B.rho_lo   = newbuf<unsigned>(nc*TWOTONDIM); B.rho_hi  = newbuf<unsigned>(nc*TWOTONDIM);
     B.nref_lo  = newbuf<unsigned>(nc*TWOTONDIM); B.nref_hi = newbuf<unsigned>(nc*TWOTONDIM);
     B.ipos     = newbuf<long>(np*NDIM);
@@ -484,6 +495,118 @@ void* mtl_ptr_grid()     { return B.grid.contents; }
 void* mtl_ptr_nbor()     { return B.nbor.contents; }
 void* mtl_ptr_father()   { return B.father.contents; }
 void* mtl_ptr_flag1()    { return B.flag1.contents; }
+void* mtl_ptr_uold()     { return B.uold.contents; }
+void* mtl_ptr_unew()     { return B.unew.contents; }
+
+//============================================================================
+// HYDRO orchestration (gpu_hydro.cuf port).  Per-level wrappers around the
+// hydro.metal kernels, mirroring godunov_fine.f90's set_unew -> godunov ->
+// [grav] -> set_uold sequence and the cmpdt / flag / coarse-fine reflux passes.
+// All reals are narrowed to fp32 in HydroParams; submit_async + mtl_drain give
+// host sync exactly as the gravity path does.
+//============================================================================
+static HydroParams hydro_params(int ilevel, int head, int num,
+                                double gamma, double dt, double dx, int slope, int riemann,
+                                double courant, double fp_scale, int levelmin, int levelmax) {
+    HydroParams P{};
+    P.gamma=(float)gamma; P.dt=(float)dt; P.dx=(float)dx;
+    P.smallr=1e-10f; P.smallc=1e-10f; P.courant_factor=(float)courant; P.fp_scale=(float)fp_scale;
+    P.slope_type=slope; P.riemann=riemann; P.head_idx=head; P.num_octs=num;
+    P.ngridmax=B.ngridmax; P.ilevel=ilevel; P.levelmin=levelmin; P.levelmax=levelmax;
+    return P;
+}
+
+// Per-level conservative update: set_unew (uold->unew), hydro_godunov (gather ->
+// AMR Godunov -> unew += du, reflux scatter to coarser level), grav_hydro
+// (velocity kick on unew), set_uold (unew->uold).  Faithful to godunov_fine(ilevel)
+// for a single level; the caller zeros/finalizes the cross-level reflux around this.
+extern "C" void mtl_godunov_fine(int ilevel, int head, int num, int levelmin, int levelmax,
+        double gamma, double dt, double dx, int slope, int riemann, double courant, double fp_scale) {
+    if (num <= 0) return;
+    HydroParams P = hydro_params(ilevel, head, num, gamma, dt, dx, slope, riemann, courant, fp_scale, levelmin, levelmax);
+    id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    // set_unew
+    [e setComputePipelineState:pso("set_unew")];
+    [e setBuffer:B.uold offset:0 atIndex:0]; [e setBuffer:B.unew offset:0 atIndex:1];
+    [e setBytes:&P length:sizeof(P) atIndex:2]; dispatch1d(e, pso("set_unew"), num);
+    // hydro_godunov
+    [e setComputePipelineState:pso("hydro_godunov")];
+    [e setBuffer:B.uold offset:0 atIndex:0]; [e setBuffer:B.unew offset:0 atIndex:1];
+    [e setBuffer:B.f offset:0 atIndex:2];    [e setBuffer:B.nbor offset:0 atIndex:3];
+    [e setBuffer:B.grid offset:0 atIndex:4]; [e setBuffer:B.father offset:0 atIndex:5];
+    [e setBuffer:B.reflux_lo offset:0 atIndex:6]; [e setBuffer:B.reflux_hi offset:0 atIndex:7];
+    [e setBytes:&P length:sizeof(P) atIndex:8]; dispatch1d(e, pso("hydro_godunov"), num);
+    // grav_hydro (f carries the force; zero for pure hydro -> identity round-trip)
+    [e setComputePipelineState:pso("grav_hydro")];
+    [e setBuffer:B.uold offset:0 atIndex:0]; [e setBuffer:B.unew offset:0 atIndex:1];
+    [e setBuffer:B.f offset:0 atIndex:2];    [e setBytes:&P length:sizeof(P) atIndex:3];
+    dispatch1d(e, pso("grav_hydro"), num*TWOTONDIM);
+    // set_uold
+    [e setComputePipelineState:pso("set_uold")];
+    [e setBuffer:B.uold offset:0 atIndex:0]; [e setBuffer:B.unew offset:0 atIndex:1];
+    [e setBytes:&P length:sizeof(P) atIndex:2]; dispatch1d(e, pso("set_uold"), num);
+    [e endEncoding]; submit_async(cb);
+}
+
+// Zero the coarse-fine reflux fixed-point accumulators for a level's octs before a
+// finer level scatters into them.  head/num = the COARSE-level octs being protected.
+extern "C" void mtl_hydro_reflux_zero(int head, int num) {
+    if (num <= 0) return;
+    size_t off = (size_t)(head-1)*TWOTONDIM*NHVAR, n = (size_t)num*TWOTONDIM*NHVAR;
+    memset((unsigned*)B.reflux_lo.contents + off, 0, n*sizeof(unsigned));
+    memset((unsigned*)B.reflux_hi.contents + off, 0, n*sizeof(unsigned));
+}
+
+// Add the accumulated reflux corrections into unew for the coarse level [head,head+num).
+extern "C" void mtl_hydro_reflux_finalize(int head, int num, double fp_scale) {
+    if (num <= 0) return;
+    HydroParams P = hydro_params(0, head, num, 1.4, 0, 1, 0, 0, 0, fp_scale, 0, 0);
+    id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:pso("hydro_reflux_finalize")];
+    [e setBuffer:B.unew offset:0 atIndex:0]; [e setBuffer:B.reflux_lo offset:0 atIndex:1];
+    [e setBuffer:B.reflux_hi offset:0 atIndex:2]; [e setBytes:&P length:sizeof(P) atIndex:3];
+    dispatch1d(e, pso("hydro_reflux_finalize"), num);
+    [e endEncoding]; submit_async(cb);
+}
+
+// CFL timestep + conservation diagnostics over [head,head+num).  Returns dt (min)
+// and the mass/ekin/eint sums (emag=0).  fp_scale sets the fixed-point sum scale.
+extern "C" double mtl_hydro_cmpdt(int head, int num, double gamma, double dx, double courant,
+        double fp_scale, double* mass, double* ekin, double* eint) {
+    if (num <= 0) { if(mass)*mass=0; if(ekin)*ekin=0; if(eint)*eint=0; return 1e30; }
+    unsigned* R = (unsigned*)B.hydro_red.contents;
+    for (int i=0;i<HYDRO_RED_N;++i) R[i]=0;
+    float fm = __FLT_MAX__; memcpy(&R[0], &fm, 4);            // dt-min sentinel
+    HydroParams P = hydro_params(0, head, num, gamma, 0, dx, 0, 0, courant, fp_scale, 0, 0);
+    id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:pso("hydro_cmpdt")];
+    [e setBuffer:B.grid offset:0 atIndex:0]; [e setBuffer:B.uold offset:0 atIndex:1];
+    [e setBuffer:B.f offset:0 atIndex:2];    [e setBuffer:B.hydro_red offset:0 atIndex:3];
+    [e setBytes:&P length:sizeof(P) atIndex:4]; dispatch1d(e, pso("hydro_cmpdt"), num*TWOTONDIM);
+    [e endEncoding]; submit_async(cb); mtl_drain();
+    auto f2f=[&](int lo,int hi)->double{ long qv=((long)((unsigned long)R[hi]<<32))|(unsigned long)R[lo]; return (double)qv/fp_scale; };
+    float dt; memcpy(&dt, &R[0], 4);
+    if (mass) *mass=f2f(1,2); if (ekin) *ekin=f2f(3,4); if (eint) *eint=f2f(5,6);
+    return (double)dt;
+}
+
+// Density/pressure-gradient refinement flag over [head,head+num) -> B.flag1.
+extern "C" void mtl_hydro_flag(int head, int num, double gamma,
+        double err_grad_d, double err_grad_p, double floor_d, double floor_p) {
+    if (num <= 0) return;
+    HydroFlagParams P{}; P.gamma=(float)gamma; P.err_grad_d=(float)err_grad_d; P.err_grad_p=(float)err_grad_p;
+    P.floor_d=(float)floor_d; P.floor_p=(float)floor_p; P.head_idx=head; P.num_octs=num;
+    id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:pso("hydro_flag")];
+    [e setBuffer:B.flag1 offset:0 atIndex:0]; [e setBuffer:B.grid offset:0 atIndex:1];
+    [e setBuffer:B.nbor offset:0 atIndex:2];  [e setBuffer:B.uold offset:0 atIndex:3];
+    [e setBytes:&P length:sizeof(P) atIndex:4]; dispatch1d(e, pso("hydro_flag"), num*TWOTONDIM);
+    [e endEncoding]; submit_async(cb);
+}
 
 // AMR refinement flagging on the GPU (mirrors m_flag_fine): reset flag1, propagate
 // from level (ilevel+1) children, smooth (3 passes, thresholds 1/2/2), apply the

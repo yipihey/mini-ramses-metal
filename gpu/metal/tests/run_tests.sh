@@ -103,6 +103,19 @@ echo "=== cache-oct host orchestration (#30: mtl_make_cache on a coarse-fine pat
   else echo "BUILD-FAIL(host)"; sed 's/^/    /' "$TMP/co.log" | head; fail=$((fail+1)); failed+=(test_cache_orch); fi
 }
 
+echo "=== hydro bridge orchestration (mtl_godunov_fine + cmpdt + flag, NDIM=1) ==="
+{
+  GPU=..; LIB1=$TMP/test_bridge1d.metallib
+  # LIB1 + mb1.o are built by the cache-orch block above (NDIM=1 full metallib + bridge).
+  printf "%-20s " "test_hydro_bridge"
+  if [ -f "$TMP/mb1.o" ] && [ -f "$LIB1" ] && \
+     clang++ -std=c++17 -ObjC++ -fobjc-arc -DNDIM=1 -I"$GPU" "$GPU/metal_bridge_hydrotest.mm" "$TMP/mb1.o" \
+        -framework Metal -framework Foundation -o "$TMP/test_hydro_bridge" 2>"$TMP/hb.log"; then
+    if "$TMP/test_hydro_bridge" "$LIB1" >"$TMP/hb.out" 2>&1; then echo "PASS"; pass=$((pass+1));
+    else echo "FAIL"; sed 's/^/    /' "$TMP/hb.out"; fail=$((fail+1)); failed+=(test_hydro_bridge); fi
+  else echo "BUILD-FAIL(host)"; sed 's/^/    /' "$TMP/hb.log" | head; fail=$((fail+1)); failed+=(test_hydro_bridge); fi
+}
+
 echo "================================================"
 echo "TOTAL: $pass passed, $fail failed"
 [ $fail -gt 0 ] && { echo "FAILED: ${failed[*]}"; exit 1; }

@@ -68,13 +68,21 @@ Coupling / control / refine:
 - [x] hydro_flag_kernel   (density/pressure-gradient refinement criterion)      :1466
       -> hydro.metal hydro_flag (FLAG_hhh/FLAG_iii + mg_nbor); unit-tested
 
-## Bridge / buffers (deferred until kernels land)
-The gravity bridge has grid/phi/phi_old/f/rho/nbor/father/flag1 device buffers.
-Hydro adds **uold** and **unew** buffers (twotondim*nvar per oct); the bridge
-copies rho/uold in, runs the per-level hydro sequence (set_unew → godunov →
-[grav/source] → set_uold → upload), copies uold out. The C-API
-`ramses_godunov_fine` etc. will route to these under the Metal library, exactly
-like the gravity routines route to the GPU solve.
+## Bridge / buffers
+- [x] device buffers: **uold**, **unew** (twotondim*nvar/oct), **reflux_lo/hi**
+      (coarse-fine fixed-point accumulators), **hydro_red** (cmpdt reduction).
+      Allocated in mtl_alloc_buffers; accessors mtl_ptr_uold/unew.
+- [x] orchestration C entries (metal_bridge.mm), validated by the bridge
+      integration test metal_bridge_hydrotest.mm (uniform periodic 1D chain,
+      f=0): **mtl_godunov_fine** (set_unew → hydro_godunov → grav_hydro →
+      set_uold, == host uold0+du), **mtl_hydro_cmpdt** (dt + mass/ekin/eint),
+      **mtl_hydro_flag** (spike fires), **mtl_hydro_reflux_zero/finalize**.
+- [ ] REMAINING (needs the full app build, not unit-testable in isolation):
+      Fortran-side routing (a metal_hydro.f90 analog of metal_gravity.f90, or
+      gpu_runner swap) so godunov_fine/courant_fine/hydro_flag call the mtl_*
+      entries; host<->device uold transfer via the existing get/set_hydro C-API;
+      bin64h (HYDRO=1) link against the Metal lib; CPU-vs-Metal **Sedov/tube**
+      parity diff (the true end-to-end validation).
 
 ## Test strategy
 Per-kernel `.metal`+`.mm` harness (build the kernel into a metallib, feed known
