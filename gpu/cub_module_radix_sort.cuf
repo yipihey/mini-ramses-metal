@@ -1,0 +1,27 @@
+module cub_module
+  interface
+    !> sorts keys_in.
+    !> @param[in] keys_in keys to sort
+    !> @param[out] keys_out array for the sorted keys
+    !> @param[in] idx_in an empty array of the same length as keys_in
+    !> @param[out] idx_out array for the sorted indices
+    subroutine radix_sort(keys_in, keys_out, idx_in,  idx_out, &
+                          head_idx, num_elem, start_bit, end_bit) bind(c, name="cub_module_radix_sort")
+      use cudafor
+      use iso_c_binding
+      implicit none
+      type(c_ptr), value :: keys_in, keys_out, idx_in, idx_out
+      integer(c_int32_t), value :: head_idx, num_elem, start_bit, end_bit
+    end subroutine
+
+    !> pre-allocate work space for scan. note that the scan itself will always
+    !> check and allocate if needed so calling this is optional.
+    subroutine radix_sort_allocate_workspace(num_octs) bind(c, name="cub_module_radix_sort_allocate_workspace")
+      use cudafor
+      use iso_c_binding
+      implicit none
+      integer(c_int), value :: num_octs
+    end subroutine
+  end interface
+end module
+

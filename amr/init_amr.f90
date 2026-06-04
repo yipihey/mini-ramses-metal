@@ -533,6 +533,8 @@ subroutine init_amr(r,g,m,type)
         bound_ckey_max=m%bound_ckey_max
      endif
   endif
+  allocate(d_skip(1:ndim))
+  d_skip = m%skip
 #endif
 
   ! Initialize level-based arrays

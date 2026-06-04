@@ -105,12 +105,18 @@ subroutine init_part(r,g,m,p)
   allocate(phip(1:r%npartmax))
 #endif
   ! gpu_cic_part source map.
+#if (4 == NPRE) && defined(CUB_SORT_PART)
+  ! we're reusing this buffer in CUB radix sort, it always needs to have 8
+  ! bytes per element
+  allocate(xp_swap (1:2*r%npartmax))
+#else
   allocate(xp_swap (1:r%npartmax))
+#endif
   allocate(isp_swap(1:r%npartmax))
   allocate(idp_swap(1:r%npartmax))
   ! Prefix sum arrays
   scan_size = max(r%npartmax, m%ngridmax + m%ncachemax)
-  call ensure_scan_capacity_part(scan_size)
+  call ensure_scan_capacity_part(scan_size, r%part_dep_algo)
 #endif
 end subroutine init_part
 !#########################################################################
