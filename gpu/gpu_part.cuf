@@ -14,7 +14,7 @@ module part_device
        & xp, vp, mp, phip, levelp, sortp, idp, &
 !       & jp, zp, tp, tm, size_p, charge, idm, idt, &
        & xp_swap, isp_swap, idp_swap, &
-       & gpu_scan, gpu_scan_dp
+       & gpu_scan, gpu_scan_dp, d_skip
   implicit none
 
   ! Local hash/hilbert/reduce includes.
@@ -558,23 +558,24 @@ end subroutine gpu_split_part
 !> groups with its periodic image, and the Hilbert key is computed at the
 !> deposit level.
 attributes(global) subroutine compute_hkey_part_kernel(xp, hkey_part_d, &
-     & box_ckey_min_d, box_ckey_max_d, &
-     & skip1, skip2, skip3, dx_inv, head_idx, num_parts, leading, level, shift)
-  integer(kind=8), intent(in), value :: leading
+     & box_ckey_min_d, box_ckey_max_d, skip, dx_inv, head_idx, num_parts, &
+     & leading, level, shift)
+  implicit none
   real(kind=dp),   device :: xp(*)
   integer(kind=8), device :: hkey_part_d(*)
   integer(kind=4), device :: box_ckey_min_d(1:3, *)
   integer(kind=4), device :: box_ckey_max_d(1:3, *)
-  real(kind=8), intent(in), value :: skip1, skip2, skip3
+  real(kind=8), intent(in), device :: skip(*)
   real(kind=8), intent(in), value :: dx_inv
   integer(kind=4), intent(in), value :: head_idx
   integer(kind=4), intent(in), value :: num_parts
+  integer(kind=8), intent(in), value :: leading
   integer(kind=4), intent(in), value :: level
   real(kind=8),    intent(in), value :: shift
 
   integer :: thread_idx, block_idx, idx, ipart, idim
   integer(kind=4) :: ix(1:ndim), box_min(1:3), box_max(1:3)
-  real(kind=8) :: skip(1:3), xs
+  real(kind=8) :: xs
 
   thread_idx = threadIdx%x - 1
   block_idx = blockIdx%x  - 1
@@ -582,10 +583,6 @@ attributes(global) subroutine compute_hkey_part_kernel(xp, hkey_part_d, &
   idx = thread_idx + block_idx * blockDim%x
   if (idx >= num_parts) return
   ipart = head_idx + idx
-
-  skip(1) = skip1
-  skip(2) = skip2
-  skip(3) = skip3
 
   box_min = 0
   box_max = 0
@@ -649,16 +646,18 @@ end subroutine write_sortp_part
 !> GPU sort_part.
 subroutine gpu_sort_part(sim, ilevel)
   use nvtx
+  use cub_module, only: radix_sort
   use ramses_commons, only: ramses_t
   use refine_device, only: init_global_swap_table_kernel, &
        & compute_local_swap_table, update_global_swap_table
+  implicit none
   type(ramses_t), intent(inout) :: sim
   integer, intent(in) :: ilevel
 
-  integer(kind=4) :: head_idx, tail_idx, num_parts
+  integer(kind=4) :: head_idx, tail_idx, num_parts, val
   integer :: num_threads, num_blocks
   integer :: ibit, level
-  real(kind=8) :: dx, dx_inv, skip1, skip2, skip3, shift
+  real(kind=8) :: dx, dx_inv, shift
   character(len=32) :: nvtx_lbl
 
   head_idx = sim%p%headp(ilevel)
@@ -672,10 +671,7 @@ subroutine gpu_sort_part(sim, ilevel)
 
   level = ilevel
   dx = sim%r%boxlen/2**level
-  dx_inv = 1.0_dp / dx
-  skip1 = sim%m%skip(1)
-  skip2 = sim%m%skip(2)
-  skip3 = sim%m%skip(3)
+  dx_inv = 1d0 / dx
 
   ! The shifted-source deposits (part_dep_algo=2 medium, 3 small) sort by the
   ! half-cell shifted source cell (upper corner of the 2x2x2 CIC block). The
@@ -689,15 +685,23 @@ subroutine gpu_sort_part(sim, ilevel)
   end if
 
   call nvtxStartRange("gpu_sort_part", color=4) ! purple
-
   ! Compute Hilbert keys and store them in idp_swap
   call nvtxStartRange("gpu_sort_part:hkey", color=4)
   call compute_hkey_part_kernel<<<num_blocks, num_threads>>>(xp, idp_swap, &
-       & box_ckey_min, box_ckey_max, &
-       & skip1, skip2, skip3, dx_inv, head_idx, num_parts, int(sim%r%npartmax,8), level, &
-       & shift)
+       & box_ckey_min, box_ckey_max, d_skip, dx_inv, head_idx, num_parts, &
+       & int(sim%r%npartmax,8), level, shift)
   call nvtxEndRange()
 
+#if defined(CUB_SORT_PART)
+  ! idp_swap has keys to sort by. isp_swap is empty array where indices are
+  ! created. sortp has the sorted indices. xp_swap will have the sorted keys. we
+  ! don't need input indices or sorted keys but cub requires no overlap on
+  ! input and output buffers so we need to provide space for these. xp_swap and
+  ! isp_swap just happen to be available and the right size.
+  call radix_sort(c_loc(idp_swap(head_idx)), c_loc(xp_swap(head_idx)), &
+                & c_loc(isp_swap(head_idx)), c_loc(sortp(head_idx)), &
+                & head_idx, num_parts, 0,  ndim * level - 1)
+#else
   ! Init sortp
   call nvtxStartRange("gpu_sort_part:init_sortp", color=4)
   call init_global_swap_table_kernel<<<num_blocks, num_threads>>>(sortp, &
@@ -706,6 +710,7 @@ subroutine gpu_sort_part(sim, ilevel)
 
   ! Loop over bits (one NVTX range per radix pass; kernels visible in CUDA row)
   do ibit = 0, ndim * level - 1
+
      write(nvtx_lbl, '(A,I0)') 'gpu_sort_part:bit_', ibit
      call nvtxStartRange(trim(nvtx_lbl), color=4)
 
@@ -726,7 +731,7 @@ subroutine gpu_sort_part(sim, ilevel)
 
      call nvtxEndRange()
   end do
-
+#endif
   call nvtxEndRange()
 
 end subroutine gpu_sort_part
