@@ -96,6 +96,8 @@ module metal_gravity_module
   ! Fine-grained profiling accumulators (printed by m_metal_prof_report).
   real(8) :: gt_conn=0, gt_sort=0, gt_split=0, gt_dep=0, gt_mg=0, gt_grad=0, &
              gt_pmar=0, gt_kick=0, gt_kmar=0, gt_refine=0
+  real(8) :: gt_mg_lvl(0:30) = 0      ! per-level MG wall (DIAG: where the fine-level cost lives)
+  integer(8) :: gt_mg_cnt(0:30) = 0   ! per-level solve count
   integer(8), private :: tk0, tkr
   integer, allocatable, private :: g_box_min(:), g_box_max(:)
 
@@ -385,6 +387,8 @@ contains
     call m_metal_multigrid(pst, ilevel, icount, head, n, fourpi, offset, vol_loc, &
          dx, tfrac, hascoarse, merge(1,0,per0), merge(1,0,per1), merge(1,0,per2))
     call system_clock(tc2); gt_mg = gt_mg + dble(tc2-tc1)/trate       ! tc2 = MG end
+    if (ilevel <= 30) then; gt_mg_lvl(ilevel) = gt_mg_lvl(ilevel) + dble(tc2-tc1)/trate
+                            gt_mg_cnt(ilevel) = gt_mg_cnt(ilevel) + 1; end if
     call mtl_gradient_phi(head, n, real(dx,c_float), real(tfrac,c_float))
     call system_clock(tk0); gt_grad = gt_grad + dble(tk0-tc2)/trate   ! tk0 = gradient end
     ! STAGE-GATE DIAGNOSTIC (RAMSES_DIAG): per-level max|phi|, max|force|, max(density).
@@ -1467,6 +1471,14 @@ contains
       call mtl_get_mg_times(th, tv)
       write(*,'(A,F8.2,A,F8.2,A,F8.2,A)') '   pois: multigrid total     = ', gt_mg, &
            '  (hierarchy-build=', th, ', V-cycle=', tv, ')'
+    end block
+    block
+      integer :: L
+      write(*,'(A)') '   pois: multigrid per-level  (level: wall_s  nsolves  s/solve):'
+      do L = 0, 30
+         if (gt_mg_cnt(L) > 0) write(*,'(A,I3,A,F8.2,I9,A,ES10.2)') &
+              '        L', L, ':', gt_mg_lvl(L), gt_mg_cnt(L), '  ', gt_mg_lvl(L)/dble(gt_mg_cnt(L))
+      end do
     end block
     write(*,'(A,F8.2)') '   pois: force gradient      = ', gt_grad
     write(*,'(A,F8.2)') '   pois: phi/f marshal->host = ', gt_pmar
