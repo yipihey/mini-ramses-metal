@@ -104,7 +104,6 @@ kernel void cic_part_warp(
 
     int box_min[3] = { BX.box_min[0], BX.box_min[1], BX.box_min[2] };
     int box_max[3] = { BX.box_max[0], BX.box_max[1], BX.box_max[2] };
-    long nx = (long)P.ckey_max;
 
     int src_full[3] = {0,0,0};
     if (valid) {
