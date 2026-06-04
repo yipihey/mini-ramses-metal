@@ -6,25 +6,48 @@ module cooling_device
   implicit none
 
   ! -----------------------------------------------------------------------
+  ! Precision of the cooling-rate interpolation path.
+  !
+  ! The per-cell cooling ODE is dominated by repeated table interpolation and
+  ! 10**()/log10() transcendentals inside a ~100-iteration subcycle loop.
+  ! Double-precision transcendentals are software-emulated on the GPU, so the
+  ! rate path runs in SINGLE precision by default (rk=4): hardware-accelerated
+  ! transcendentals, half the memory traffic, and half the register footprint
+  ! (better occupancy). The ODE *state* (tau, time, lambda, the implicit step)
+  ! stays in double precision for stability. Rates are an approximate model and
+  ! the ODE tolerance is loose, so the ~1e-5 relative error from SP rates is
+  ! physically negligible.
+  !
+  ! Define COOLING_RATES_DP to fall back to a full double-precision rate path
+  ! (bit-closer to the CPU; slower). See ../guidance/cooling-precision.md.
+  ! -----------------------------------------------------------------------
+#ifdef COOLING_RATES_DP
+  integer, parameter :: rk = dp
+#else
+  integer, parameter :: rk = 4
+#endif
+
+  ! -----------------------------------------------------------------------
   ! Device-side copies of cooling_module::cooling_table.
   ! Populated by gpu_upload_cooling_table; must be re-uploaded whenever
   ! set_table is called (cosmological runs: once per coarse step).
+  ! Stored in the rate-path precision rk (single by default).
   ! -----------------------------------------------------------------------
   integer,  device :: n1_d, n2_d
-  real(dp), device :: dlog_nH_d, dlog_T2_d
+  real(rk), device :: dlog_nH_d, dlog_T2_d
 
-  real(dp), device, allocatable :: nH_tbl_d(:)            ! log10(nH) axis [n1]
-  real(dp), device, allocatable :: T2_tbl_d(:)            ! log10(T2) axis [n2]
-  real(dp), device, allocatable :: cool_d(:,:)            ! [n1,n2]
-  real(dp), device, allocatable :: heat_d(:,:)
-  real(dp), device, allocatable :: cool_com_d(:,:)
-  real(dp), device, allocatable :: heat_com_d(:,:)
-  real(dp), device, allocatable :: metal_d(:,:)
-  real(dp), device, allocatable :: cool_prime_d(:,:)
-  real(dp), device, allocatable :: heat_prime_d(:,:)
-  real(dp), device, allocatable :: cool_com_prime_d(:,:)
-  real(dp), device, allocatable :: heat_com_prime_d(:,:)
-  real(dp), device, allocatable :: metal_prime_d(:,:)
+  real(rk), device, allocatable :: nH_tbl_d(:)            ! log10(nH) axis [n1]
+  real(rk), device, allocatable :: T2_tbl_d(:)            ! log10(T2) axis [n2]
+  real(rk), device, allocatable :: cool_d(:,:)            ! [n1,n2]
+  real(rk), device, allocatable :: heat_d(:,:)
+  real(rk), device, allocatable :: cool_com_d(:,:)
+  real(rk), device, allocatable :: heat_com_d(:,:)
+  real(rk), device, allocatable :: metal_d(:,:)
+  real(rk), device, allocatable :: cool_prime_d(:,:)
+  real(rk), device, allocatable :: heat_prime_d(:,:)
+  real(rk), device, allocatable :: cool_com_prime_d(:,:)
+  real(rk), device, allocatable :: heat_com_prime_d(:,:)
+  real(rk), device, allocatable :: metal_prime_d(:,:)
 
   ! Host-side flag: has the table been copied to the device yet?
   ! gpu_cooling uses this to upload the table lazily (only once for
@@ -40,6 +63,8 @@ contains
   ! Copy the host cooling table to the device module arrays above.
   ! Call once after the initial set_table and after every subsequent
   ! set_table call (cosmological runs update the table each coarse step).
+  ! The host table is real(8); assignment to the real(rk) device arrays
+  ! converts precision automatically.
   ! =========================================================================
     use cooling_module, only: cooling_t
     implicit none
@@ -104,6 +129,12 @@ contains
   ! coordination and no active-cell list (the CPU while(n>0) worklist is
   ! replaced by a simple do while(time < time_max) per thread).
   !
+  ! Mixed precision: the rate interpolation (table loads, cubic, 10**, log10)
+  ! runs in precision rk (single by default); the ODE state (tau, time,
+  ! lambda, implicit step) is double precision. Mixed rk/dp expressions
+  ! promote to dp automatically, so the rate values enter the dp lambda/step
+  ! seamlessly.
+  !
   ! nH_cell      : H number density [H/cc]
   ! T2_cell      : T/mu [K] already reduced by EOS floor (caller's job)
   ! Zsolar_cell  : metallicity in solar units
@@ -121,27 +152,39 @@ contains
     real(dp), parameter :: varmax    = 4.0d0
     real(dp), parameter :: T2_max_fix = 1.0d9
 
-    real(dp) :: h, h2, h3, precoeff, logT2max
-    real(dp) :: facH, facT, w1H, w2H
+    ! Double-precision ODE state
+    real(dp) :: precoeff
     real(dp) :: tau, tau_ini, tau_old
     real(dp) :: time, time_old, time_max, wmax
-    real(dp) :: fa, fb, fprimea, fprimeb, al, be, ga
-    real(dp) :: cool, heat, cool_com, heat_com, metal
-    real(dp) :: cool_prime, heat_prime, cool_com_prime, heat_com_prime, metal_prime
     real(dp) :: lambda, lambda_prime, wcool
-    real(dp) :: yy, yy2, yy3
-    integer  :: i_nH, i_T2, iter
+
+    ! Single-precision (rk) rate-interpolation path
+    real(rk) :: h, h2, h3, logT2max
+    real(rk) :: facH, facT, w1H, w2H, taur
+    real(rk) :: yy, yy2, yy3
+    real(rk) :: fa, fb, fprimea, fprimeb, al, be, ga
+    real(rk) :: cool, heat, cool_com, heat_com, metal
+    real(rk) :: cool_prime, heat_prime, cool_com_prime, heat_com_prime, metal_prime
+    real(rk) :: T2_1, dlT2
+    integer  :: i_nH, i_T2, n1, n2, iter
+
+    ! --- Cache invariant table scalars in registers (avoid repeated global
+    !     scalar loads inside the subcycle loop) ---
+    n1   = n1_d
+    n2   = n2_d
+    T2_1 = T2_tbl_d(1)
+    dlT2 = dlog_T2_d
 
     ! --- Derived axis constants ---
-    h         = 1.0d0 / dlog_T2_d
+    h         = 1.0_rk / dlT2
     h2        = h * h
     h3        = h2 * h
     precoeff  = 2.0d0 * X_frac / (3.0d0 * kB_cgs)
-    logT2max  = log10(T2_max_fix)
+    logT2max  = log10(real(T2_max_fix, rk))
 
     ! --- Density table index: fixed for this cell throughout the ODE ---
-    facH = MIN(MAX(log10(nH_cell / boost_cell), nH_tbl_d(1)), nH_tbl_d(n1_d))
-    i_nH = MIN(MAX(int((facH - nH_tbl_d(1)) * dlog_nH_d) + 1, 1), n1_d - 1)
+    facH = MIN(MAX(log10(real(nH_cell / boost_cell, rk)), nH_tbl_d(1)), nH_tbl_d(n1))
+    i_nH = MIN(MAX(int((facH - nH_tbl_d(1)) * dlog_nH_d) + 1, 1), n1 - 1)
     w1H  = (nH_tbl_d(i_nH + 1) - facH) * dlog_nH_d
     w2H  = (facH   - nH_tbl_d(i_nH)  ) * dlog_nH_d
 
@@ -164,11 +207,12 @@ contains
        iter = iter + 1
        if (iter > 500) exit   ! bail-out; device cannot STOP
 
-       facT = log10(tau)
+       taur = real(tau, rk)
+       facT = log10(taur)
 
        if (facT <= logT2max) then
 
-          i_T2 = MIN(MAX(int((facT - T2_tbl_d(1)) * dlog_T2_d) + 1, 1), n2_d - 1)
+          i_T2 = MIN(MAX(int((facT - T2_1) * dlT2) + 1, 1), n2 - 1)
           yy   = facT - T2_tbl_d(i_T2)
           yy2  = yy * yy
           yy3  = yy2 * yy
@@ -179,10 +223,10 @@ contains
           fprimea = cool_prime_d(i_nH,i_T2  )*w1H + cool_prime_d(i_nH+1,i_T2  )*w2H
           fprimeb = cool_prime_d(i_nH,i_T2+1)*w1H + cool_prime_d(i_nH+1,i_T2+1)*w2H
           al = fprimea
-          be = 3.0d0*(fb-fa)/h2 - (2.0d0*fprimea+fprimeb)/h
-          ga = (fprimea+fprimeb)/h2 - 2.0d0*(fb-fa)/h3
-          cool       = 10.0d0**(fa + al*yy + be*yy2 + ga*yy3)
-          cool_prime = cool/tau * (al + 2.0d0*be*yy + 3.0d0*ga*yy2)
+          be = 3.0_rk*(fb-fa)/h2 - (2.0_rk*fprimea+fprimeb)/h
+          ga = (fprimea+fprimeb)/h2 - 2.0_rk*(fb-fa)/h3
+          cool       = 10.0_rk**(fa + al*yy + be*yy2 + ga*yy3)
+          cool_prime = cool/taur * (al + 2.0_rk*be*yy + 3.0_rk*ga*yy2)
 
           ! heat
           fa      = heat_d(i_nH,i_T2  )*w1H + heat_d(i_nH+1,i_T2  )*w2H
@@ -190,10 +234,10 @@ contains
           fprimea = heat_prime_d(i_nH,i_T2  )*w1H + heat_prime_d(i_nH+1,i_T2  )*w2H
           fprimeb = heat_prime_d(i_nH,i_T2+1)*w1H + heat_prime_d(i_nH+1,i_T2+1)*w2H
           al = fprimea
-          be = 3.0d0*(fb-fa)/h2 - (2.0d0*fprimea+fprimeb)/h
-          ga = (fprimea+fprimeb)/h2 - 2.0d0*(fb-fa)/h3
-          heat       = 10.0d0**(fa + al*yy + be*yy2 + ga*yy3)
-          heat_prime = heat/tau * (al + 2.0d0*be*yy + 3.0d0*ga*yy2)
+          be = 3.0_rk*(fb-fa)/h2 - (2.0_rk*fprimea+fprimeb)/h
+          ga = (fprimea+fprimeb)/h2 - 2.0_rk*(fb-fa)/h3
+          heat       = 10.0_rk**(fa + al*yy + be*yy2 + ga*yy3)
+          heat_prime = heat/taur * (al + 2.0_rk*be*yy + 3.0_rk*ga*yy2)
 
           ! cool_com
           fa      = cool_com_d(i_nH,i_T2  )*w1H + cool_com_d(i_nH+1,i_T2  )*w2H
@@ -201,10 +245,10 @@ contains
           fprimea = cool_com_prime_d(i_nH,i_T2  )*w1H + cool_com_prime_d(i_nH+1,i_T2  )*w2H
           fprimeb = cool_com_prime_d(i_nH,i_T2+1)*w1H + cool_com_prime_d(i_nH+1,i_T2+1)*w2H
           al = fprimea
-          be = 3.0d0*(fb-fa)/h2 - (2.0d0*fprimea+fprimeb)/h
-          ga = (fprimea+fprimeb)/h2 - 2.0d0*(fb-fa)/h3
-          cool_com       = 10.0d0**(fa + al*yy + be*yy2 + ga*yy3)
-          cool_com_prime = cool_com/tau * (al + 2.0d0*be*yy + 3.0d0*ga*yy2)
+          be = 3.0_rk*(fb-fa)/h2 - (2.0_rk*fprimea+fprimeb)/h
+          ga = (fprimea+fprimeb)/h2 - 2.0_rk*(fb-fa)/h3
+          cool_com       = 10.0_rk**(fa + al*yy + be*yy2 + ga*yy3)
+          cool_com_prime = cool_com/taur * (al + 2.0_rk*be*yy + 3.0_rk*ga*yy2)
 
           ! heat_com
           fa      = heat_com_d(i_nH,i_T2  )*w1H + heat_com_d(i_nH+1,i_T2  )*w2H
@@ -212,10 +256,10 @@ contains
           fprimea = heat_com_prime_d(i_nH,i_T2  )*w1H + heat_com_prime_d(i_nH+1,i_T2  )*w2H
           fprimeb = heat_com_prime_d(i_nH,i_T2+1)*w1H + heat_com_prime_d(i_nH+1,i_T2+1)*w2H
           al = fprimea
-          be = 3.0d0*(fb-fa)/h2 - (2.0d0*fprimea+fprimeb)/h
-          ga = (fprimea+fprimeb)/h2 - 2.0d0*(fb-fa)/h3
-          heat_com       = 10.0d0**(fa + al*yy + be*yy2 + ga*yy3)
-          heat_com_prime = heat_com/tau * (al + 2.0d0*be*yy + 3.0d0*ga*yy2)
+          be = 3.0_rk*(fb-fa)/h2 - (2.0_rk*fprimea+fprimeb)/h
+          ga = (fprimea+fprimeb)/h2 - 2.0_rk*(fb-fa)/h3
+          heat_com       = 10.0_rk**(fa + al*yy + be*yy2 + ga*yy3)
+          heat_com_prime = heat_com/taur * (al + 2.0_rk*be*yy + 3.0_rk*ga*yy2)
 
           ! metal
           fa      = metal_d(i_nH,i_T2  )*w1H + metal_d(i_nH+1,i_T2  )*w2H
@@ -223,12 +267,12 @@ contains
           fprimea = metal_prime_d(i_nH,i_T2  )*w1H + metal_prime_d(i_nH+1,i_T2  )*w2H
           fprimeb = metal_prime_d(i_nH,i_T2+1)*w1H + metal_prime_d(i_nH+1,i_T2+1)*w2H
           al = fprimea
-          be = 3.0d0*(fb-fa)/h2 - (2.0d0*fprimea+fprimeb)/h
-          ga = (fprimea+fprimeb)/h2 - 2.0d0*(fb-fa)/h3
-          metal       = 10.0d0**(fa + al*yy + be*yy2 + ga*yy3)
-          metal_prime = metal/tau * (al + 2.0d0*be*yy + 3.0d0*ga*yy2)
+          be = 3.0_rk*(fb-fa)/h2 - (2.0_rk*fprimea+fprimeb)/h
+          ga = (fprimea+fprimeb)/h2 - 2.0_rk*(fb-fa)/h3
+          metal       = 10.0_rk**(fa + al*yy + be*yy2 + ga*yy3)
+          metal_prime = metal/taur * (al + 2.0_rk*be*yy + 3.0_rk*ga*yy2)
 
-          ! Net cooling rate and temperature derivative
+          ! Net cooling rate and temperature derivative (promoted to dp)
           lambda       = cool + Zsolar_cell*metal - heat &
                &       + (cool_com - heat_com) / nH_cell
           lambda_prime = cool_prime + Zsolar_cell*metal_prime - heat_prime &
