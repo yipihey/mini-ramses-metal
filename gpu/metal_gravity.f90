@@ -639,8 +639,11 @@ contains
     associate(r=>pst%s%r, g=>pst%s%g)
     bnd = r%bound_levelmin
     rho_tot = g%rho_tot
-    eps = r%epsilon
     is_base = merge(1, 0, ilevel == r%levelmin)
+    ! Periodic base uses epsilon_base = fp32-achievable floor; refined levels use
+    ! epsilon.  IDENTICAL criterion to the CPU multigrid() so both converge in the
+    ! same few cycles (the singular base can't reach epsilon=1e-4 in fp32 -> grind).
+    eps = merge(r%epsilon_base, r%epsilon, is_base == 1)
 
     ! Plateau early-exit factor (read once).  DEFAULT 0.0 = OFF so the GPU V-cycle
     ! loop uses the IDENTICAL eps/MAXITER convergence logic as the CPU multigrid()

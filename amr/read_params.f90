@@ -320,6 +320,7 @@ subroutine m_read_params(pst)
   ! Poisson solver parameters
   logical :: gravity_test=.false. ! Use file rho_ana.f90 to test the Poisson solers.
   real(kind=8)::epsilon=1.0D-4 ! Convergence criterion
+  real(kind=8)::epsilon_base=2.0D-3 ! Periodic-base (levelmin) tolerance = fp32-achievable floor (CPU+GPU consistent)
   real(kind=8),dimension(1:10)::gravity_params=0.0 ! Gravity parameters
   integer :: gravity_type=0 ! Type of gravity calculations (see user guide)
   integer :: cic_levelmax=0 ! Maximum level for CIC dark matter interpolation
@@ -571,7 +572,7 @@ subroutine m_read_params(pst)
   namelist/amr_params/levelmin,levelmax,ngridmax,ncachemax,ngridtot &
        & ,npartmax,nparttot,nexpand,boxlen
   ! Poisson solver parameters
-  namelist/poisson_params/epsilon,gravity_type,gravity_params &
+  namelist/poisson_params/epsilon,epsilon_base,gravity_type,gravity_params &
        & ,cg_levelmin,cic_levelmax,fast_solver,gravity_test &
        & ,part_mass_deposition_scheme,part_force_interpolation_scheme &
        & ,star_mass_deposition_scheme,star_force_interpolation_scheme &
@@ -1290,6 +1291,7 @@ subroutine m_read_params(pst)
 
   s%r%gravity_test=gravity_test
   s%r%epsilon=epsilon
+  s%r%epsilon_base=epsilon_base
   s%r%gravity_type=gravity_type
   s%r%gravity_params=gravity_params
   s%r%cic_levelmax=cic_levelmax
