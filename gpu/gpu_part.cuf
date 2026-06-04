@@ -1,7 +1,6 @@
 !> DM particle CUDA kernels.
 module part_device
   use amr_parameters, only: ndim, twotondim, threetondim, dp, i8b, MAXLEVEL
-  use amr_commons, only: part_dep_algo
   use oct_commons, only: oct
   use gpu_utils
   use cudafor
@@ -39,10 +38,9 @@ contains
   include 'gpu_reduce.cuf'
 
 !> Grow scan buffers to at least min_capacity.
-subroutine ensure_scan_capacity_part(min_capacity)
+subroutine ensure_scan_capacity_part(min_capacity, part_dep_algo)
   implicit none
-  use amr_commons, only: part_dep_algo
-  integer(kind=4), intent(in) :: min_capacity
+  integer(kind=4), intent(in) :: min_capacity, part_dep_algo
   integer(kind=4), parameter :: block_size = 256
   integer(kind=4) :: gs0, gs1, gs2
 
