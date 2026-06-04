@@ -12,6 +12,15 @@
 #endif
 #define TWOTONDIM (1 << NDIM)
 #define NHVAR 5
+#if   NDIM == 1
+#define SUBGRIDSIZE 3
+#elif NDIM == 2
+#define SUBGRIDSIZE 9
+#else
+#define SUBGRIDSIZE 27
+#endif
+// mirrors HydroParams (ramses_metal.h): doubles narrowed to float, 8B-ordered.
+struct HP { float gamma,dt,dx,smallr,smallc,courant; int slope,riemann,head,num,ngridmax,ilevel; };
 
 // ---- host double-precision replica of hydro.h (the parity reference) --------
 struct P { double r,u,v,w,p; };
@@ -250,6 +259,78 @@ int main(int argc, char** argv) {
           float gpu[40]; run_god3d(sg,1.4,0.2,2,S_HLLC,gpu);
           for(int i=0;i<40;i++) if(fabs(gpu[i])>1e-6){ printf("    [FAIL] 3D uniform du[%d]=%.3e != 0\n",i,gpu[i]); g_fail++; } }
 
+        // ---- 1d) hydro_godunov integrator: nbor subgrid gather + gravity
+        //         half-step predictor + godunov_oct accumulate into unew, vs the
+        //         host-double replica gathering the SAME subgrid.  One central
+        //         oct surrounded by its 3^NDIM neighbour-cube of octs.
+        {
+            id<MTLComputePipelineState> gint = pso("hydro_godunov");
+            const int noct = SUBGRIDSIZE;        // 3^NDIM octs: one per cube slot
+            int center_cube = 1;                 // i_sub=1 (+ j_sub=1, k_sub=1)
+#if NDIM>=2
+            center_cube += 3;
+#endif
+#if NDIM>=3
+            center_cube += 9;
+#endif
+            const int center = center_cube + 1;  // 1-based central oct
+
+            double gam=1.4, dt=0.1, dx=0.5, dtdx=dt/dx, halfdt=0.5*dt;
+            int slope=2, riem=S_HLLC;
+            auto genprim=[&](int o,int c)->P{ return { 1.0+0.05*o+0.01*c, 0.1*o-0.05*c,
+                                                       0.02*o, -0.03*c, 0.8+0.03*o+0.02*c }; };
+            auto genfg=[&](int o,int c,int d)->double{
+                return d==1 ? 0.01*o : d==2 ? -0.02*c : 0.005*(o+c); };
+
+            size_t nU=(size_t)noct*TWOTONDIM*NHVAR, nF=(size_t)noct*3*TWOTONDIM, nN=(size_t)noct*SUBGRIDSIZE;
+            id<MTLBuffer> bU =[dev newBufferWithLength:nU*sizeof(float) options:MTLResourceStorageModeShared];
+            id<MTLBuffer> bNn=[dev newBufferWithLength:nU*sizeof(float) options:MTLResourceStorageModeShared];
+            id<MTLBuffer> bF =[dev newBufferWithLength:nF*sizeof(float) options:MTLResourceStorageModeShared];
+            id<MTLBuffer> bNB=[dev newBufferWithLength:nN*sizeof(int)   options:MTLResourceStorageModeShared];
+            float* U=(float*)bU.contents; float* Nn=(float*)bNn.contents;
+            float* F=(float*)bF.contents; int* NB=(int*)bNB.contents;
+            for(size_t i=0;i<nU;++i){ U[i]=0; Nn[i]=0; }   // unew pre-zeroed -> unew == du
+            for(size_t i=0;i<nF;++i) F[i]=0;
+            for(size_t i=0;i<nN;++i) NB[i]=0;
+            auto UHc  =[&](int c,int v,int o){ return ((o-1)*NHVAR+(v-1))*TWOTONDIM+(c-1); };
+            auto IDX3c=[&](int c,int d,int o){ return ((o-1)*3   +(d-1))*TWOTONDIM+(c-1); };
+            for(int o=1;o<=noct;++o) for(int c=1;c<=TWOTONDIM;++c){
+                P qq=genprim(o,c); C cc=p2c(qq,gam);
+                U[UHc(c,1,o)]=cc.d; U[UHc(c,2,o)]=cc.mx; U[UHc(c,3,o)]=cc.my; U[UHc(c,4,o)]=cc.mz; U[UHc(c,5,o)]=cc.e;
+                F[IDX3c(c,1,o)]=genfg(o,c,1); F[IDX3c(c,2,o)]=genfg(o,c,2); F[IDX3c(c,3,o)]=genfg(o,c,3);
+            }
+            for(int k=0;k<SUBGRIDSIZE;++k) NB[(center-1)*SUBGRIDSIZE+k]=k+1;  // cube slot k -> oct k+1
+
+            struct HP hp{}; hp.gamma=gam; hp.dt=dt; hp.dx=dx; hp.slope=slope; hp.riemann=riem;
+            hp.head=center; hp.num=1; hp.ngridmax=noct; hp.ilevel=1;
+            id<MTLBuffer> bp2=[dev newBufferWithBytes:&hp length:sizeof(hp) options:MTLResourceStorageModeShared];
+            { id<MTLCommandBuffer> cb=[q commandBuffer]; id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
+              [e setComputePipelineState:gint];
+              [e setBuffer:bU offset:0 atIndex:0]; [e setBuffer:bNn offset:0 atIndex:1];
+              [e setBuffer:bF offset:0 atIndex:2]; [e setBuffer:bNB offset:0 atIndex:3]; [e setBuffer:bp2 offset:0 atIndex:4];
+              [e dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+              [e endEncoding]; [cb commit]; [cb waitUntilCompleted]; }
+
+            // host: gather the SAME subgrid (c2p is identity on genprim; add predictor) -> god replica
+            auto loadp=[&](int o,int c)->P{ P qq=genprim(o,c);
+                qq.u+=genfg(o,c,1)*halfdt; qq.v+=genfg(o,c,2)*halfdt; qq.w+=genfg(o,c,3)*halfdt; return qq; };
+            const char* vn[5]={"d","mx","my","mz","e"};
+            auto cmp_cells=[&](C* du){ for(int cc=0;cc<TWOTONDIM;++cc) for(int vv=0;vv<5;++vv){
+                double ref = vv==0?du[cc].d:vv==1?du[cc].mx:vv==2?du[cc].my:vv==3?du[cc].mz:du[cc].e;
+                char b[48]; snprintf(b,sizeof b,"gint.c%d.%s",cc,vn[vv]);
+                chk(b, Nn[UHc(cc+1,vv+1,center)], ref, RF); } };
+#if NDIM==1
+            P sg[6]; for(int sx=0;sx<6;++sx) sg[sx]=loadp((sx/2)+1, 1+(sx&1));
+            C du[2]; god1d(sg,gam,dtdx,slope,riem,du); cmp_cells(du);
+#elif NDIM==3
+            P sg[216];
+            for(int sz=0;sz<6;++sz)for(int sy=0;sy<6;++sy)for(int sx=0;sx<6;++sx){
+                int cube=(sx/2)+3*(sy/2)+9*(sz/2);
+                sg[sx+6*sy+36*sz]=loadp(cube+1, 1+(sx&1)+2*(sy&1)+4*(sz&1)); }
+            C du[8]; god3d(sg,gam,dtdx,slope,riem,du); cmp_cells(du);
+#endif
+        }
+
         // ---- 2) set_unew / set_uold copy kernels -------------------------
         const int noct=3;
         size_t nbytes = (size_t)noct*TWOTONDIM*NHVAR*sizeof(float);
@@ -257,7 +338,7 @@ int main(int argc, char** argv) {
         id<MTLBuffer> bn=[dev newBufferWithLength:nbytes options:MTLResourceStorageModeShared];
         float* U=(float*)bu.contents; float* N=(float*)bn.contents;
         for(int i=0;i<noct*TWOTONDIM*NHVAR;i++){ U[i]=1.0f+0.001f*i; N[i]=-7.0f; }
-        struct HP { float gamma,dt,dx,smallr,smallc,courant; int slope,riemann,head,num,ngridmax,ilevel; } hp{};
+        HP hp{};
         hp.head=1; hp.num=noct; hp.gamma=1.4f;
         id<MTLBuffer> bp=[dev newBufferWithBytes:&hp length:sizeof(hp) options:MTLResourceStorageModeShared];
         id<MTLComputePipelineState> su=pso("set_unew");

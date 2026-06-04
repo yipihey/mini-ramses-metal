@@ -62,8 +62,9 @@ runtest test_flag        1 "$TMP/test_flag1d.metallib"   flag.metal
 runtest test_cachecompact 1 "$TMP/test_refine1d.metallib" refine.metal
 runtest test_makecache   1 "$TMP/test_rc1d.metallib"     refine.metal hash.metal
 
-echo "=== hydro (core: EOS / Riemann / slopes / state copy) ==="
+echo "=== hydro (core: EOS / Riemann / slopes / state copy / integrator) ==="
 runtest test_hydro       3 "$TMP/test_hydro.metallib"   hydro.metal tests/test_hydro.metal
+runtest test_hydro       1 "$TMP/test_hydro1d.metallib" hydro.metal tests/test_hydro.metal
 
 echo "=== integrated MG-solve (#31: per-leaf V-cycle vs convergence) ==="
 # Builds the full NDIM=3 metallib + the bridge object, links the integrated
