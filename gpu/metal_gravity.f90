@@ -597,7 +597,9 @@ contains
   ! host.  Pure-hydro: the device force f is zeroed (no gravity predictor/kick).
   ! For a single uniform level (ilevel==levelmin==levelmax) the coarse-fine reflux
   ! is inert.  This is the C-API CPU-vs-Metal diff point for godunov_fine.
+  ! HYDRO-only (references m%uold); the sole callers live in the HYDRO=1 C-API.
   !====================================================================
+#ifdef HYDRO
   subroutine m_metal_godunov_fine(pst, ilevel)
     use ramses_commons, only: pst_t
     use amr_parameters, only: ndim, twotondim, dp
@@ -649,6 +651,67 @@ contains
     end if
     end associate
   end subroutine m_metal_godunov_fine
+
+  !====================================================================
+  ! HYDRO coarse-fine REFLUX isolation (for the CPU-vs-Metal diff).  Mirrors what
+  ! CPU godunov_fine(ilevel) does to the COARSER level: with unew pre-set to uold
+  ! at both levels, run the fine-level Godunov (which scatters the boundary-flux
+  ! correction onto the coarse parents), finalize it, and download the coarse
+  ! unew.  Compare against CPU set_unew(coarse)+set_unew(fine)+godunov_fine(fine)
+  ! -> unew(coarse).  ilevel = the FINE level (> levelmin).
+  !====================================================================
+  subroutine m_metal_godunov_reflux(pst, ilevel)
+    use ramses_commons, only: pst_t
+    use amr_parameters, only: ndim, twotondim, dp
+    type(pst_t), target :: pst
+    integer, intent(in) :: ilevel
+    integer :: head, n, chead, cn, num_octs, o, c, ivar, base, nf
+    real(dp) :: dx, dt, fp_scale
+    real(c_float), pointer :: d_uold(:), d_unew(:), d_f(:)
+    associate(r=>pst%s%r, m=>pst%s%m, g=>pst%s%g)
+    call metal_sync_mesh(pst)
+    head = m%head(ilevel);     n  = m%noct(ilevel)
+    chead= m%head(ilevel-1);   cn = m%noct(ilevel-1)
+    if (n > 0 .and. ilevel > r%levelmin) then
+       num_octs = m%ifree - 1
+       fp_scale = 2.0_dp**20
+       dx = r%boxlen / 2.0_dp**ilevel
+       dt = g%dtnew(ilevel)
+       nf = 3
+       call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*5])
+       call c_f_pointer(mtl_ptr_unew(), d_unew, [g_ncell*twotondim*5])
+       call c_f_pointer(mtl_ptr_f(),    d_f,    [g_ncell*twotondim*nf])
+       d_f(1:g_ncell*twotondim*nf) = 0.0_c_float
+       ! set_unew for ALL levels: unew = uold = host uold (dp->fp32)
+       do o = 1, num_octs
+          base = (o-1)*5*twotondim
+          do ivar = 1, 5
+             do c = 1, twotondim
+                d_uold(base + (ivar-1)*twotondim + c) = real(m%uold(c, ivar, o), c_float)
+                d_unew(base + (ivar-1)*twotondim + c) = real(m%uold(c, ivar, o), c_float)
+             end do
+          end do
+       end do
+       call mtl_drain()
+       call mtl_hydro_reflux_zero(chead, cn)
+       call mtl_hydro_godunov_only(ilevel, head, n, r%levelmin, r%nlevelmax, &
+            real(r%gamma,c_double), real(dt,c_double), real(dx,c_double), &
+            r%slope_type, r%riemann, real(r%courant_factor,c_double), real(fp_scale,c_double))
+       call mtl_hydro_reflux_finalize(chead, cn, real(fp_scale,c_double))
+       call mtl_drain()
+       ! download the COARSE level's unew (the reflux target)
+       do o = chead, chead + cn - 1
+          base = (o-1)*5*twotondim
+          do ivar = 1, 5
+             do c = 1, twotondim
+                m%unew(c, ivar, o) = real(d_unew(base + (ivar-1)*twotondim + c), dp)
+             end do
+          end do
+       end do
+    end if
+    end associate
+  end subroutine m_metal_godunov_reflux
+#endif
 
   !====================================================================
   ! Device phi_old snapshot (B.phi -> B.phi_old) for one level — the Metal analog

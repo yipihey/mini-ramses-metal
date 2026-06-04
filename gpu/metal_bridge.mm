@@ -549,6 +549,26 @@ extern "C" void mtl_godunov_fine(int ilevel, int head, int num, int levelmin, in
     [e endEncoding]; submit_async(cb);
 }
 
+// hydro_godunov ONLY (no set_unew/grav/set_uold bundle): unew += du and scatter the
+// coarse-fine reflux.  For the cross-level reflux diff -- the caller pre-sets unew
+// (=uold), zeros the coarse reflux accumulators, runs this on the FINE level, then
+// finalizes the reflux onto the coarse unew.  Mirrors CPU godunov_fine(ilevel),
+// which adds both unew(ilevel) and the reflux onto unew(ilevel-1).
+extern "C" void mtl_hydro_godunov_only(int ilevel, int head, int num, int levelmin, int levelmax,
+        double gamma, double dt, double dx, int slope, int riemann, double courant, double fp_scale) {
+    if (num <= 0) return;
+    HydroParams P = hydro_params(ilevel, head, num, gamma, dt, dx, slope, riemann, courant, fp_scale, levelmin, levelmax);
+    id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:pso("hydro_godunov")];
+    [e setBuffer:B.uold offset:0 atIndex:0]; [e setBuffer:B.unew offset:0 atIndex:1];
+    [e setBuffer:B.f offset:0 atIndex:2];    [e setBuffer:B.nbor offset:0 atIndex:3];
+    [e setBuffer:B.grid offset:0 atIndex:4]; [e setBuffer:B.father offset:0 atIndex:5];
+    [e setBuffer:B.reflux_lo offset:0 atIndex:6]; [e setBuffer:B.reflux_hi offset:0 atIndex:7];
+    [e setBytes:&P length:sizeof(P) atIndex:8]; dispatch1d(e, pso("hydro_godunov"), num);
+    [e endEncoding]; submit_async(cb);
+}
+
 // Zero the coarse-fine reflux fixed-point accumulators for a level's octs before a
 // finer level scatters into them.  head/num = the COARSE-level octs being protected.
 extern "C" void mtl_hydro_reflux_zero(int head, int num) {

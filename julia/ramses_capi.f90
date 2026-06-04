@@ -739,6 +739,18 @@ contains
     call capi_pst(handle, pst, ok); if (.not. ok) return
     call m_metal_godunov_fine(pst, ilevel)
   end subroutine ramses_metal_godunov_fine
+
+  ! GPU coarse-fine reflux isolation: with unew=uold at both levels, run the FINE
+  ! level Godunov + reflux finalize, leaving the correction in unew(ilevel-1).
+  ! Diff against CPU set_unew(ilevel-1)+set_unew(ilevel)+godunov_fine(ilevel),
+  ! reading unew (field=1) at the coarse level ilevel-1.
+  subroutine ramses_metal_godunov_reflux(handle, ilevel) bind(C, name="ramses_metal_godunov_reflux")
+    use metal_gravity_module, only: m_metal_godunov_reflux
+    integer(c_int), value :: handle, ilevel
+    type(pst_t) :: pst; logical :: ok
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    call m_metal_godunov_reflux(pst, ilevel)
+  end subroutine ramses_metal_godunov_reflux
 #endif
 
   !--------------------------------------------------------------------------

@@ -47,6 +47,7 @@ void ramses_flag_fine(int handle, int ilevel, int icount);
 void ramses_refine_fine(int handle, int ilevel);
 void ramses_metal_poisson(int handle, int ilevel, int icount); /* Metal library only */
 void ramses_metal_godunov_fine(int handle, int ilevel);        /* Metal library only */
+void ramses_metal_godunov_reflux(int handle, int ilevel);      /* Metal library only */
 
 /* ---- Per-routine wrappers for the HYDRO slice (CPU today; Metal port target) */
 /* Conservative state m%uold/m%unew has shape (twotondim,nvar,noct).  Move one
