@@ -124,7 +124,20 @@ contains
        end block
        g_ngridmax = m%ngridmax              ! real-oct bound
        g_ncell = m%ngridmax                 ! main region only...
-       if (metal_cache_on) g_ncell = 2*m%ngridmax   ! ...+ cache (coarse-fine ghost) region
+       ! main region (ngridmax) + coarse-fine GHOST cache region.  The cache holds one
+       ! ghost oct per coarse-fine boundary; at a~1 with deep refinement a 1x-ngridmax
+       ! cache (g_ncell=2x) OVERFLOWED (need ~3.08M ghosts, cap 3M -> 169 fallbacks).
+       ! 2.5x gives a 1.5x-ngridmax cache region (~46% headroom).  Tunable via
+       ! RAMSES_METAL_CACHE_MULT (numerator over 2; default 5 = 2.5x).
+       if (metal_cache_on) then
+          block
+            integer :: cmul; character(len=8) :: cm
+            cmul = 5
+            call get_environment_variable("RAMSES_METAL_CACHE_MULT", cm)
+            if (len_trim(cm) > 0) read(cm,*) cmul
+            g_ncell = (cmul * m%ngridmax) / 2
+          end block
+       end if
        g_hash  = 2*g_ncell + 3              ! m%hash_size is only set under _CUDA; size it here
        g_npm   = r%npartmax
        call mtl_alloc_buffers(g_ncell, g_npm, g_hash, r%nlevelmax)
@@ -616,6 +629,9 @@ contains
     real(dp), intent(in) :: fourpi, offset, vol_loc, dx, tfrac
     integer, parameter :: MAXITER = 20
     real(dp), parameter :: SAFE_FACTOR = 0.5_dp
+    integer, parameter :: MINITER = 4              ! min V-cycles before a plateau-exit
+    real(dp), save :: plat_factor = -1.0_dp        ! RAMSES_MG_PLATEAU (read once); <=0 disables
+    character(len=16) :: pe
     integer :: ifine, iter, i, allmasked, levelmin_mg, bnd, isafe, is_base, ncyc
     real(dp) :: err, last_err, i_res, res, rho_tot, eps
     character(len=8) :: probe
@@ -625,6 +641,15 @@ contains
     rho_tot = g%rho_tot
     eps = r%epsilon
     is_base = merge(1, 0, ilevel == r%levelmin)
+
+    ! Plateau early-exit factor (read once).  Default 0.99 = exit the V-cycle loop
+    ! once a cycle improves the relative residual by < 1%.  <=0 disables (grind to
+    ! eps/MAXITER, the prior faithful-but-wasteful behaviour).
+    if (plat_factor < 0.0_dp) then
+       plat_factor = 0.99_dp
+       call get_environment_variable("RAMSES_MG_PLATEAU", pe)
+       if (len_trim(pe) > 0) read(pe,*) plat_factor
+    end if
 
     ! --- build the MG hierarchy FIRST (whole thing on the ifine==ilevel call): this
     ! sets MG.fine_head / MG.n_fine, which the prologue kernels below index.  Building
@@ -726,6 +751,16 @@ contains
 
        ! Converged?
        if (err < eps .or. iter >= MAXITER) exit
+
+       ! Plateau early-exit: the periodic base can't reach eps in fp32 (it floors
+       ! ~4e-3) and the residual plateaus by ~6 cycles, yet the loop otherwise grinds
+       ! all MAXITER=20 (400/420 base solves did, 95%).  Once a V-cycle improves the
+       ! relative residual by < (1-plat_factor), further cycles only re-grind the fp32
+       ! floor -> exiting is physically identical to MAXITER (the floored residual,
+       ! hence phi, is unchanged) but saves ~14/20 base V-cycles + their per-cycle
+       ! residual readback.  Guard MINITER so well-converging levels still get their
+       ! fast initial cycles; safe-mode escalation below still runs for cycles 4..N.
+       if (plat_factor > 0.0_dp .and. iter >= MINITER .and. err >= last_err*plat_factor) exit
 
        ! Not converged: residual-driven safe-mode escalation for the level
        if (err > last_err*SAFE_FACTOR .and. .not. g%safe_mode(ilevel)) then
