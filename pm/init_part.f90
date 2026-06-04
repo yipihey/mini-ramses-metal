@@ -64,6 +64,7 @@ subroutine init_part(r,g,m,p)
 #ifdef _CUDA
   integer::scan_size
 #endif
+  integer(kind=8)::nxp
   !---------------------------------
   ! Allocate PART particle variables
   !---------------------------------
@@ -108,7 +109,8 @@ subroutine init_part(r,g,m,p)
 #if (4 == NPRE) && defined(CUB_SORT_PART)
   ! we're reusing this buffer in CUB radix sort, it always needs to have 8
   ! bytes per element
-  allocate(xp_swap (1:2*r%npartmax))
+  nxp = 2_8 * int(r%npartmax, kind=8)
+  allocate(xp_swap (1_8:nxp))
 #else
   allocate(xp_swap (1:r%npartmax))
 #endif
