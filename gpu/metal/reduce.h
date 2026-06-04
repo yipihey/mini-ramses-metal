@@ -41,6 +41,14 @@ inline void atomic_max_f_nonneg(device atomic_uint* acc, float v) {
     atomic_fetch_max_explicit(acc, as_type<uint>(max(v, 0.0f)), memory_order_relaxed);
 }
 
+// atomic min of a NON-NEGATIVE float via monotonic uint bit pattern (positive
+// IEEE-754 floats compare identically as uints).  Order-independent -> the dt
+// CFL reduction is bit-reproducible.  Init the accumulator to as_type<uint> of
+// the desired sentinel (e.g. FLT_MAX bits 0x7F7FFFFF) before dispatch.
+inline void atomic_min_f_nonneg(device atomic_uint* acc, float v) {
+    atomic_fetch_min_explicit(acc, as_type<uint>(max(v, 0.0f)), memory_order_relaxed);
+}
+
 // Threadgroup reductions.  SIMD width is not hardcoded; callers pass the
 // threadgroup's simdgroup geometry.
 inline float block_reduce_sum(float v, threadgroup float* scratch,

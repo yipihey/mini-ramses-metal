@@ -13,6 +13,7 @@
 #include "../ramses_metal.h"
 #include "hydro.h"
 #include "reduce.h"     // atomic_add_fixed / fixed_to_float for the coarse-fine reflux
+#include "nbor.h"       // mg_nbor (3^NDIM-neighbour oct) for the flag kernel
 using namespace metal;
 
 // unew <- uold  (set_unew_kernel, gpu_hydro.cuf:1643)
@@ -207,4 +208,161 @@ kernel void hydro_reflux_finalize(device       float*       unew      [[buffer(0
             uint hi = atomic_load_explicit(&reflux_hi[idx], memory_order_relaxed);
             unew[idx] += fixed_to_float(lo, hi, inv);
         }
+}
+
+//----------------------------------------------------------------------------
+// Gravity source coupling (one thread per cell: oct = head_idx + gid/twotondim,
+// cell = gid%twotondim + 1).  The port always carries the force in `f` (zero for
+// pure hydro), so the constant_gravity branch of the CUDA code is not needed.
+//----------------------------------------------------------------------------
+
+// sync_hydro (gpu_hydro.cuf:1673): full-step velocity kick on uold, u += f*dt.
+kernel void sync_hydro(device       float*       uold  [[buffer(0)]],
+                       device const float*       fgrav [[buffer(1)]],
+                       constant     HydroParams& P     [[buffer(2)]],
+                       uint gid [[thread_position_in_grid]]) {
+    if (gid >= (uint)(P.num_octs * TWOTONDIM)) return;
+    int oct  = P.head_idx + (int)gid / TWOTONDIM;
+    int cell = (int)gid % TWOTONDIM + 1;
+    HConserved c = { uold[UH(cell,1,oct)], uold[UH(cell,2,oct)], uold[UH(cell,3,oct)],
+                     uold[UH(cell,4,oct)], uold[UH(cell,5,oct)] };
+    HPrimitive p = conserved_2_primitive(c, P.gamma);
+    p.velocity_x += fgrav[IDX3(cell,1,oct)] * P.dt;
+    p.velocity_y += fgrav[IDX3(cell,2,oct)] * P.dt;
+    p.velocity_z += fgrav[IDX3(cell,3,oct)] * P.dt;
+    c = primitive_2_conserved(p, P.gamma);
+    uold[UH(cell,1,oct)]=c.density; uold[UH(cell,2,oct)]=c.momentum_x; uold[UH(cell,3,oct)]=c.momentum_y;
+    uold[UH(cell,4,oct)]=c.momentum_z; uold[UH(cell,5,oct)]=c.energy;
+}
+
+// grav_hydro (gpu_hydro.cuf:1731): velocity kick on unew with the rho_old/rho_new
+// momentum-conservation factor; rho_old=uold, rho_new=unew.
+kernel void grav_hydro(device const float*       uold  [[buffer(0)]],
+                       device       float*       unew  [[buffer(1)]],
+                       device const float*       fgrav [[buffer(2)]],
+                       constant     HydroParams& P     [[buffer(3)]],
+                       uint gid [[thread_position_in_grid]]) {
+    if (gid >= (uint)(P.num_octs * TWOTONDIM)) return;
+    int oct  = P.head_idx + (int)gid / TWOTONDIM;
+    int cell = (int)gid % TWOTONDIM + 1;
+    HConserved c = { unew[UH(cell,1,oct)], unew[UH(cell,2,oct)], unew[UH(cell,3,oct)],
+                     unew[UH(cell,4,oct)], unew[UH(cell,5,oct)] };
+    HPrimitive p = conserved_2_primitive(c, P.gamma);
+    float rho_old = uold[UH(cell,1,oct)], rho_new = unew[UH(cell,1,oct)];
+    float fac = P.dt * rho_old / rho_new;
+    p.velocity_x += fgrav[IDX3(cell,1,oct)] * fac;
+    p.velocity_y += fgrav[IDX3(cell,2,oct)] * fac;
+    p.velocity_z += fgrav[IDX3(cell,3,oct)] * fac;
+    c = primitive_2_conserved(p, P.gamma);
+    unew[UH(cell,1,oct)]=c.density; unew[UH(cell,2,oct)]=c.momentum_x; unew[UH(cell,3,oct)]=c.momentum_y;
+    unew[UH(cell,4,oct)]=c.momentum_z; unew[UH(cell,5,oct)]=c.energy;
+}
+
+//----------------------------------------------------------------------------
+// CFL timestep + conservation diagnostics (cmpdt_kernel, gpu_hydro.cuf:1795).
+// One thread per cell; refined cells are skipped.  Reductions are reproducible:
+// dt via atomic uint-min, mass/ekin/eint/emag via two-word fixed-point atomics
+// at P.fp_scale.  red[0]=dt (init to FLT_MAX bits), red[1..8]= the four sums.
+//----------------------------------------------------------------------------
+kernel void hydro_cmpdt(device const Oct*         grid  [[buffer(0)]],
+                        device const float*       uold  [[buffer(1)]],
+                        device const float*       fgrav [[buffer(2)]],
+                        device       atomic_uint* red   [[buffer(3)]],
+                        constant     HydroParams& P     [[buffer(4)]],
+                        uint gid [[thread_position_in_grid]]) {
+    if (gid >= (uint)(P.num_octs * TWOTONDIM)) return;
+    int oct  = P.head_idx + (int)gid / TWOTONDIM;
+    int cell = (int)gid % TWOTONDIM + 1;
+    if (grid[oct-1].refined[cell-1] != 0) return;     // leaf cells only
+
+    HConserved c = { uold[UH(cell,1,oct)], uold[UH(cell,2,oct)], uold[UH(cell,3,oct)],
+                     uold[UH(cell,4,oct)], uold[UH(cell,5,oct)] };
+    HPrimitive p = conserved_2_primitive(c, P.gamma);
+
+    float dx = P.dx, gamma = P.gamma;
+    float vol = dx*dx*dx;                              // CUDA uses dx^3 for all NDIM
+    float mass = p.density*vol;
+    float ekin = c.energy*vol;
+    float eint = p.pressure/(gamma-1.0f)*vol;
+
+    float cs   = sqrt(gamma*p.pressure/p.density);
+    float ctot = fabs(p.velocity_x)+fabs(p.velocity_y)+fabs(p.velocity_z)+3.0f*cs;
+    float grav = fabs(fgrav[IDX3(cell,1,oct)])+fabs(fgrav[IDX3(cell,2,oct)])+fabs(fgrav[IDX3(cell,3,oct)]);
+    grav = grav*dx/(ctot*ctot);
+    grav = max(grav, 1.0e-4f);
+    float dt_loc = dx/ctot*(sqrt(1.0f+2.0f*P.courant_factor*grav)-1.0f)/grav;
+
+    float s = P.fp_scale;
+    atomic_min_f_nonneg(&red[0], dt_loc);
+    atomic_add_i64(&red[1], &red[2], (long)round(mass*s));
+    atomic_add_i64(&red[3], &red[4], (long)round(ekin*s));
+    atomic_add_i64(&red[5], &red[6], (long)round(eint*s));
+    // emag = 0 (no MHD) -> red[7,8] untouched.
+}
+
+//----------------------------------------------------------------------------
+// Refinement flag from density/pressure gradients (hydro_flag_kernel,
+// gpu_hydro.cuf:1466 + hydro_crit:1437).  One thread per cell; sets flag1=1 if
+// the gradient across any dimension exceeds the threshold.  Neighbour cells come
+// from the FLAG_hhh/FLAG_iii tables (== the MG tables) via mg_nbor.
+//----------------------------------------------------------------------------
+constant int FLAG_hhh[6][8] = {
+    {2,1,4,3,6,5,8,7}, {2,1,4,3,6,5,8,7},
+    {3,4,1,2,7,8,5,6}, {3,4,1,2,7,8,5,6},
+    {5,6,7,8,1,2,3,4}, {5,6,7,8,1,2,3,4}
+};
+constant int FLAG_iii[6][8] = {
+    {-1, 0,-1, 0,-1, 0,-1, 0}, { 0, 1, 0, 1, 0, 1, 0, 1},
+    {-1,-1, 0, 0,-1,-1, 0, 0}, { 0, 0, 1, 1, 0, 0, 1, 1},
+    {-1,-1,-1,-1, 0, 0, 0, 0}, { 0, 0, 0, 0, 1, 1, 1, 1}
+};
+
+inline bool hydro_crit(HPrimitive l, HPrimitive m, HPrimitive r,
+                       float egd, float egp, float fd) {
+    bool ok = false;
+    if (egd > 0.0f) {
+        float el = fabs((m.density - l.density)/(m.density + l.density + fd));
+        float er = fabs((r.density - m.density)/(r.density + m.density + fd));
+        if (2.0f*max(el,er) > egd) ok = true;
+    }
+    if (egp > 0.0f) {
+        float el = fabs((m.pressure - l.pressure)/(m.pressure + l.pressure + fd));
+        float er = fabs((r.pressure - m.pressure)/(r.pressure + m.pressure + fd));
+        if (2.0f*max(el,er) > egp) ok = true;
+    }
+    return ok;
+}
+
+inline HPrimitive load_prim(device const float* uold, int cell, int oct, float gamma) {
+    HConserved c = { uold[UH(cell,1,oct)], uold[UH(cell,2,oct)], uold[UH(cell,3,oct)],
+                     uold[UH(cell,4,oct)], uold[UH(cell,5,oct)] };
+    return conserved_2_primitive(c, gamma);
+}
+
+kernel void hydro_flag(device       int*             flag1 [[buffer(0)]],
+                       device const Oct*             grid  [[buffer(1)]],
+                       device const int*             nbor  [[buffer(2)]],
+                       device const float*           uold  [[buffer(3)]],
+                       constant     HydroFlagParams& P     [[buffer(4)]],
+                       uint gid [[thread_position_in_grid]]) {
+    if (gid >= (uint)(P.num_octs * TWOTONDIM)) return;
+    int oct  = P.head_idx + (int)gid / TWOTONDIM;
+    int cell = (int)gid % TWOTONDIM + 1;
+    HPrimitive mid = load_prim(uold, cell, oct, P.gamma);
+
+    for (int idim = 1; idim <= NDIM; ++idim) {
+        int dL = 2*(idim-1), dR = dL + 1;            // 0-based table rows
+        int offL = FLAG_iii[dL][cell-1], offR = FLAG_iii[dR][cell-1];
+        int icL  = FLAG_hhh[dL][cell-1], icR  = FLAG_hhh[dR][cell-1];
+        int inL=0,jnL=0,knL=0, inR=0,jnR=0,knR=0;
+        if      (idim==1) { inL=offL; inR=offR; }
+        else if (idim==2) { jnL=offL; jnR=offR; }
+        else              { knL=offL; knR=offR; }
+        int nbL = mg_nbor(nbor, oct, inL, jnL, knL);
+        int nbR = mg_nbor(nbor, oct, inR, jnR, knR);
+        HPrimitive lft = load_prim(uold, icL, nbL, P.gamma);
+        HPrimitive rgt = load_prim(uold, icR, nbR, P.gamma);
+        if (hydro_crit(lft, mid, rgt, P.err_grad_d, P.err_grad_p, P.floor_d))
+            flag1[IDX2(cell, oct)] = 1;
+    }
 }

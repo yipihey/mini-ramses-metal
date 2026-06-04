@@ -295,4 +295,20 @@ typedef struct {
     int   levelmax;
 } HydroParams;
 
+// hydro_flag_kernel params (density/pressure-gradient refinement criterion).
+typedef struct {
+    float gamma;
+    float err_grad_d;      // density gradient threshold (<=0 disables)
+    float err_grad_p;      // pressure gradient threshold (<=0 disables)
+    float floor_d;         // density/pressure denominator floor
+    float floor_p;         // (unused by the criterion -- CUDA uses floor_d for both)
+    int   head_idx;
+    int   num_octs;
+} HydroFlagParams;
+
+// cmpdt reduction buffer (atomic_uint[9]): [0]=dt min (FLT_MAX-bits init),
+// [1,2]=mass lo/hi, [3,4]=ekin, [5,6]=eint, [7,8]=emag (all two-word fixed-point
+// at HydroParams.fp_scale).  Host inits red[0]=0x7F7FFFFF, rest 0.
+#define HYDRO_RED_N 9
+
 #endif // RAMSES_METAL_H

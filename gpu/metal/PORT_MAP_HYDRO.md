@@ -59,9 +59,14 @@ The Godunov pipeline (mirrors hydro_integrator_kernel):
       -> hydro.metal hydro_godunov (gather -> godunov_oct_*_amr -> unew += du ->
          reflux scatter); 1D+3D unit-tested vs host-double god*_amr replica
 Coupling / control / refine:
-- [ ] cmpdt_kernel        (CFL dt + mass/ekin reductions)                       :1795
-- [ ] grav_hydro / sync_hydro (gravity source half/full step)             :1731/:1673
-- [ ] hydro_flag_kernel   (density/pressure-gradient refinement criterion)      :1466
+- [x] cmpdt_kernel        (CFL dt + mass/ekin reductions)                       :1795
+      -> hydro.metal hydro_cmpdt: reproducible dt uint-min + mass/ekin/eint
+         two-word fixed-point sums into red[9]; unit-tested vs host
+- [x] grav_hydro / sync_hydro (gravity source half/full step)             :1731/:1673
+      -> hydro.metal grav_hydro/sync_hydro (one thread/cell, f always carried);
+         unit-tested vs host p2c(c2p(u)+f·dt[·rho_old/rho_new])
+- [x] hydro_flag_kernel   (density/pressure-gradient refinement criterion)      :1466
+      -> hydro.metal hydro_flag (FLAG_hhh/FLAG_iii + mg_nbor); unit-tested
 
 ## Bridge / buffers (deferred until kernels land)
 The gravity bridge has grid/phi/phi_old/f/rho/nbor/father/flag1 device buffers.
