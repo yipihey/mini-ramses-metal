@@ -391,4 +391,85 @@ inline void godunov_oct_3d(thread const HPrimitive sg[216], float gamma, float d
     }
 }
 
+//----------------------------------------------------------------------------
+// AMR-aware Godunov (zero_fine_fluxes + the boundary fluxes the coarse reflux
+// needs).  These mirror godunov_oct_{1d,3d} but additionally:
+//   (1) zero any interface flux that touches a refined subgrid cell -- the
+//       finer level computes that flux, so the coarse cell must not (faithful
+//       to zero_fine_fluxes, gpu_hydro.cuf:919); and
+//   (2) return bnd[2*NDIM] = the boundary-face flux SUM over the transverse
+//       central cells, ordered {-x,+x,-y,+y,-z,+z}, which coarse_cell_update
+//       (gpu_hydro.cuf:1061) scatters (*dtdx/twotondim, signed) onto the coarse
+//       parent of any coarser (cache-oct) neighbour.
+// ref[] = refined flag per subgrid cell (true if that cell is refined).  With
+// ref all-false and no cache-oct neighbours these reduce EXACTLY to the plain
+// godunov_oct_{1d,3d} du (the boundary sums are then simply unused).
+//----------------------------------------------------------------------------
+inline HConserved czero() { HConserved z = {0.0f,0.0f,0.0f,0.0f,0.0f}; return z; }
+
+inline void godunov_oct_1d_amr(thread const HPrimitive sg[6], thread const bool ref[6],
+                               float gamma, float dtdx, int slope, int riemann,
+                               thread HConserved du[2], thread HConserved bnd[2]) {
+    HPrimitive qL[4], qR[4];
+    for (int c = 1; c <= 4; ++c)
+        trace_cell_1d(sg[c-1], sg[c], sg[c+1], gamma, dtdx, slope, qL[c-1], qR[c-1]);
+    // fx[a] = flux at face between cells (a+1, a+2): a=0 -> -x bnd, a=1 interior, a=2 +x bnd
+    HConserved fx[3];
+    for (int a = 0; a < 3; ++a) {
+        HPrimitive l = qL[a], r = qR[a+1];
+        fx[a] = riemann_fluxes(l, r, gamma, riemann);
+        if (ref[a+1] || ref[a+2]) fx[a] = czero();   // zero_fine_fluxes
+    }
+    du[0] = cdiff(fx[0], fx[1], dtdx);                // central cell 2 (sg index 2)
+    du[1] = cdiff(fx[1], fx[2], dtdx);               // central cell 3 (sg index 3)
+    bnd[0] = fx[0];                                   // -x boundary
+    bnd[1] = fx[2];                                   // +x boundary
+}
+
+inline void godunov_oct_3d_amr(thread const HPrimitive sg[216], thread const bool ref[216],
+                               float gamma, float dtdx, int slope, int riemann,
+                               thread HConserved du[8], thread HConserved bnd[6]) {
+    #define RIDX(a,b,c) ((a) + 6*(b) + 36*(c))
+    HConserved fx[3][2][2], fy[2][3][2], fz[2][2][3];
+    for (int ck=0; ck<2; ++ck) for (int cj=0; cj<2; ++cj) {
+        int J=cj+2, K=ck+2;
+        for (int a=0; a<3; ++a) {
+            HConserved f = flux_x(trace_cell_3d(sg,a+1,J,K,gamma,dtdx,slope).qLx,
+                                  trace_cell_3d(sg,a+2,J,K,gamma,dtdx,slope).qRx, gamma, riemann);
+            if (ref[RIDX(a+1,J,K)] || ref[RIDX(a+2,J,K)]) f = czero();
+            fx[a][cj][ck] = f;
+        }
+    }
+    for (int ck=0; ck<2; ++ck) for (int ci=0; ci<2; ++ci) {
+        int I=ci+2, K=ck+2;
+        for (int b=0; b<3; ++b) {
+            HConserved f = flux_y(trace_cell_3d(sg,I,b+1,K,gamma,dtdx,slope).qLy,
+                                  trace_cell_3d(sg,I,b+2,K,gamma,dtdx,slope).qRy, gamma, riemann);
+            if (ref[RIDX(I,b+1,K)] || ref[RIDX(I,b+2,K)]) f = czero();
+            fy[ci][b][ck] = f;
+        }
+    }
+    for (int cj=0; cj<2; ++cj) for (int ci=0; ci<2; ++ci) {
+        int I=ci+2, J=cj+2;
+        for (int c=0; c<3; ++c) {
+            HConserved f = flux_z(trace_cell_3d(sg,I,J,c+1,gamma,dtdx,slope).qLz,
+                                  trace_cell_3d(sg,I,J,c+2,gamma,dtdx,slope).qRz, gamma, riemann);
+            if (ref[RIDX(I,J,c+1)] || ref[RIDX(I,J,c+2)]) f = czero();
+            fz[ci][cj][c] = f;
+        }
+    }
+    for (int ck=0; ck<2; ++ck) for (int cj=0; cj<2; ++cj) for (int ci=0; ci<2; ++ci) {
+        HConserved d = cadd(cadd(cdiff(fx[ci][cj][ck], fx[ci+1][cj][ck], dtdx),
+                                 cdiff(fy[ci][cj][ck], fy[ci][cj+1][ck], dtdx)),
+                                 cdiff(fz[ci][cj][ck], fz[ci][cj][ck+1], dtdx));
+        du[ci + 2*cj + 4*ck] = d;
+    }
+    // boundary-face flux sums over the 2x2 transverse central cells
+    bnd[0]=czero(); bnd[1]=czero(); bnd[2]=czero(); bnd[3]=czero(); bnd[4]=czero(); bnd[5]=czero();
+    for (int cj=0; cj<2; ++cj) for (int ck=0; ck<2; ++ck) { bnd[0]=cadd(bnd[0],fx[0][cj][ck]); bnd[1]=cadd(bnd[1],fx[2][cj][ck]); }
+    for (int ci=0; ci<2; ++ci) for (int ck=0; ck<2; ++ck) { bnd[2]=cadd(bnd[2],fy[ci][0][ck]); bnd[3]=cadd(bnd[3],fy[ci][2][ck]); }
+    for (int ci=0; ci<2; ++ci) for (int cj=0; cj<2; ++cj) { bnd[4]=cadd(bnd[4],fz[ci][cj][0]); bnd[5]=cadd(bnd[5],fz[ci][cj][2]); }
+    #undef RIDX
+}
+
 #endif // RAMSES_HYDRO_H

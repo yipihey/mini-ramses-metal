@@ -6,21 +6,16 @@
 #import <Metal/Metal.h>
 #include <cstdio>
 #include <cmath>
+#include <cstring>
 
 #ifndef NDIM
 #define NDIM 3
 #endif
-#define TWOTONDIM (1 << NDIM)
-#define NHVAR 5
-#if   NDIM == 1
-#define SUBGRIDSIZE 3
-#elif NDIM == 2
-#define SUBGRIDSIZE 9
-#else
-#define SUBGRIDSIZE 27
-#endif
+#include "../../ramses_metal.h"   // TWOTONDIM/NHVAR/SUBGRIDSIZE/Oct/HydroParams/UH/IDX3
 // mirrors HydroParams (ramses_metal.h): doubles narrowed to float, 8B-ordered.
-struct HP { float gamma,dt,dx,smallr,smallc,courant; int slope,riemann,head,num,ngridmax,ilevel; };
+struct HP { float gamma,dt,dx,smallr,smallc,courant,fp_scale;
+            int slope,riemann,head,num,ngridmax,ilevel,levelmin,levelmax; };
+static_assert(sizeof(HP)==sizeof(HydroParams), "HP must match HydroParams layout");
 
 // ---- host double-precision replica of hydro.h (the parity reference) --------
 struct P { double r,u,v,w,p; };
@@ -141,6 +136,35 @@ static void god3d(const P* sg,double g,double dtdx,int slope,int riem,C du[8]){
   }
 }
 
+// host double replica of the AMR Godunov (flux zeroing + boundary-flux sums).
+static void god1d_amr(P sg[6], bool ref[6], double g,double dtdx,int slope,int riem, C du[2], C bnd[2]){
+  P qL[4],qR[4]; for(int c=1;c<=4;++c) trace1d(sg[c-1],sg[c],sg[c+1],g,dtdx,slope,qL[c-1],qR[c-1]);
+  C fx[3];
+  for(int a=0;a<3;++a){ fx[a]=rdispatch(qL[a],qR[a+1],g,riem); if(ref[a+1]||ref[a+2]) fx[a]=C{0,0,0,0,0}; }
+  du[0]=cdf(fx[0],fx[1],dtdx); du[1]=cdf(fx[1],fx[2],dtdx);
+  bnd[0]=fx[0]; bnd[1]=fx[2];
+}
+static void god3d_amr(const P* sg, const bool* ref, double g,double dtdx,int slope,int riem, C du[8], C bnd[6]){
+  #define RI(a,b,c) ((a)+6*(b)+36*(c))
+  C fx[3][2][2],fy[2][3][2],fz[2][2][3];
+  for(int ck=0;ck<2;ck++)for(int cj=0;cj<2;cj++){int J=cj+2,K=ck+2;
+    for(int a=0;a<3;a++){ C f=fx_(trace3d(sg,a+1,J,K,g,dtdx,slope).qLx,trace3d(sg,a+2,J,K,g,dtdx,slope).qRx,g,riem);
+      if(ref[RI(a+1,J,K)]||ref[RI(a+2,J,K)]) f=C{0,0,0,0,0}; fx[a][cj][ck]=f; }}
+  for(int ck=0;ck<2;ck++)for(int ci=0;ci<2;ci++){int I=ci+2,K=ck+2;
+    for(int b=0;b<3;b++){ C f=fy_(trace3d(sg,I,b+1,K,g,dtdx,slope).qLy,trace3d(sg,I,b+2,K,g,dtdx,slope).qRy,g,riem);
+      if(ref[RI(I,b+1,K)]||ref[RI(I,b+2,K)]) f=C{0,0,0,0,0}; fy[ci][b][ck]=f; }}
+  for(int cj=0;cj<2;cj++)for(int ci=0;ci<2;ci++){int I=ci+2,J=cj+2;
+    for(int c=0;c<3;c++){ C f=fz_(trace3d(sg,I,J,c+1,g,dtdx,slope).qLz,trace3d(sg,I,J,c+2,g,dtdx,slope).qRz,g,riem);
+      if(ref[RI(I,J,c+1)]||ref[RI(I,J,c+2)]) f=C{0,0,0,0,0}; fz[ci][cj][c]=f; }}
+  for(int ck=0;ck<2;ck++)for(int cj=0;cj<2;cj++)for(int ci=0;ci<2;ci++)
+    du[ci+2*cj+4*ck]=cad(cad(cdf(fx[ci][cj][ck],fx[ci+1][cj][ck],dtdx),cdf(fy[ci][cj][ck],fy[ci][cj+1][ck],dtdx)),cdf(fz[ci][cj][ck],fz[ci][cj][ck+1],dtdx));
+  for(int i=0;i<6;i++) bnd[i]=C{0,0,0,0,0};
+  for(int cj=0;cj<2;cj++)for(int ck=0;ck<2;ck++){bnd[0]=cad(bnd[0],fx[0][cj][ck]);bnd[1]=cad(bnd[1],fx[2][cj][ck]);}
+  for(int ci=0;ci<2;ci++)for(int ck=0;ck<2;ck++){bnd[2]=cad(bnd[2],fy[ci][0][ck]);bnd[3]=cad(bnd[3],fy[ci][2][ck]);}
+  for(int ci=0;ci<2;ci++)for(int cj=0;cj<2;cj++){bnd[4]=cad(bnd[4],fz[ci][cj][0]);bnd[5]=cad(bnd[5],fz[ci][cj][2]);}
+  #undef RI
+}
+
 static int g_fail = 0;
 static void chk(const char* name, double got, double ref, double rtol) {
     double err = fabs(got-ref), den = fmax(1.0, fabs(ref));
@@ -259,76 +283,137 @@ int main(int argc, char** argv) {
           float gpu[40]; run_god3d(sg,1.4,0.2,2,S_HLLC,gpu);
           for(int i=0;i<40;i++) if(fabs(gpu[i])>1e-6){ printf("    [FAIL] 3D uniform du[%d]=%.3e != 0\n",i,gpu[i]); g_fail++; } }
 
-        // ---- 1d) hydro_godunov integrator: nbor subgrid gather + gravity
-        //         half-step predictor + godunov_oct accumulate into unew, vs the
-        //         host-double replica gathering the SAME subgrid.  One central
-        //         oct surrounded by its 3^NDIM neighbour-cube of octs.
+        // ---- 1d) hydro_godunov integrator (AMR): nbor subgrid gather + gravity
+        //   predictor + AMR godunov (zero_fine_fluxes) accumulate into unew, plus
+        //   the coarse-fine reflux (fixed-point atomics + finalize).  A central
+        //   oct surrounded by its 3^NDIM neighbour-cube of octs (+ one cache oct
+        //   + its coarse father).  Three scenarios vs the host-double replica:
+        //     A) uniform               -> du == god_amr(ref=false)
+        //     B) a refined -x halo cell -> that boundary flux zeroed in du
+        //     C) -x neighbour is a cache (coarser) oct -> reflux to its parent
         {
             id<MTLComputePipelineState> gint = pso("hydro_godunov");
-            const int noct = SUBGRIDSIZE;        // 3^NDIM octs: one per cube slot
-            int center_cube = 1;                 // i_sub=1 (+ j_sub=1, k_sub=1)
+            id<MTLComputePipelineState> gfin = pso("hydro_reflux_finalize");
+            const int noct = SUBGRIDSIZE;            // 3^NDIM real octs, one per cube
+            const int NT = noct + 2, CACHE = noct+1, FATHER = noct+2;
+            int center_cube = 1;
 #if NDIM>=2
             center_cube += 3;
 #endif
 #if NDIM>=3
             center_cube += 9;
 #endif
-            const int center = center_cube + 1;  // 1-based central oct
+            const int center = center_cube + 1;
+            const int mxcube = (NDIM==1) ? 0 : 12;   // -x neighbour cube slot (0-based)
 
-            double gam=1.4, dt=0.1, dx=0.5, dtdx=dt/dx, halfdt=0.5*dt;
+            double gam=1.4, dt=0.1, dx=0.5, dtdx=dt/dx, halfdt=0.5*dt; float fp=(float)(1<<20);
             int slope=2, riem=S_HLLC;
             auto genprim=[&](int o,int c)->P{ return { 1.0+0.05*o+0.01*c, 0.1*o-0.05*c,
                                                        0.02*o, -0.03*c, 0.8+0.03*o+0.02*c }; };
-            auto genfg=[&](int o,int c,int d)->double{
-                return d==1 ? 0.01*o : d==2 ? -0.02*c : 0.005*(o+c); };
+            auto genfg=[&](int o,int c,int d)->double{ return d==1?0.01*o:d==2?-0.02*c:0.005*(o+c); };
+            auto loadp=[&](int o,int c)->P{ P qq=genprim(o,c);
+                qq.u+=genfg(o,c,1)*halfdt; qq.v+=genfg(o,c,2)*halfdt; qq.w+=genfg(o,c,3)*halfdt; return qq; };
 
-            size_t nU=(size_t)noct*TWOTONDIM*NHVAR, nF=(size_t)noct*3*TWOTONDIM, nN=(size_t)noct*SUBGRIDSIZE;
+            size_t nU=(size_t)NT*TWOTONDIM*NHVAR, nF=(size_t)NT*3*TWOTONDIM, nN=(size_t)NT*SUBGRIDSIZE;
             id<MTLBuffer> bU =[dev newBufferWithLength:nU*sizeof(float) options:MTLResourceStorageModeShared];
             id<MTLBuffer> bNn=[dev newBufferWithLength:nU*sizeof(float) options:MTLResourceStorageModeShared];
             id<MTLBuffer> bF =[dev newBufferWithLength:nF*sizeof(float) options:MTLResourceStorageModeShared];
             id<MTLBuffer> bNB=[dev newBufferWithLength:nN*sizeof(int)   options:MTLResourceStorageModeShared];
-            float* U=(float*)bU.contents; float* Nn=(float*)bNn.contents;
-            float* F=(float*)bF.contents; int* NB=(int*)bNB.contents;
-            for(size_t i=0;i<nU;++i){ U[i]=0; Nn[i]=0; }   // unew pre-zeroed -> unew == du
-            for(size_t i=0;i<nF;++i) F[i]=0;
-            for(size_t i=0;i<nN;++i) NB[i]=0;
+            id<MTLBuffer> bG =[dev newBufferWithLength:(size_t)NT*sizeof(Oct) options:MTLResourceStorageModeShared];
+            id<MTLBuffer> bFA=[dev newBufferWithLength:(size_t)NT*sizeof(int) options:MTLResourceStorageModeShared];
+            id<MTLBuffer> bRL=[dev newBufferWithLength:nU*sizeof(uint) options:MTLResourceStorageModeShared];
+            id<MTLBuffer> bRH=[dev newBufferWithLength:nU*sizeof(uint) options:MTLResourceStorageModeShared];
+            float* U=(float*)bU.contents; float* Nn=(float*)bNn.contents; float* F=(float*)bF.contents;
+            int* NB=(int*)bNB.contents; Oct* G=(Oct*)bG.contents; int* FA=(int*)bFA.contents;
+            uint* RL=(uint*)bRL.contents; uint* RH=(uint*)bRH.contents;
             auto UHc  =[&](int c,int v,int o){ return ((o-1)*NHVAR+(v-1))*TWOTONDIM+(c-1); };
             auto IDX3c=[&](int c,int d,int o){ return ((o-1)*3   +(d-1))*TWOTONDIM+(c-1); };
-            for(int o=1;o<=noct;++o) for(int c=1;c<=TWOTONDIM;++c){
+
+            memset(G,0,(size_t)NT*sizeof(Oct));
+            for(int o=1;o<=NT;++o){ FA[o-1]=0; for(int c=1;c<=TWOTONDIM;++c){
                 P qq=genprim(o,c); C cc=p2c(qq,gam);
-                U[UHc(c,1,o)]=cc.d; U[UHc(c,2,o)]=cc.mx; U[UHc(c,3,o)]=cc.my; U[UHc(c,4,o)]=cc.mz; U[UHc(c,5,o)]=cc.e;
-                F[IDX3c(c,1,o)]=genfg(o,c,1); F[IDX3c(c,2,o)]=genfg(o,c,2); F[IDX3c(c,3,o)]=genfg(o,c,3);
-            }
-            for(int k=0;k<SUBGRIDSIZE;++k) NB[(center-1)*SUBGRIDSIZE+k]=k+1;  // cube slot k -> oct k+1
+                U[UHc(c,1,o)]=cc.d;U[UHc(c,2,o)]=cc.mx;U[UHc(c,3,o)]=cc.my;U[UHc(c,4,o)]=cc.mz;U[UHc(c,5,o)]=cc.e;
+                F[IDX3c(c,1,o)]=genfg(o,c,1);F[IDX3c(c,2,o)]=genfg(o,c,2);F[IDX3c(c,3,o)]=genfg(o,c,3); } }
+            FA[CACHE-1]=FATHER; G[CACHE-1].ckey[0]=1;   // father ckey 0 -> parent cell = 1+1 = 2
+            const int pcell = 2;
 
-            struct HP hp{}; hp.gamma=gam; hp.dt=dt; hp.dx=dx; hp.slope=slope; hp.riemann=riem;
-            hp.head=center; hp.num=1; hp.ngridmax=noct; hp.ilevel=1;
-            id<MTLBuffer> bp2=[dev newBufferWithBytes:&hp length:sizeof(hp) options:MTLResourceStorageModeShared];
-            { id<MTLCommandBuffer> cb=[q commandBuffer]; id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
-              [e setComputePipelineState:gint];
-              [e setBuffer:bU offset:0 atIndex:0]; [e setBuffer:bNn offset:0 atIndex:1];
-              [e setBuffer:bF offset:0 atIndex:2]; [e setBuffer:bNB offset:0 atIndex:3]; [e setBuffer:bp2 offset:0 atIndex:4];
-              [e dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
-              [e endEncoding]; [cb commit]; [cb waitUntilCompleted]; }
+            HP hp{}; hp.gamma=gam;hp.dt=dt;hp.dx=dx;hp.fp_scale=fp;hp.slope=slope;hp.riemann=riem;
+            hp.ngridmax=noct; hp.ilevel=2; hp.levelmin=1; hp.levelmax=99;
+            id<MTLBuffer> bp2=[dev newBufferWithLength:sizeof(HP) options:MTLResourceStorageModeShared];
 
-            // host: gather the SAME subgrid (c2p is identity on genprim; add predictor) -> god replica
-            auto loadp=[&](int o,int c)->P{ P qq=genprim(o,c);
-                qq.u+=genfg(o,c,1)*halfdt; qq.v+=genfg(o,c,2)*halfdt; qq.w+=genfg(o,c,3)*halfdt; return qq; };
+            auto setNB=[&](bool mxCache){ for(int k=0;k<SUBGRIDSIZE;++k) NB[(center-1)*SUBGRIDSIZE+k]=k+1;
+                if(mxCache) NB[(center-1)*SUBGRIDSIZE+mxcube]=CACHE; };
+            auto dispatch=[&](){
+                for(size_t i=0;i<nU;++i){ Nn[i]=0; RL[i]=0; RH[i]=0; }
+                hp.head=center; hp.num=1; memcpy(bp2.contents,&hp,sizeof(HP));
+                id<MTLCommandBuffer> cb=[q commandBuffer]; id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
+                [e setComputePipelineState:gint];
+                [e setBuffer:bU offset:0 atIndex:0];[e setBuffer:bNn offset:0 atIndex:1];[e setBuffer:bF offset:0 atIndex:2];
+                [e setBuffer:bNB offset:0 atIndex:3];[e setBuffer:bG offset:0 atIndex:4];[e setBuffer:bFA offset:0 atIndex:5];
+                [e setBuffer:bRL offset:0 atIndex:6];[e setBuffer:bRH offset:0 atIndex:7];[e setBuffer:bp2 offset:0 atIndex:8];
+                [e dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+                [e endEncoding];[cb commit];[cb waitUntilCompleted]; };
+            auto finalize=[&](int head){
+                HP h2=hp; h2.head=head; h2.num=1;
+                id<MTLBuffer> bp3=[dev newBufferWithBytes:&h2 length:sizeof(HP) options:MTLResourceStorageModeShared];
+                id<MTLCommandBuffer> cb=[q commandBuffer]; id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
+                [e setComputePipelineState:gfin];
+                [e setBuffer:bNn offset:0 atIndex:0];[e setBuffer:bRL offset:0 atIndex:1];[e setBuffer:bRH offset:0 atIndex:2];[e setBuffer:bp3 offset:0 atIndex:3];
+                [e dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+                [e endEncoding];[cb commit];[cb waitUntilCompleted]; };
+
             const char* vn[5]={"d","mx","my","mz","e"};
-            auto cmp_cells=[&](C* du){ for(int cc=0;cc<TWOTONDIM;++cc) for(int vv=0;vv<5;++vv){
-                double ref = vv==0?du[cc].d:vv==1?du[cc].mx:vv==2?du[cc].my:vv==3?du[cc].mz:du[cc].e;
-                char b[48]; snprintf(b,sizeof b,"gint.c%d.%s",cc,vn[vv]);
-                chk(b, Nn[UHc(cc+1,vv+1,center)], ref, RF); } };
+            auto compdu=[&](const char* tag, C* du){ for(int cc=0;cc<TWOTONDIM;++cc)for(int vv=0;vv<5;++vv){
+                double ref=vv==0?du[cc].d:vv==1?du[cc].mx:vv==2?du[cc].my:vv==3?du[cc].mz:du[cc].e;
+                char b[48]; snprintf(b,sizeof b,"%s.c%d.%s",tag,cc,vn[vv]); chk(b,Nn[UHc(cc+1,vv+1,center)],ref,RF); } };
+
 #if NDIM==1
-            P sg[6]; for(int sx=0;sx<6;++sx) sg[sx]=loadp((sx/2)+1, 1+(sx&1));
-            C du[2]; god1d(sg,gam,dtdx,slope,riem,du); cmp_cells(du);
-#elif NDIM==3
-            P sg[216];
-            for(int sz=0;sz<6;++sz)for(int sy=0;sy<6;++sy)for(int sx=0;sx<6;++sx){
-                int cube=(sx/2)+3*(sy/2)+9*(sz/2);
-                sg[sx+6*sy+36*sz]=loadp(cube+1, 1+(sx&1)+2*(sy&1)+4*(sz&1)); }
-            C du[8]; god3d(sg,gam,dtdx,slope,riem,du); cmp_cells(du);
+            auto build=[&](bool mxCache, P sg[6], bool ref[6]){ for(int sx=0;sx<6;++sx){
+                int cube=sx/2; int o=(mxCache&&cube==mxcube)?CACHE:cube+1;
+                sg[sx]=loadp(o,1+(sx&1)); ref[sx]=false; } };
+#else
+            auto build=[&](bool mxCache, P sg[216], bool ref[216]){
+                for(int sz=0;sz<6;++sz)for(int sy=0;sy<6;++sy)for(int sx=0;sx<6;++sx){
+                    int cube=(sx/2)+3*(sy/2)+9*(sz/2); int o=(mxCache&&cube==mxcube)?CACHE:cube+1;
+                    sg[sx+6*sy+36*sz]=loadp(o,1+(sx&1)+2*(sy&1)+4*(sz&1)); ref[sx+6*sy+36*sz]=false; } };
 #endif
+            // A) uniform
+            setNB(false); dispatch();
+#if NDIM==1
+            { P sg[6]; bool ref[6]; build(false,sg,ref); C du[2],bnd[2]; god1d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd); compdu("gint",du); }
+#else
+            { P sg[216]; bool ref[216]; build(false,sg,ref); C du[8],bnd[6]; god3d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd); compdu("gint",du); }
+#endif
+            // B) one refined -x halo cell -> its boundary flux zeroed
+            {
+                int src = mxcube+1;                 // real oct in the -x slot
+#if NDIM==1
+                int rc=2, ridx=1;                   // sx=1 -> cell 2, subgrid idx 1
+#else
+                int rc=2, ridx=1+6*2+36*2;          // (sx=1,sy=2,sz=2) -> cell 2, idx 85
+#endif
+                G[src-1].refined[rc-1]=1;
+                setNB(false); dispatch();
+#if NDIM==1
+                { P sg[6]; bool ref[6]; build(false,sg,ref); ref[ridx]=true; C du[2],bnd[2]; god1d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd); compdu("gintR",du); }
+#else
+                { P sg[216]; bool ref[216]; build(false,sg,ref); ref[ridx]=true; C du[8],bnd[6]; god3d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd); compdu("gintR",du); }
+#endif
+                G[src-1].refined[rc-1]=0;
+            }
+            // C) -x neighbour is a cache (coarser) oct -> reflux onto its parent cell
+            {
+                setNB(true); dispatch(); finalize(FATHER);
+                double w = dtdx/(double)TWOTONDIM;
+#if NDIM==1
+                P sg[6]; bool ref[6]; build(true,sg,ref); C du[2],bnd[2]; god1d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd);
+#else
+                P sg[216]; bool ref[216]; build(true,sg,ref); C du[8],bnd[6]; god3d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd);
+#endif
+                double ex[5]={-bnd[0].d*w,-bnd[0].mx*w,-bnd[0].my*w,-bnd[0].mz*w,-bnd[0].e*w};  // -x face, sign -1
+                for(int vv=0;vv<5;vv++){ char b[48]; snprintf(b,sizeof b,"reflux.%s",vn[vv]);
+                    chk(b, Nn[UHc(pcell,vv+1,FATHER)], ex[vv], 5e-4); }
+            }
         }
 
         // ---- 2) set_unew / set_uold copy kernels -------------------------

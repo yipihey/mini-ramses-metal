@@ -12,6 +12,7 @@
 #include <metal_stdlib>
 #include "../ramses_metal.h"
 #include "hydro.h"
+#include "reduce.h"     // atomic_add_fixed / fixed_to_float for the coarse-fine reflux
 using namespace metal;
 
 // unew <- uold  (set_unew_kernel, gpu_hydro.cuf:1643)
@@ -68,18 +69,19 @@ kernel void upload(device const Oct*         grid   [[buffer(0)]],
 }
 
 //----------------------------------------------------------------------------
-// Godunov integrator (uniform-grid path).  One thread per oct: gather the
-// 6^NDIM primitive subgrid from the 3^NDIM neighbour-oct cube (nbor), apply the
-// gravity half-step predictor, run the validated godunov_oct, and ADD the
-// conservative update into unew (which already holds a copy of uold from
-// set_unew) -- faithful to hydro_integrator_kernel for a single-level region.
-// AMR coarse-fine (zero_fine_fluxes / coarse_cell_update / cache octs) is added
-// next; on a uniform level there are no refined neighbours so this is exact.
+// Godunov integrator.  One thread per oct: gather the 6^NDIM primitive subgrid
+// (+ refined flags) from the 3^NDIM neighbour-oct cube (nbor), apply the gravity
+// half-step predictor, run the AMR-aware godunov_oct (which zeros fluxes at
+// refined faces and returns the boundary-face flux sums), ADD the conservative
+// update into unew, and scatter the coarse-fine reflux correction onto any
+// coarser (cache-oct) neighbour's parent cell via reproducible fixed-point
+// atomics.  Faithful to hydro_integrator_kernel (subgrid_conserved_2_primitive +
+// trace_3d + riemann_driver + zero_fine_fluxes + conservative_update +
+// coarse_cell_update).  On a uniform level (no refined cells, no cache octs)
+// this reduces EXACTLY to the plain Godunov update -- the reflux is a no-op.
 //----------------------------------------------------------------------------
 #if   NDIM == 1
 #define SG_N 6
-#elif NDIM == 2
-#define SG_N 36
 #else
 #define SG_N 216
 #endif
@@ -96,27 +98,55 @@ inline HPrimitive load_cell_prim(device const float* uold, device const float* f
     return p;
 }
 
-kernel void hydro_godunov(device const float*       uold  [[buffer(0)]],
-                          device       float*       unew  [[buffer(1)]],
-                          device const float*       fgrav [[buffer(2)]],
-                          device const int*         nbor  [[buffer(3)]],
-                          constant     HydroParams& P     [[buffer(4)]],
+// Scatter one boundary-face flux sum onto the coarse parent of a cache-oct
+// neighbour (coarse_cell_update, gpu_hydro.cuf:1118).  `signed_w` already folds
+// in dt/dx, 1/twotondim and the face sign (-1 low / +1 high).
+inline void reflux_face(device atomic_uint* lo, device atomic_uint* hi,
+                        device const Oct* grid, device const int* father,
+                        int nb, HConserved b, float signed_w, float fp_scale) {
+    int fa = father[nb-1];
+    int cell = 1 + (grid[nb-1].ckey[0] - 2*grid[fa-1].ckey[0]);
+#if NDIM >= 2
+    cell += 2 * (grid[nb-1].ckey[1] - 2*grid[fa-1].ckey[1]);
+#endif
+#if NDIM >= 3
+    cell += 4 * (grid[nb-1].ckey[2] - 2*grid[fa-1].ckey[2]);
+#endif
+    atomic_add_fixed(lo, hi, UH(cell,1,fa), b.density   *signed_w, fp_scale);
+    atomic_add_fixed(lo, hi, UH(cell,2,fa), b.momentum_x*signed_w, fp_scale);
+    atomic_add_fixed(lo, hi, UH(cell,3,fa), b.momentum_y*signed_w, fp_scale);
+    atomic_add_fixed(lo, hi, UH(cell,4,fa), b.momentum_z*signed_w, fp_scale);
+    atomic_add_fixed(lo, hi, UH(cell,5,fa), b.energy    *signed_w, fp_scale);
+}
+
+kernel void hydro_godunov(device const float*       uold     [[buffer(0)]],
+                          device       float*       unew     [[buffer(1)]],
+                          device const float*       fgrav    [[buffer(2)]],
+                          device const int*         nbor     [[buffer(3)]],
+                          device const Oct*         grid     [[buffer(4)]],
+                          device const int*         father   [[buffer(5)]],
+                          device atomic_uint*       reflux_lo[[buffer(6)]],
+                          device atomic_uint*       reflux_hi[[buffer(7)]],
+                          constant     HydroParams& P        [[buffer(8)]],
                           uint gid [[thread_position_in_grid]]) {
     if (gid >= (uint)P.num_octs) return;
     int oct = P.head_idx + (int)gid;
     float gamma = P.gamma, halfdt = 0.5f * P.dt, dtdx = P.dt / P.dx;
 
-    // Gather the 6^NDIM subgrid from the 3^NDIM neighbour cube.  Subgrid cell
-    // position sp in 0..5 per axis -> cube offset sp/2 (0..2) + sub-bit sp%2.
+    // Gather the 6^NDIM subgrid + refined flags from the 3^NDIM neighbour cube.
+    // Subgrid cell position sp in 0..5/axis -> cube offset sp/2 + sub-bit sp&1.
     HPrimitive sg[SG_N];
+    bool ref[SG_N];
 #if NDIM == 1
     for (int sx = 0; sx < 6; ++sx) {
         int nb = nbor[(oct-1)*SUBGRIDSIZE + (sx/2)];
-        if (nb <= 0) nb = oct;                                   // uniform: never hit
-        sg[sx] = load_cell_prim(uold, fgrav, 1 + (sx&1), nb, gamma, halfdt);
+        if (nb <= 0) nb = oct;
+        int cell = 1 + (sx&1);
+        sg[sx]  = load_cell_prim(uold, fgrav, cell, nb, gamma, halfdt);
+        ref[sx] = grid[nb-1].refined[cell-1] != 0;
     }
-    HConserved du[2];
-    godunov_oct_1d(sg, gamma, dtdx, P.slope_type, P.riemann, du);
+    HConserved du[2], bnd[2];
+    godunov_oct_1d_amr(sg, ref, gamma, dtdx, P.slope_type, P.riemann, du, bnd);
 #else
     for (int sz = 0; sz < 6; ++sz)
     for (int sy = 0; sy < 6; ++sy)
@@ -125,10 +155,12 @@ kernel void hydro_godunov(device const float*       uold  [[buffer(0)]],
         int nb = nbor[(oct-1)*SUBGRIDSIZE + cube];
         if (nb <= 0) nb = oct;
         int cell = 1 + (sx&1) + 2*(sy&1) + 4*(sz&1);
-        sg[sx + 6*sy + 36*sz] = load_cell_prim(uold, fgrav, cell, nb, gamma, halfdt);
+        int idx = sx + 6*sy + 36*sz;
+        sg[idx]  = load_cell_prim(uold, fgrav, cell, nb, gamma, halfdt);
+        ref[idx] = grid[nb-1].refined[cell-1] != 0;
     }
-    HConserved du[8];
-    godunov_oct_3d(sg, gamma, dtdx, P.slope_type, P.riemann, du);
+    HConserved du[8], bnd[6];
+    godunov_oct_3d_amr(sg, ref, gamma, dtdx, P.slope_type, P.riemann, du, bnd);
 #endif
 
     for (int c = 1; c <= TWOTONDIM; ++c) {
@@ -138,4 +170,41 @@ kernel void hydro_godunov(device const float*       uold  [[buffer(0)]],
         unew[UH(c,4,oct)] += du[c-1].momentum_z;
         unew[UH(c,5,oct)] += du[c-1].energy;
     }
+
+    // Coarse-fine reflux: for each outer face whose neighbour is a coarser
+    // (cache) oct, add the boundary-flux correction to its coarse parent cell.
+    if (P.ilevel <= P.levelmin) return;
+    float w = dtdx / (float)TWOTONDIM;
+    int base = (oct-1)*SUBGRIDSIZE;
+#if NDIM == 1
+    const int cube[2] = {0, 2};                     // -x, +x  (center cube = 1)
+#else
+    const int cube[6] = {12, 14, 10, 16, 4, 22};    // -x,+x,-y,+y,-z,+z (center = 13)
+#endif
+    const float face_sign[6] = {-1.0f,+1.0f,-1.0f,+1.0f,-1.0f,+1.0f};
+    for (int fc = 0; fc < TWONDIM; ++fc) {
+        int nb = nbor[base + cube[fc]];
+        if (nb > P.ngridmax)   // cache oct == coarser neighbour
+            reflux_face(reflux_lo, reflux_hi, grid, father, nb, bnd[fc], face_sign[fc]*w, P.fp_scale);
+    }
+}
+
+// Finalize the coarse-fine reflux: add the fixed-point corrections accumulated
+// by hydro_godunov into unew, for the octs of the COARSER level.  One thread per
+// oct; the host zeroes the lo/hi buffers before each integrator pass.
+kernel void hydro_reflux_finalize(device       float*       unew      [[buffer(0)]],
+                                  device       atomic_uint* reflux_lo [[buffer(1)]],
+                                  device       atomic_uint* reflux_hi [[buffer(2)]],
+                                  constant     HydroParams& P         [[buffer(3)]],
+                                  uint gid [[thread_position_in_grid]]) {
+    if (gid >= (uint)P.num_octs) return;
+    int oct = P.head_idx + (int)gid;
+    float inv = 1.0f / P.fp_scale;
+    for (int c = 1; c <= TWOTONDIM; ++c)
+        for (int v = 1; v <= NHVAR; ++v) {
+            int idx = UH(c, v, oct);
+            uint lo = atomic_load_explicit(&reflux_lo[idx], memory_order_relaxed);
+            uint hi = atomic_load_explicit(&reflux_hi[idx], memory_order_relaxed);
+            unew[idx] += fixed_to_float(lo, hi, inv);
+        }
 }

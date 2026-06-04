@@ -284,12 +284,15 @@ typedef struct {
     float smallr;          // density floor (1e-10)
     float smallc;          // sound-speed floor (1e-10)
     float courant_factor;  // CFL number (0.5)
+    float fp_scale;        // 2^FP_SHIFT for the reproducible coarse-fine reflux atomics
     int   slope_type;      // 0=1st order, 1=minmod, 2=moncen
     int   riemann;         // SOLVER_LLF / SOLVER_HLL / SOLVER_HLLC
     int   head_idx;        // 1-based first oct of this level
     int   num_octs;        // octs at this level
     int   ngridmax;        // real-oct bound (cache/ghost octs are beyond)
     int   ilevel;
+    int   levelmin;        // zero_fine_fluxes only if ilevel<levelmax; reflux only if ilevel>levelmin
+    int   levelmax;
 } HydroParams;
 
 #endif // RAMSES_METAL_H

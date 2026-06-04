@@ -47,11 +47,17 @@ The Godunov pipeline (mirrors hydro_integrator_kernel):
       -> hydro.h flux_x/flux_y/flux_z (the rotation), composed in godunov_oct_*
 - [x] conservative_update (du = (F_L - F_R)*dt/dx, 3 directions)                :978
       -> hydro.h godunov_oct_1d / godunov_oct_3d (unit-tested, 1D+3D)
-- [ ] subgrid_conserved_2_primitive  (load 27-nbor octs -> 6^NDIM subgrid,
-      c2p + gravity half-step predictor) -- NEXT, needs the mesh nbor gather :304
-- [ ] zero_fine_fluxes    (zero fluxes at faces touching a finer level)         :919
-- [ ] coarse_cell_update  (atomic flux correction onto coarse parent)           :1061
-- [ ] hydro_integrator_kernel (assembles: gather -> godunov_oct -> update)      :1350
+- [x] subgrid_conserved_2_primitive  (load 27-nbor octs -> 6^NDIM subgrid,
+      c2p + gravity half-step predictor)                                        :304
+      -> hydro.metal hydro_godunov gather (+ refined flags), unit-tested
+- [x] zero_fine_fluxes    (zero fluxes at faces touching a finer level)         :919
+      -> hydro.h godunov_oct_*_amr (ref[] flags), unit-tested (scenario B)
+- [x] coarse_cell_update  (atomic flux correction onto coarse parent)           :1061
+      -> hydro.metal reflux_face + hydro_reflux_finalize, REPRODUCIBLE fixed-point
+         atomics (reduce.h) into a lo/hi buffer + finalize-add; unit-tested (C)
+- [x] hydro_integrator_kernel (assembles: gather -> godunov_oct -> update)      :1350
+      -> hydro.metal hydro_godunov (gather -> godunov_oct_*_amr -> unew += du ->
+         reflux scatter); 1D+3D unit-tested vs host-double god*_amr replica
 Coupling / control / refine:
 - [ ] cmpdt_kernel        (CFL dt + mass/ekin reductions)                       :1795
 - [ ] grav_hydro / sync_hydro (gravity source half/full step)             :1731/:1673
