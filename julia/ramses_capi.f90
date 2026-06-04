@@ -726,6 +726,19 @@ contains
     call capi_pst(handle, pst, ok); if (.not. ok) return
     call m_metal_gradient_only(pst, ilevel, real(tfrac, dp))
   end subroutine ramses_metal_gradient
+
+  ! GPU hydro Godunov for one level: the Metal port's set_unew -> AMR Godunov ->
+  ! grav_hydro -> set_uold sequence (gpu_hydro.cuf), with host<->device uold
+  ! transfer.  The direct CPU-vs-Metal diff point for godunov_fine: run
+  ! ramses_set_unew + ramses_godunov_fine + ramses_set_uold on one state and this
+  ! on another, then compare uold (ramses_get_hydro field=0) by ckey.
+  subroutine ramses_metal_godunov_fine(handle, ilevel) bind(C, name="ramses_metal_godunov_fine")
+    use metal_gravity_module, only: m_metal_godunov_fine
+    integer(c_int), value :: handle, ilevel
+    type(pst_t) :: pst; logical :: ok
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    call m_metal_godunov_fine(pst, ilevel)
+  end subroutine ramses_metal_godunov_fine
 #endif
 
   !--------------------------------------------------------------------------

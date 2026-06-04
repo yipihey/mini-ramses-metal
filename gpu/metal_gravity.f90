@@ -590,6 +590,67 @@ contains
   end subroutine m_metal_gradient_only
 
   !====================================================================
+  ! HYDRO: one-level Godunov update on the device (gpu_hydro.cuf port).  Seeds the
+  ! mesh, uploads the host conserved state uold (narrow dp->fp32, whole grid so the
+  ! stencil neighbours are present), runs mtl_godunov_fine (set_unew -> AMR Godunov
+  ! -> grav_hydro -> set_uold), and downloads the updated level's uold back to the
+  ! host.  Pure-hydro: the device force f is zeroed (no gravity predictor/kick).
+  ! For a single uniform level (ilevel==levelmin==levelmax) the coarse-fine reflux
+  ! is inert.  This is the C-API CPU-vs-Metal diff point for godunov_fine.
+  !====================================================================
+  subroutine m_metal_godunov_fine(pst, ilevel)
+    use ramses_commons, only: pst_t
+    use amr_parameters, only: ndim, twotondim, dp
+    type(pst_t), target :: pst
+    integer, intent(in) :: ilevel
+    integer :: head, n, num_octs, o, c, ivar, base, nf
+    real(dp) :: dx, dt, fp_scale
+    real(c_float), pointer :: d_uold(:), d_f(:)
+    associate(r=>pst%s%r, m=>pst%s%m, g=>pst%s%g)
+    call metal_sync_mesh(pst)
+    head = m%head(ilevel); n = m%noct(ilevel)
+    if (n > 0) then
+       num_octs = m%ifree - 1
+       fp_scale = 2.0_dp**20
+       dx = r%boxlen / 2.0_dp**ilevel
+       dt = g%dtnew(ilevel)
+       nf = 3                                  ! device f columns (ramses_metal.h NF)
+
+       ! Upload the whole-grid conserved state (nvar==NHVAR==5 -> identical column-
+       ! major layout: flat=(o-1)*5*twotondim+(ivar-1)*twotondim+(c-1)) and zero f.
+       call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*5])
+       call c_f_pointer(mtl_ptr_f(),    d_f,    [g_ncell*twotondim*nf])
+       d_f(1:g_ncell*twotondim*nf) = 0.0_c_float
+       do o = 1, num_octs
+          base = (o-1)*5*twotondim
+          do ivar = 1, 5
+             do c = 1, twotondim
+                d_uold(base + (ivar-1)*twotondim + c) = real(m%uold(c, ivar, o), c_float)
+             end do
+          end do
+       end do
+       call mtl_drain()                        ! host writes must land before the kernel
+
+       call mtl_godunov_fine(ilevel, head, n, r%levelmin, r%nlevelmax, &
+            real(r%gamma,c_double), real(dt,c_double), real(dx,c_double), &
+            r%slope_type, r%riemann, real(r%courant_factor,c_double), real(fp_scale,c_double))
+       call mtl_drain()
+
+       ! Download ONLY this level's octs (others are unchanged on the device; a dp->
+       ! fp32->dp round-trip would otherwise pollute their precision).
+       do o = head, head + n - 1
+          base = (o-1)*5*twotondim
+          do ivar = 1, 5
+             do c = 1, twotondim
+                m%uold(c, ivar, o) = real(d_uold(base + (ivar-1)*twotondim + c), dp)
+             end do
+          end do
+       end do
+    end if
+    end associate
+  end subroutine m_metal_godunov_fine
+
+  !====================================================================
   ! Device phi_old snapshot (B.phi -> B.phi_old) for one level — the Metal analog
   ! of CUDA's gpu_save_phi_old, called from r_save_phi_old (interpol_phi.f90) at
   ! the SAME points the CPU saves (amr_step.f90:201 pre-solve, :228 nstep==0

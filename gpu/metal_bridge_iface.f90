@@ -300,6 +300,36 @@ module metal_bridge_iface
      function mtl_ptr_rho()       bind(C, name="mtl_ptr_rho")       result(p); import::c_ptr; type(c_ptr)::p; end function
      function mtl_ptr_phi()       bind(C, name="mtl_ptr_phi")       result(p); import::c_ptr; type(c_ptr)::p; end function
      function mtl_ptr_f()         bind(C, name="mtl_ptr_f")         result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_uold()      bind(C, name="mtl_ptr_uold")      result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_unew()      bind(C, name="mtl_ptr_unew")      result(p); import::c_ptr; type(c_ptr)::p; end function
+
+     ! Hydro orchestration (gpu_hydro.cuf port).
+     subroutine mtl_godunov_fine(ilevel, head, num, levelmin, levelmax, &
+          gamma, dt, dx, slope, riemann, courant, fp_scale) bind(C, name="mtl_godunov_fine")
+       import :: c_int, c_double
+       integer(c_int), value :: ilevel, head, num, levelmin, levelmax, slope, riemann
+       real(c_double), value :: gamma, dt, dx, courant, fp_scale
+     end subroutine mtl_godunov_fine
+     subroutine mtl_hydro_reflux_zero(head, num) bind(C, name="mtl_hydro_reflux_zero")
+       import :: c_int; integer(c_int), value :: head, num
+     end subroutine mtl_hydro_reflux_zero
+     subroutine mtl_hydro_reflux_finalize(head, num, fp_scale) bind(C, name="mtl_hydro_reflux_finalize")
+       import :: c_int, c_double; integer(c_int), value :: head, num; real(c_double), value :: fp_scale
+     end subroutine mtl_hydro_reflux_finalize
+     function mtl_hydro_cmpdt(head, num, gamma, dx, courant, fp_scale, mass, ekin, eint) &
+          bind(C, name="mtl_hydro_cmpdt") result(dt)
+       import :: c_int, c_double
+       integer(c_int), value :: head, num
+       real(c_double), value :: gamma, dx, courant, fp_scale
+       real(c_double), intent(out) :: mass, ekin, eint
+       real(c_double) :: dt
+     end function mtl_hydro_cmpdt
+     subroutine mtl_hydro_flag(head, num, gamma, err_grad_d, err_grad_p, floor_d, floor_p) &
+          bind(C, name="mtl_hydro_flag")
+       import :: c_int, c_double
+       integer(c_int), value :: head, num
+       real(c_double), value :: gamma, err_grad_d, err_grad_p, floor_d, floor_p
+     end subroutine mtl_hydro_flag
   end interface
 
 end module metal_bridge_iface
