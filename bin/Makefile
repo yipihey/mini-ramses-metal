@@ -37,6 +37,7 @@ NVECTOR = 32
 NPRE = 8
 PATCH =
 PAPER = 0
+CUB_SORT_PART = 1
 DEBUG = 0
 HDF5 = 0
 MPIF90 = mpif90
@@ -109,6 +110,9 @@ ifneq ($(NHILBERT),1)
 endif
 ifeq ($(PAPER),1)
    DEFINES += -DPAPER
+endif
+ifneq ($(CUB_SORT_PART),0)
+   DEFINES += -DCUB_SORT_PART
 endif
 #############################################################################
 # Set proper units and initial conditions

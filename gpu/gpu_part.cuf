@@ -14,7 +14,7 @@ module part_device
        & xp, vp, mp, phip, levelp, sortp, idp, &
 !       & jp, zp, tp, tm, size_p, charge, idm, idt, &
        & xp_swap, isp_swap, idp_swap, &
-       & gpu_scan, gpu_scan_dp, d_skip, ids_in, hkeys_out
+       & gpu_scan, gpu_scan_dp, d_skip
   implicit none
 
   ! Local hash/hilbert/reduce includes.
@@ -691,10 +691,14 @@ subroutine gpu_sort_part(sim, ilevel)
        & int(sim%r%npartmax,8), level, shift)
   call nvtxEndRange()
 
-#define CUB_SORT
-#if defined(CUB_SORT)
-  call radix_sort(c_loc(idp_swap(head_idx)), c_loc(hkeys_out(head_idx)), &
-                & c_loc(ids_in(head_idx)), c_loc(sortp(head_idx)), &
+#if defined(CUB_SORT_PART)
+  ! idp_swap has keys to sort by. isp_swap is empty array where indices are
+  ! created. sortp has the sorted indices. xp_swap will have the sorted keys. we
+  ! don't need input indices or sorted keys but cub requires no overlap on
+  ! input and output buffers so we need to provide space for these. xp_swap and
+  ! isp_swap just happen to be available and the right size.
+  call radix_sort(c_loc(idp_swap(head_idx)), c_loc(xp_swap(head_idx)), &
+                & c_loc(isp_swap(head_idx)), c_loc(sortp(head_idx)), &
                 & head_idx, num_parts, 0,  ndim * level - 1)
 #else
   ! Init sortp
