@@ -1,6 +1,7 @@
 !> DM particle CUDA kernels.
 module part_device
   use amr_parameters, only: ndim, twotondim, threetondim, dp, i8b, MAXLEVEL
+  use amr_commons, only: part_dep_algo
   use oct_commons, only: oct
   use gpu_utils
   use cudafor
