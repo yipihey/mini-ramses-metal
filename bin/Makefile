@@ -38,6 +38,7 @@ NPRE = 8
 PATCH =
 PAPER = 0
 CUB_SORT_PART = 1
+CUB_SCAN_REFINE = 1
 DEBUG = 0
 HDF5 = 0
 MPIF90 = mpif90
@@ -113,6 +114,9 @@ ifeq ($(PAPER),1)
 endif
 ifneq ($(CUB_SORT_PART),0)
    DEFINES += -DCUB_SORT_PART
+endif
+ifneq ($(CUB_SCAN_REFINE),0)
+   DEFINES += -DCUB_SCAN_REFINE
 endif
 #############################################################################
 # Set proper units and initial conditions
