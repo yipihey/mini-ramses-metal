@@ -256,4 +256,40 @@ typedef struct {
     long key_off;          // hash key offset at ilevel
 } ScanParams;
 
+//----------------------------------------------------------------------------
+// HYDRO (gpu_hydro.cuf port).  Conservative state uold/unew is Fortran
+// (twotondim, nvar, noct); the variable order is [rho, rho*u_x, rho*u_y,
+// rho*u_z, E_tot].  nener / passive scalars are deferred -> NHVAR = 5 for now
+// (= 1 density + 3 momenta + 1 energy, the conserved_t / primitive_t of the CUDA
+// port).  The 3 momentum components are always carried even for NDIM<3, exactly
+// like the CPU `nvar=5+nener` (hydro_parameters.f90).
+//----------------------------------------------------------------------------
+#ifndef NHVAR
+#define NHVAR 5
+#endif
+// uold/unew(1:twotondim, 1:nvar, oct) -> element (cell, ivar, oct), 0-based out.
+#define UH(cell, ivar, oct)  ((((oct)-1)*NHVAR + ((ivar)-1))*TWOTONDIM + ((cell)-1))
+
+// Riemann solver ids (must match hydro_parameters.f90 solver_*).
+#define SOLVER_LLF  1
+#define SOLVER_HLL  2
+#define SOLVER_HLLC 3
+
+// Per-level hydro launch params (mirrors the `value` args of the CUDA kernels).
+// All reals fp32 (Metal has no double); the bridge narrows the Fortran doubles.
+typedef struct {
+    float gamma;           // adiabatic index (default 1.4)
+    float dt;              // dtnew(ilevel)
+    float dx;              // boxlen / 2^ilevel
+    float smallr;          // density floor (1e-10)
+    float smallc;          // sound-speed floor (1e-10)
+    float courant_factor;  // CFL number (0.5)
+    int   slope_type;      // 0=1st order, 1=minmod, 2=moncen
+    int   riemann;         // SOLVER_LLF / SOLVER_HLL / SOLVER_HLLC
+    int   head_idx;        // 1-based first oct of this level
+    int   num_octs;        // octs at this level
+    int   ngridmax;        // real-oct bound (cache/ghost octs are beyond)
+    int   ilevel;
+} HydroParams;
+
 #endif // RAMSES_METAL_H

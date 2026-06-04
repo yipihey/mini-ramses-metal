@@ -203,7 +203,7 @@ ifeq ($(COMPILER),METAL)
    METAL       = xcrun -sdk macosx metal
    METALLIB    = xcrun -sdk macosx metallib
    METALFLAGS  = -std=metal3.1 -DNDIM=$(NDIM) -I../gpu -I../gpu/metal
-   METAL_KERNELS = scan primitives sort hash nbor reduce rho mg part flag refine
+   METAL_KERNELS = scan primitives sort hash nbor reduce rho mg part flag refine hydro
    EXTRADEP    = ramses_kernels.metallib
    LIBS += -framework Metal -framework Foundation -framework QuartzCore -lc++ -lobjc
    LIBSUF      = _metal
@@ -292,7 +292,7 @@ libramses:	$(MODOBJ) ramses_capi.o $(EXTRADEP)
 ramses_kernels.metallib: $(addprefix ../gpu/metal/,$(addsuffix .metal,$(METAL_KERNELS))) \
                          ../gpu/metal/ramses_msl.h ../gpu/ramses_metal.h \
                          ../gpu/metal/hash.h ../gpu/metal/hilbert.h ../gpu/metal/utils.h \
-                         ../gpu/metal/reduce.h ../gpu/metal/nbor.h
+                         ../gpu/metal/reduce.h ../gpu/metal/nbor.h ../gpu/metal/hydro.h
 	@for k in $(METAL_KERNELS); do \
 	   echo "$(METAL) -c ../gpu/metal/$$k.metal"; \
 	   $(METAL) $(METALFLAGS) -c ../gpu/metal/$$k.metal -o $$k.air || exit 1; \
