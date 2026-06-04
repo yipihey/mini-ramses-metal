@@ -40,15 +40,18 @@ Device math (pure, fp32, unit-testable in isolation):
 Simple whole-array kernels:
 - [x] set_unew_kernel, set_uold_kernel  (uold<->unew copy)              → hydro.metal
 - [x] upload_kernel       (restriction: avg 8 children -> parent cell)  → hydro.metal
-The Godunov pipeline (the big one — NEXT, mirrors hydro_integrator_kernel):
-- [ ] subgrid_conserved_2_primitive  (load 27-nbor octs -> 6^NDIM tg subgrid,
-      c2p + gravity half-step predictor)                               gpu_hydro.cuf:304
-- [ ] trace_3d            (moncen slopes + MUSCL-Hancock trace -> ±face states) :400
-- [ ] riemann_driver      (per-interface riemann_fluxes over the subgrid)       :815
+The Godunov pipeline (mirrors hydro_integrator_kernel):
+- [x] trace_3d            (moncen slopes + MUSCL-Hancock trace -> ±face states) :400
+      -> hydro.h trace_cell_1d / trace_cell_3d (unit-tested vs double replica)
+- [x] riemann_driver      (per-interface riemann_fluxes + velocity rotation)    :815
+      -> hydro.h flux_x/flux_y/flux_z (the rotation), composed in godunov_oct_*
+- [x] conservative_update (du = (F_L - F_R)*dt/dx, 3 directions)                :978
+      -> hydro.h godunov_oct_1d / godunov_oct_3d (unit-tested, 1D+3D)
+- [ ] subgrid_conserved_2_primitive  (load 27-nbor octs -> 6^NDIM subgrid,
+      c2p + gravity half-step predictor) -- NEXT, needs the mesh nbor gather :304
 - [ ] zero_fine_fluxes    (zero fluxes at faces touching a finer level)         :919
-- [ ] conservative_update (unew += (F_L - F_R)*dt/dx, 3 directions)             :978
 - [ ] coarse_cell_update  (atomic flux correction onto coarse parent)           :1061
-- [ ] hydro_integrator_kernel (assembles the above; one threadgroup per oct)    :1350
+- [ ] hydro_integrator_kernel (assembles: gather -> godunov_oct -> update)      :1350
 Coupling / control / refine:
 - [ ] cmpdt_kernel        (CFL dt + mass/ekin reductions)                       :1795
 - [ ] grav_hydro / sync_hydro (gravity source half/full step)             :1731/:1673
