@@ -381,6 +381,9 @@ void mtl_alloc_buffers(int ncell, int npartmax, int hash_size, int nlevelmax) {
     memset(B.nref.contents, 0, nc*TWOTONDIM*sizeof(float));  // zero before first flag (pre-deposit)
     memset(B.rho.contents,  0, nc*TWOTONDIM*sizeof(float));
     B.phi      = newbuf<float>(nc*TWOTONDIM);
+    memset(B.phi.contents,  0, nc*TWOTONDIM*sizeof(float)); // match host phi=0 before first solve;
+                                                            // else mtl_save_phi_old snapshots garbage -> wrong
+                                                            // tfrac boundary extrapolation (over-energization bug)
     B.phi_old  = newbuf<float>(nc*TWOTONDIM);
     memset(B.phi_old.contents, 0, nc*TWOTONDIM*sizeof(float)); // valid before first save (tfrac=0 anyway)
     B.f        = newbuf<float>(nc*TWOTONDIM*NF);
@@ -1531,12 +1534,18 @@ void mtl_gradient_phi(int head_idx, int num_octs, float dx, float tfrac) {
 
 // Leapfrog kick/drift: gather force (CIC) and update vp/ipos.
 void mtl_kick_drift_part(int ilevel, int head_idx, int num_parts, int npartmax,
-                         int hash_size, int action_part, float dtnew, float dtold,
+                         int hash_size, int action_part,
+                         const float* dtnew_arr, const float* dtold_arr, int nlev,
                          float box0, float box1, float box2,
                          int periodic0, int periodic1, int periodic2) {
     if (num_parts <= 0) return;
     @autoreleasepool {
-        PartParams P{}; P.dtnew=dtnew; P.dtold=dtold;
+        PartParams P{};
+        // per-level dt arrays (1-based level → entry [L]); action-1 indexes by levelp
+        int nl = nlev < PART_MAXLEVEL ? nlev : PART_MAXLEVEL - 1;
+        for (int L = 1; L <= nl; ++L) { P.dtnew_lv[L] = dtnew_arr[L-1]; P.dtold_lv[L] = dtold_arr[L-1]; }
+        P.dtnew = (ilevel >= 1 && ilevel <= nl) ? dtnew_arr[ilevel-1] : 0.0f;  // action-2 scalar
+        P.dtold = (ilevel >= 1 && ilevel <= nl) ? dtold_arr[ilevel-1] : 0.0f;
         P.box_size[0]=box0; P.box_size[1]=box1; P.box_size[2]=box2;
         P.hash_size=hash_size; P.ilevel=ilevel; P.head_idx=head_idx; P.num_parts=num_parts;
         // Gather rejects cache (ghost) octs (igrid>ngridmax -> coarse fallback), matching CUDA

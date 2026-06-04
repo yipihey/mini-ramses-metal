@@ -1,6 +1,8 @@
 subroutine adaptive_loop(pst)
   use mdl_module
   use ramses_commons, only: pst_t
+  use capi_commons, only: capi_setup_only, capi_last_state, &
+                          capi_inject, capi_inject_n, capi_inject_idp, capi_inject_xp, capi_inject_vp
   use init_amr_module, only: r_init_amr
   use params_module, only: m_read_params
   use init_time_module, only: r_init_time
@@ -78,6 +80,50 @@ subroutine adaptive_loop(pst)
 
   ! Read initial particle properties from files
   if(r%pic)call m_input_part(pst)
+
+  ! [C-API] Overwrite the IC particles with a deterministic injected set (all
+  ! bound to levelmin, mp=mass_sph so nref counts particles) BEFORE the adaptive
+  ! refine build, so RAMSES's own refine machinery builds the mesh from them.
+  ! Set by ramses_init_particles (julia/ramses_capi.f90).
+  if(capi_inject)then
+     block
+       integer :: ip, dd, nd, nn
+       real(kind=8) :: mp0
+       associate(p=>pst%s%p)
+         nd = size(p%xp,2)
+         ! Use the grafic DM particle mass (loaded by m_input_part) so density
+         ! is nonzero and in the same fp32-safe regime as production.  DMO has
+         ! mass_sph=0 (omega_b=0); refinement here is count-based anyway
+         ! (nref += vol, rho_fine.f90:870), so only gravity needs mp>0.
+         mp0 = 0.0d0
+         if(p%npart>=1) mp0 = p%mp(1)
+         if(mp0<=0.0d0) mp0 = 1.0d0/dble(max(1,capi_inject_n))
+         nn = min(capi_inject_n, r%npartmax)
+         if(nn < capi_inject_n) &
+              write(*,*)' [C-API] WARNING: injected count clamped to npartmax',r%npartmax
+         p%npart = nn
+         do ip=1,nn
+            p%idp(ip)    = capi_inject_idp(ip)
+            p%mp(ip)     = mp0
+            p%levelp(ip) = r%levelmin
+            do dd=1,nd
+               p%xp(ip,dd) = capi_inject_xp(ip,dd)
+               p%vp(ip,dd) = capi_inject_vp(ip,dd)
+            end do
+         end do
+         ! Bind all particles to levelmin (mirror input_part_grafic:316-324)
+         p%headp = p%npart+1
+         p%tailp = p%npart
+         p%headp(r%levelmin) = 1
+         p%tailp(r%levelmin) = p%npart
+         if(ANY(.not.r%periodic(1:nd)))then
+            p%headp(r%levelmin-1) = 1
+            p%tailp(r%levelmin-1) = 0
+         end if
+       end associate
+     end block
+     write(*,'(A,I9,A)')' [C-API] injected ',pst%s%p%npart,' deterministic particles'
+  end if
 
   ! Build initial AMR grid
   if(r%nrestart==0)then
@@ -160,6 +206,14 @@ subroutine adaptive_loop(pst)
           ' mg_driver=', metal_mg_driver_on
   end if
 #endif
+
+  ! C-API (RamsesNG.jl): stop right after setup and hand the fully-initialised
+  ! live state to ramses_init, which drives the routines itself.  Default path
+  ! (capi_setup_only=.false.) is unchanged — the binary runs the time loop below.
+  if (capi_setup_only) then
+     capi_last_state => pst%s
+     return
+  end if
 
   ! Just in case we only do clump finding
   if(r%clump_only)then

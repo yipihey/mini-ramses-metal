@@ -290,10 +290,13 @@ contains
       call get_environment_variable("RAMSES_NO_TFRAC", notf)
       if (len_trim(notf) > 0) tfrac = 0.0_dp     ! diagnostic: disable time-extrap
     end block
-    ! Snapshot phi -> phi_old BEFORE the solve overwrites B.phi (make_initial_phi),
-    ! so a finer subcycled level can time-extrapolate this level's boundary phi
-    ! (gpu_save_phi_old; the CPU does this at amr_step.f90 r_save_phi_old).
-    call mtl_save_phi_old(head, n)
+    block
+      character(len=8) :: tdb
+      call get_environment_variable("RAMSES_TFRAC_DBG", tdb)
+      if (len_trim(tdb) > 0) write(0,'(A,I3,A,I2,A,ES16.8,A,ES12.4,A,ES12.4)') &
+           'TFRACDBG-GPU L',ilevel,' icount',icount,' tfrac=',tfrac, &
+           ' dtnew=',g%dtnew(ilevel),' dtold(c)=',g%dtold(ilevel-1)
+    end block
     ! PRE-SOLVE warm-start dump (RAMSES_DUMP_SEQ): the phi carried INTO this solve,
     ! BEFORE make_cache/make_initial_phi/MG overwrite it.  Compare GPU-refine vs CPU-
     ! refine to test whether the subcycle refine's phi handoff perturbs the warm start.
@@ -330,6 +333,17 @@ contains
               merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), real(tfrac,c_float))
        end block
     end if
+    ! Snapshot phi -> phi_old AFTER make_cache (the device octs are now in the
+    ! order the boundary read uses) and BEFORE make_initial_phi (inside the
+    ! multigrid) overwrites B.phi.  Saving before make_cache wrote phi_old to the
+    ! wrong device slots -> coarse phi_old read as ~0 by a finer level's icount=2
+    ! boundary extrapolation -> deep-level over-energization.  RAMSES_SKIP_SAVE_PHIOLD
+    ! lets the solve-isolation test supply phi_old externally instead.
+    block
+      character(len=8) :: skipsv
+      call get_environment_variable("RAMSES_SKIP_SAVE_PHIOLD", skipsv)
+      if (len_trim(skipsv) == 0) call mtl_save_phi_old(head, n)
+    end block
     ! FAITHFUL path (sole path): m_metal_multigrid mirrors multigrid_fine_commons.f90
     ! multigrid()+recursive_multigrid — the convergence loop / levelmin_mg / safe-mode,
     ! dispatching the per-leaf mtl_mg_* kernels.  The old monolithic mtl_poisson_level
@@ -499,6 +513,68 @@ contains
   end subroutine m_metal_poisson
 
   !====================================================================
+  ! GRADIENT-ONLY (no solve): apply just the GPU 4th-order force gradient to the
+  ! phi currently resident on the device (e.g. set via ramses_set_field :phi),
+  ! materialising the coarse-fine boundary cache exactly as m_metal_poisson does
+  ! but SKIPPING the multigrid solve.  tfrac=0 (no subcycle time extrapolation),
+  ! so this isolates the gradient OPERATOR: gradient the SAME phi on CPU (fp64,
+  ! force_fine icount=1) and GPU (fp32) and diff the resulting f.
+  !====================================================================
+  subroutine m_metal_gradient_only(pst, ilevel, tfrac)
+    use ramses_commons, only: pst_t
+    use amr_parameters, only: ndim, dp
+    type(pst_t), target :: pst
+    integer, intent(in) :: ilevel
+    real(dp), intent(in) :: tfrac              ! subcycle time-extrapolation fraction
+    integer :: head, n, ncache
+    real(dp) :: boxlen, dx
+    logical :: per0, per1, per2
+    associate(r=>pst%s%r, m=>pst%s%m)
+    if (metal_cache_on) then; g_synced_ifree = -1; g_nbor_synced = -1; end if
+    call metal_sync_mesh(pst)        ! hash/nbor only; does NOT touch device phi/phi_old
+    head = m%head(ilevel); n = m%noct(ilevel)
+    if (n > 0) then
+       boxlen = r%boxlen
+       dx     = boxlen / 2.0_dp**ilevel
+       per0=r%periodic(1); per1=r%periodic(2); per2=r%periodic(3)
+       ! NB: do NOT call mtl_save_phi_old here — the caller supplies phi_old (set
+       ! via ramses_set_field :phi_old) so the tfrac time-extrapolation is tested
+       ! on identical, externally-controlled phi/phi_old.
+       if (metal_cache_on) then
+          ncache = mtl_make_cache(ilevel, head, n, r%nlevelmax, &
+               merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), real(tfrac,c_float))
+       end if
+       call mtl_gradient_phi(head, n, real(dx,c_float), real(tfrac,c_float))
+    end if
+    end associate
+  end subroutine m_metal_gradient_only
+
+  !====================================================================
+  ! Device phi_old snapshot (B.phi -> B.phi_old) for one level — the Metal analog
+  ! of CUDA's gpu_save_phi_old, called from r_save_phi_old (interpol_phi.f90) at
+  ! the SAME points the CPU saves (amr_step.f90:201 pre-solve, :228 nstep==0
+  ! post-solve).  Previously the Metal path had NO device hook in r_save_phi_old
+  ! (only #ifdef _CUDA / host #else), so phi_old was saved only by m_metal_poisson's
+  ! internal pre-solve snapshot and MISSED the nstep==0 post-solve initialisation —
+  ! giving a phi_old that differs from the CPU and a wrong subcycle time-extrapolation
+  ! (the over-energization root cause).
+  !====================================================================
+  subroutine m_metal_save_phi_old(pst, ilevel)
+    use ramses_commons, only: pst_t
+    type(pst_t), target :: pst
+    integer, intent(in) :: ilevel
+    integer :: head, n
+    ! NOTE: mtl_save_phi_old(head,n) only lands correctly when the device octs are
+    ! in host (head:tail) order, which is established by m_metal_poisson's full
+    ! setup (sync+cache), not by a bare sync — so this standalone hook is unused in
+    ! the production path (the in-poisson internal save is authoritative).  Kept
+    ! for the gradient/solve isolation tests, which set phi_old via ramses_set_field.
+    if (.not. (metal_enabled .and. b_grid_seeded)) return
+    head = pst%s%m%head(ilevel); n = pst%s%m%noct(ilevel)
+    if (n > 0) call mtl_save_phi_old(head, n)
+  end subroutine m_metal_save_phi_old
+
+  !====================================================================
   ! CUDA-STYLE multigrid: a faithful Fortran transliteration of the CPU
   ! poisson/multigrid_fine_commons.f90 multigrid() + recursive_multigrid(),
   ! calling the per-leaf mtl_mg_* Metal kernels.  This reuses the EXACT CPU
@@ -582,56 +658,62 @@ contains
        end if
     end do
 
-    ! --- fixed-cycle V-cycle loop (Stage 2) ---
-    ! The convergence-gated loop read the residual norm back to the host EVERY iteration
-    ! (mtl_mg_residual_norm2 -> mtl_drain), serialising the otherwise-async kernel pipeline
-    ! and forcing ~0% GPU occupancy.  Measurement (RAMSES_MG_VERBOSE) showed the solve
-    ! reaches its fp32 residual floor by ~5 cycles then PLATEAUS dead-flat: the periodic
-    ! base hovers at ~1.1e-4 (just above eps=1e-4) and ground all 20 MAXITER iterations for
-    ! a bit-flat residual.  A fixed g_ncyc count (default 6) gives the SAME plateaued
-    ! solution with NO host readback -> GS/residual/restrict/interpolate all submit_async
-    ! and pipeline.  RAMSES_MG_CHECK_EVERY=N re-enables one end-of-solve readback every N
-    ! coarse steps as a convergence monitor.  Safe-mode (residual-driven escalation) is
-    ! dropped: it can no longer trigger without the per-iteration norm, and the measured
-    ! convergence is uniform.
-    ncyc = merge(g_ncyc_fine, g_ncyc_base, ilevel > r%levelmin)
-    mg_monitor = (g_mg_check_every > 0)
-    if (mg_monitor) mg_monitor = (mod(g%nstep_coarse, g_mg_check_every) == 0)
+    ! --- iterate-to-epsilon V-cycle loop: EXACT CPU pattern ---
+    ! Mirrors poisson/multigrid_fine_commons.f90 multigrid(): iterate full V-cycles
+    ! until the relative residual err < r%epsilon or iter == MAXITER, using the same
+    ! initial-residual normalisation i_res, the same err = sqrt(res/(i_res+1e-20*
+    ! rho_tot^2)) formula, and the same residual-driven safe-mode escalation.  This
+    ! replaces the fixed g_ncyc count so the Metal solve converges to the SAME
+    ! tolerance as the CPU (the per-iteration residual readback is intrinsic to the
+    ! tolerance test; correctness/parity over the async-pipeline perf optimisation).
+    iter  = 0
+    err   = 1.0_dp
     i_res = 0.0_dp
-    do iter = 1, ncyc
-       ! Pre-smoothing (ngs_fine red+black sweeps, batched into one command buffer)
-       call mtl_mg_smooth(ilevel, ilevel, 0, ngs_fine)
+    main_iteration_loop: do
+       iter  = iter + 1
+       isafe = merge(1, 0, g%safe_mode(ilevel))
+
+       ! Pre-smoothing (ngs_fine red+black sweeps)
+       call mtl_mg_smooth(ilevel, ilevel, isafe, ngs_fine)
+
+       ! Compute new residual (feeds restrict_residual)
+       call mtl_mg_cmp_residual(ilevel, ilevel)
+
+       ! Compute initial residual norm (first iteration)
+       if (iter == 1) i_res = mtl_mg_residual_norm2(ilevel)
 
        ! Coarse-grid correction (one recursive V-cycle)
        if (ilevel > levelmin_mg) then
-          call mtl_mg_cmp_residual(ilevel, ilevel)       ! residual feeds restrict_residual
-          if (mg_monitor .and. iter == 1) i_res = mtl_mg_residual_norm2(ilevel)
           call mtl_mg_restrict_residual(ilevel, ilevel)
           ! Periodic base (is_base): project the constant null space out of the
-          ! coarse RHS so the singular periodic operator stays consistent and GS
-          ! does not amplify the constant mode (fp32 mean leak -> over-energize).
+          ! coarse RHS so the singular periodic operator stays consistent.
           if (is_base == 1) call mtl_mg_zeromean_rhs(ilevel, ilevel-1)
           call mtl_mg_reset_corr(ilevel, ilevel-1)
-          call metal_recursive_mg(pst, ilevel, ilevel-1, 0, levelmin_mg, is_base)
+          call metal_recursive_mg(pst, ilevel, ilevel-1, isafe, levelmin_mg, is_base)
           call mtl_mg_interpolate_correct(ilevel, ilevel)
-       else if (mg_monitor .and. iter == 1) then
-          call mtl_mg_cmp_residual(ilevel, ilevel)
-          i_res = mtl_mg_residual_norm2(ilevel)
        end if
 
        ! Post-smoothing
-       call mtl_mg_smooth(ilevel, ilevel, 0, ngs_fine)
-    end do
+       call mtl_mg_smooth(ilevel, ilevel, isafe, ngs_fine)
 
-    ! Optional convergence monitor (RAMSES_MG_CHECK_EVERY): one residual readback at the
-    ! end of the solve, every N coarse steps -- spot-check that the fixed count still
-    ! reaches the fp32 floor.  Off (and zero readbacks) by default.
-    if (mg_monitor) then
+       ! Update fine residual + norm for the convergence test
        call mtl_mg_cmp_residual(ilevel, ilevel)
        res = mtl_mg_residual_norm2(ilevel)
+
+       last_err = err
        err = sqrt(res / (i_res + 1.0d-20*rho_tot**2))
-       write(0,'(A,I5,A,I5,A,1pE10.3)') '   ==> [MG-MON] Level=', ilevel, ' ncyc=', ncyc, ' err=', err
-    end if
+
+       ! Converged?
+       if (err < eps .or. iter >= MAXITER) exit
+
+       ! Not converged: residual-driven safe-mode escalation for the level
+       if (err > last_err*SAFE_FACTOR .and. .not. g%safe_mode(ilevel)) then
+          g%safe_mode(ilevel) = .true.
+       end if
+    end do main_iteration_loop
+
+    print '(A,I5,A,I5,A,1pE10.3)', '   ==> Level=', ilevel, ' Step=', iter, ' Error=', err
+    if (iter == MAXITER) print *, 'WARN: Metal fine multigrid Poisson failed to converge...'
 
     ! Zero-mean gauge pin for the periodic base (null-space drift control); the
     ! monolithic mtl_poisson_level does this too.  Refined levels are Dirichlet.
@@ -703,10 +785,21 @@ contains
        ! ipos/vp/levelp are RESIDENT (no input marshalling).  The kernel gathers
        ! the force from the resident f-field and updates resident ipos/vp.
        call system_clock(c0, rate)
-       call mtl_kick_drift_part(ilevel, h, np, g_npm, g_hash, action_part, &
-            real(g%dtnew(ilevel),c_float), real(g%dtold(ilevel),c_float), &
-            real(boxlen,c_float), real(boxlen,c_float), real(boxlen,c_float), &
-            merge(1,0,r%periodic(1)), merge(1,0,r%periodic(2)), merge(1,0,r%periodic(3)))
+       block
+         real(c_float) :: dtnew_a(r%nlevelmax), dtold_a(r%nlevelmax)
+         integer :: lv
+         do lv = 1, r%nlevelmax
+            dtnew_a(lv) = real(g%dtnew(lv), c_float)
+            dtold_a(lv) = real(g%dtold(lv), c_float)
+         end do
+         ! Pass per-level dt so the action-1 half-kick uses the particle's own
+         ! level dt (dtnew(levelp)/dtold(levelp)), matching CPU move_fine — fixes
+         ! the level-transition kick (over-energization seed).
+         call mtl_kick_drift_part(ilevel, h, np, g_npm, g_hash, action_part, &
+              dtnew_a, dtold_a, r%nlevelmax, &
+              real(boxlen,c_float), real(boxlen,c_float), real(boxlen,c_float), &
+              merge(1,0,r%periodic(1)), merge(1,0,r%periodic(2)), merge(1,0,r%periodic(3)))
+       end block
        call system_clock(c1); gt_kick = gt_kick + dble(c1-c0)/rate
        block
          character(len=8) :: kd
@@ -1259,6 +1352,41 @@ contains
     end do
     end associate
   end subroutine m_metal_grid_to_host
+
+  ! DIAG: copy the resident GPU phi/f -> host m%phi/m%f in the CURRENT GPU slot order
+  ! (slot o == m%grid(o) after m_metal_grid_to_host), so a ckey-keyed dump pairs phi
+  ! with the right oct.  m_metal_grid_to_host syncs ONLY the grid, leaving m%phi from a
+  ! stale layout -> use this right after it for a reliable refined-phi comparison.
+  subroutine m_metal_fields_to_host(pst)
+    use ramses_commons, only: pst_t
+    use amr_parameters, only: ndim, twotondim, dp
+    type(pst_t), target :: pst
+    integer :: o, c, ddim
+    real(c_float), pointer :: m_phi(:), m_f(:), m_nref(:), m_rho(:), m_phiold(:)
+    integer(c_int), pointer :: m_flag1(:)
+    if (.not. (metal_enabled .and. b_grid_seeded)) return
+    associate(m=>pst%s%m)
+    call mtl_drain()
+    call c_f_pointer(mtl_ptr_phi(),     m_phi,    [g_ncell*twotondim])
+    call c_f_pointer(mtl_ptr_phi_old(), m_phiold, [g_ncell*twotondim])
+    call c_f_pointer(mtl_ptr_f(),     m_f,     [g_ncell*twotondim*3])
+    call c_f_pointer(mtl_ptr_nref(),  m_nref,  [g_ncell*twotondim])
+    call c_f_pointer(mtl_ptr_rho(),   m_rho,   [g_ncell*twotondim])
+    call c_f_pointer(mtl_ptr_flag1(), m_flag1, [g_ncell*twotondim])
+    do o = 1, m%noct_used
+       do c = 1, twotondim
+          m%phi(c, o)     = real(m_phi((o-1)*twotondim + c), dp)
+          m%phi_old(c, o) = real(m_phiold((o-1)*twotondim + c), dp)
+          m%rho(c, o)   = real(m_rho((o-1)*twotondim + c), dp)
+          m%nref(c, o)  = real(m_nref((o-1)*twotondim + c), dp)
+          m%flag1(c, o) = m_flag1((o-1)*twotondim + c)
+          do ddim = 1, ndim
+             m%f(c, ddim, o) = real(m_f(((o-1)*3 + (ddim-1))*twotondim + c), dp)
+          end do
+       end do
+    end do
+    end associate
+  end subroutine m_metal_fields_to_host
 
   ! Print the fine-grained GPU sub-operation profile (cumulative wall seconds).
   subroutine m_metal_prof_report()

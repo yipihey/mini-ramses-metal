@@ -185,12 +185,13 @@ module metal_bridge_iface
      end subroutine mtl_save_phi_old
 
      subroutine mtl_kick_drift_part(ilevel, head_idx, num_parts, npartmax, hash_size, &
-          action_part, dtnew, dtold, box0, box1, box2, per0, per1, per2) &
+          action_part, dtnew_arr, dtold_arr, nlev, box0, box1, box2, per0, per1, per2) &
           bind(C, name="mtl_kick_drift_part")
        import :: c_int, c_float
-       integer(c_int), value :: ilevel, head_idx, num_parts, npartmax, hash_size, action_part
+       integer(c_int), value :: ilevel, head_idx, num_parts, npartmax, hash_size, action_part, nlev
        integer(c_int), value :: per0, per1, per2
-       real(c_float),  value :: dtnew, dtold, box0, box1, box2
+       real(c_float),  dimension(*), intent(in) :: dtnew_arr, dtold_arr   ! per-level dt (1..nlev)
+       real(c_float),  value :: box0, box1, box2
      end subroutine mtl_kick_drift_part
 
      subroutine mtl_finalize() bind(C, name="mtl_finalize")

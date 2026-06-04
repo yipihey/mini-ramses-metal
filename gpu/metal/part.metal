@@ -29,12 +29,18 @@ inline bool gather_cic_force(
     int  il[3], ir[3], bmin[3], bmax[3];
     float dr[3], dl[3];
     for (int idim = 0; idim < NDIM; ++idim) {
-        int   C  = (int)(ipos[idim] >> (NBITS_POS - cell_level));   // exact cell index
-        float fr = cell_frac_fix(ipos[idim], cell_level);           // [0,1), ~24-bit
-        float drr = fr + 0.5f;
-        int   add = (drr >= 1.0f) ? 1 : 0;
+        int  shift = NBITS_POS - cell_level;
+        int  C     = (int)(ipos[idim] >> shift);                    // exact cell index
+        long low   = ipos[idim] & (((long)1 << shift) - 1);         // cell fraction, fixed-point
+        // EXACT stencil rounding (matches CPU floor(x+0.5)): decide ir from the
+        // INTEGER fraction, not the fp32 cell_frac_fix.  fp32 rounds fractions
+        // within ~6e-8 of 0.5 UP to 0.5, flipping ir at a half-cell boundary ->
+        // flips the fine/coarse fallback for boundary particles (the 13% L10
+        // gather remnant).  Integer compare matches the CPU to ~2^-48.
+        int  add = (low >= ((long)1 << (shift - 1))) ? 1 : 0;       // fraction >= 0.5
         ir[idim] = C + add;
-        dr[idim] = drr - (float)add;
+        float fr = ldexp((float)low, -shift);                       // weights (fp32 ok)
+        dr[idim] = fr + 0.5f - (float)add;
         dl[idim] = 1.0f - dr[idim];
         il[idim] = ir[idim] - 1;
         bmin[idim] = 0;
@@ -183,7 +189,15 @@ kernel void kick_drift_part(
         }
     } else if (P.action_part == 1) {          // level-transition half-kick
         int lp = levelp[ipart-1];
-        float dteff = (lp >= P.ilevel) ? P.dtnew : P.dtold;
+        // Use the PARTICLE's own level dt (CPU move_fine.f90: dteff =
+        // levelp>=ilevel ? dtnew(levelp) : dtold(levelp)).  Was P.dtnew/P.dtold
+        // (=dt at ilevel) — wrong by the subcycle ratio for levelp != ilevel,
+        // the over-energization seed for the ~1% level-transition particles.
+        // (fall back to the scalar P.dtnew/dtold if the per-level array is unset,
+        //  so standalone test harnesses that fill only P.dtnew still work.)
+        float dteff = (lp >= P.ilevel)
+            ? (P.dtnew_lv[lp] != 0.0f ? P.dtnew_lv[lp] : P.dtnew)
+            : (P.dtold_lv[lp] != 0.0f ? P.dtold_lv[lp] : P.dtold);
         levelp[ipart-1] = P.ilevel;
         for (int idim = 1; idim <= NDIM; ++idim) {
             int vi = IDXP(ipart, idim, P.npartmax);

@@ -174,9 +174,15 @@ typedef struct {
 } MgParams;
 
 // Particle kick/drift + force gather
+#define PART_MAXLEVEL 32
 typedef struct {
-    float dtnew;           // dtnew(ilevel)
-    float dtold;           // dtold(level) for action 1 fallback (test: same)
+    float dtnew;           // dtnew(ilevel)   — action 2 (kick+drift) uses this
+    float dtold;           // dtold(ilevel)
+    // Per-level timesteps so the action-1 level-transition half-kick can use the
+    // PARTICLE's own level dt (matches CPU move_fine: dteff = levelp>=ilevel ?
+    // dtnew(levelp) : dtold(levelp)).  Indexed by 1-based level (entry [0] unused).
+    float dtnew_lv[PART_MAXLEVEL];
+    float dtold_lv[PART_MAXLEVEL];
     float box_size[3];     // periodic box extent (normalised units); drift wraps here
     int  hash_size;
     int  ilevel;

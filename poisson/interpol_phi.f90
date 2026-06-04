@@ -81,6 +81,10 @@ recursive subroutine r_save_phi_old(pst,ilevel,input_size)
 #ifdef _CUDA
      call gpu_save_phi_old(pst%s, ilevel)
 #else
+     ! For _METAL the authoritative phi_old snapshot is done inside m_metal_poisson
+     ! (after its full device sync); a bare-sync save here does not land correctly
+     ! (device-oct ordering).  The host save is harmless (host phi_old is unused on
+     ! the GPU path) and keeps non-Metal builds correct.
      call save_phi_old(pst%s%m,ilevel)
 #endif
   endif

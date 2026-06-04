@@ -256,6 +256,11 @@ subroutine gradient_phi(s,ilevel,icount)
   else
      tfrac=0.0
   end if
+  block; character(len=8)::ntf; call get_environment_variable("RAMSES_NO_TFRAC",ntf)
+     if(len_trim(ntf)>0) tfrac=0.0d0; end block   ! DIAG: disable time-extrap to match Metal test
+  block; character(len=8)::tdb; call get_environment_variable("RAMSES_TFRAC_DBG",tdb)
+     if(len_trim(tdb)>0) write(0,'(A,I3,A,I2,A,ES12.4)') 'TFRACDBG L',ilevel,' icount',icount,' tfrac=',tfrac
+  end block
 
   call open_cache(mdl, m, pack_size=storage_size(dummy_three_realdp)/32, &
        pack=pack_fetch_interpol, unpack=unpack_fetch_interpol, &

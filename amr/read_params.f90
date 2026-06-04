@@ -11,6 +11,7 @@ subroutine m_read_params(pst)
   use movie_module, only: set_movie_vars
   use rt_params_module
   use constants
+  use capi_commons, only: capi_nml_path, capi_nrestart
 #ifdef RTZ
   use rtz_module, only: elements, n_elements !, initialize_elements
 #endif
@@ -740,15 +741,20 @@ subroutine m_read_params(pst)
   ! Write information about git version
   call write_gitinfo
 
-  ! Read namelist filename from command line argument
+  ! Read namelist filename from command line argument (or the C-API override,
+  ! set by ramses_init so the library drives this without argv).
   narg = command_argument_count()
-  IF(narg .LT. 1)THEN
-     write(*,*)'You should type: ramses3d input.nml [nrestart]'
-     write(*,*)'File input.nml should contain a parameter namelist'
-     write(*,*)'nrestart is optional'
-     call mdl_abort(s%mdl)
-  END IF
-  CALL getarg(1,infile)
+  if (len_trim(capi_nml_path) > 0) then
+     infile = trim(capi_nml_path)
+  else
+     IF(narg .LT. 1)THEN
+        write(*,*)'You should type: ramses3d input.nml [nrestart]'
+        write(*,*)'File input.nml should contain a parameter namelist'
+        write(*,*)'nrestart is optional'
+        call mdl_abort(s%mdl)
+     END IF
+     CALL getarg(1,infile)
+  end if
 
   !-------------------------------------------------
   ! Read the namelist
@@ -780,7 +786,9 @@ subroutine m_read_params(pst)
   !-------------------------------------------------
   ! Read optional nrestart command-line argument
   !-------------------------------------------------
-  if (narg==2) then
+  if (len_trim(capi_nml_path) > 0) then
+    if (capi_nrestart >= 0) nrestart = capi_nrestart   ! C-API restart override
+  else if (narg==2) then
     CALL getarg(2,cmdarg)
     read(cmdarg,*) nrestart
   endif

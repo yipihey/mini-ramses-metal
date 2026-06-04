@@ -206,6 +206,7 @@ ifeq ($(COMPILER),METAL)
    METAL_KERNELS = scan primitives sort hash nbor reduce rho mg part flag refine
    EXTRADEP    = ramses_kernels.metallib
    LIBS += -framework Metal -framework Foundation -framework QuartzCore -lc++ -lobjc
+   LIBSUF      = _metal
 endif
 #############################################################################
 C = ifort
@@ -227,7 +228,7 @@ endif
 LIBS += $(LIBMPI) $(LIBFFTW)
 #############################################################################
 # Sources directories are searched in this exact order
-VPATH = $(PATCH):$(GPU_PATH):../feedback:../sink:../star:../cooling:../turb:../hydro:../pm:../poisson:../amr:../clump:../mdl1:../rt:../lightcone
+VPATH = $(PATCH):$(GPU_PATH):../feedback:../sink:../star:../cooling:../turb:../hydro:../pm:../poisson:../amr:../clump:../mdl1:../rt:../lightcone:../julia
 #############################################################################
 # Modules
 MODOBJ = amr_parameters.o hydro_parameters.o rt_parameters.o oct_commons.o \
@@ -245,7 +246,7 @@ MODOBJ += neq_cooling_module.o
 endif
 MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 	 cross_sections_module.o rt_spectra.o  \
-	 ramses_commons.o call_back.o cache_commons.o cache.o gadgetreadfile.o \
+	 ramses_commons.o capi_commons.o call_back.o cache_commons.o cache.o gadgetreadfile.o \
 	 boundaries.o output_hydro.o output_poisson.o output_part.o output_rt.o output_amr.o movie.o \
 	 sort.o nbors_utils.o hydro_flag.o marshal.o
 ifeq ($(COMPILER),NVHPC)
@@ -276,6 +277,14 @@ MODOBJ +=  multigrid_fine_coarse.o rho_fine.o upload.o init_xion.o \
 #############################################################################
 ramses:	$(MODOBJ) ramses.o $(EXTRADEP)
 	$(F90) $(FFLAGS) $(MODOBJ) ramses.o -o $(EXEC)$(NDIM)d $(LIBS)
+#############################################################################
+# Shared library for the Julia/C-callable API (RamsesNG.jl / lib/RamsesLib).
+# Reuses the full MODOBJ (which excludes ramses.o, the main) + the bind(C)
+# C-API in ../julia/ramses_capi.f90.  CPU:   make GRAV=1 libramses
+#                                     Metal: make COMPILER=METAL GRAV=1 libramses
+# Output: libramses<NDIM>d.dylib (CPU) or libramses<NDIM>d_metal.dylib (Metal).
+libramses:	$(MODOBJ) ramses_capi.o $(EXTRADEP)
+	$(F90) $(FFLAGS) -shared -fPIC $(MODOBJ) ramses_capi.o -o libramses$(NDIM)d$(LIBSUF).dylib $(LIBS)
 #############################################################################
 # Metal kernel library (Apple Silicon).  Compiles gpu/metal/*.metal -> .metallib.
 # Depend on the sources + shared headers so an edit to any kernel (or header)
