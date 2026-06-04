@@ -362,17 +362,40 @@ contains
   !>
   subroutine gpu_cooling(sim, ilevel)
     use nvtx
-    use cooling_device, only: cooling_kernel
+    use cooling_device, only: cooling_kernel, gpu_upload_cooling_table, table_uploaded
     use ramses_commons, only: ramses_t
+    use constants, only: rhoc, mH
     type(ramses_t), intent(inout) :: sim
     integer, intent(in) :: ilevel
 
     integer(kind=4) :: head_idx, num_octs
     integer(kind=4) :: threadsX_per_block, threadsY_per_block, num_blocks
     real(kind=8) :: scale_nH, scale_T2, scale_l, scale_d, scale_t, scale_v
+    real(kind=8) :: dtcool, nH_eos, nCOM
 
     ! Conversion factor from user units to cgs units
     call units(sim%r,sim%g,scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
+
+    ! Ensure the equilibrium cooling table lives on the device before the
+    ! kernel runs. For non-cosmological runs the table never changes, so this
+    ! happens exactly once (guarded by table_uploaded). Cosmological runs
+    ! refresh the table each coarse step in r_cooling_fine.
+    if (sim%r%cooling .and. .not. table_uploaded) then
+       call gpu_upload_cooling_table(sim%cool)
+    end if
+
+    ! Reference density for the isothermal/polytropic EOS floor [H/cc].
+    ! Cosmological runs raise it to at least the virial overdensity (200x the
+    ! mean baryon density, ~1/aexp^3), matching the CPU cooling_fine.
+    nH_eos = sim%r%eos_nH
+    if (sim%r%cosmo) then
+       nCOM   = 200.0d0*sim%g%omega_b*rhoc*(sim%g%h0/100)**2 &
+              & /sim%g%aexp**3*sim%cool%X/mH
+       nH_eos = max(nCOM, nH_eos)
+    end if
+
+    ! Cooling timestep in seconds (solve_cooling_gpu works in CGS).
+    dtcool = sim%g%dtnew(ilevel) * scale_t
 
     head_idx = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
@@ -382,10 +405,12 @@ contains
 
     if (num_octs > 0) then
        call nvtxStartRange("GPU cooling", color=0)!green
-       call cooling_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, grid, &
-            & head_idx, num_octs, &
-            & sim%r%gamma, sim%g%dtnew(ilevel), sim%r%eos_type, sim%r%eos_T2, sim%r%eos_nH, sim%r%eos_index, &
-            & scale_T2, scale_nH)
+       call cooling_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>( &
+            & uold, grid, head_idx, num_octs,                                              &
+            & sim%r%gamma, dtcool, sim%r%eos_type, sim%r%eos_T2,                           &
+            & nH_eos, sim%r%eos_index, scale_T2, scale_nH,                                 &
+            & sim%r%cooling, sim%r%metal, sim%r%imetal, sim%r%z_ave,                       &
+            & sim%r%self_shielding, sim%cool%X, sim%r%T2max, sim%r%smallr)
        call nvtxEndRange()
     end if
 
