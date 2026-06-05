@@ -393,21 +393,36 @@ subroutine init_bound_refine(r,g,m,igrid,igrid_ref,ibound)
 
 #ifdef GRAV
 
-  do ind=1,twotondim
-     do idim=1,ndim
-        nstride=2**(idim-1)
-        xx(1,idim)=(2*m%grid(igrid)%ckey(idim)+MOD((ind-1)/nstride,2)+0.5)*dx-m%skip(idim)
+  ! Isolated-BC analytical gravity for the boundary oct -- only when gravity is
+  ! actually active.  For a pure-hydro run (poisson=.false., gravity_type==0)
+  ! gravana/phiana divide by g%multipole%q(1), which is never computed -> NaN
+  ! force on the boundary oct -> the godunov gravity predictor poisons the
+  ! interior.  Interior octs keep f=0 in that case, so the boundary must too.
+  if(r%poisson .or. r%gravity_type/=0)then
+     do ind=1,twotondim
+        do idim=1,ndim
+           nstride=2**(idim-1)
+           xx(1,idim)=(2*m%grid(igrid)%ckey(idim)+MOD((ind-1)/nstride,2)+0.5)*dx-m%skip(idim)
+        end do
+        ! Call analytical acceleration routine
+        call gravana(r,g,xx,ff,dx,1)
+        do idim=1,ndim
+           m%f(ind,idim,igrid)=ff(1,idim)
+        end do
+        ! Call analytical potential routine
+        call phiana(r,g,xx,phi,dx,1)
+        m%phi(ind,igrid)=phi(1)
+        m%phi_old(ind,igrid)=phi(1)
      end do
-     ! Call analytical acceleration routine
-     call gravana(r,g,xx,ff,dx,1)
-     do idim=1,ndim
-        m%f(ind,idim,igrid)=ff(1,idim)
+  else
+     do ind=1,twotondim
+        do idim=1,ndim
+           m%f(ind,idim,igrid)=0d0
+        end do
+        m%phi(ind,igrid)=0d0
+        m%phi_old(ind,igrid)=0d0
      end do
-     ! Call analytical potential routine
-     call phiana(r,g,xx,phi,dx,1)
-     m%phi(ind,igrid)=phi(1)
-     m%phi_old(ind,igrid)=phi(1)
-  end do
+  endif
 
 #endif
 
