@@ -38,7 +38,6 @@ NPRE = 8
 PATCH =
 PAPER = 0
 CUB_SORT_PART = 1
-FASTMATH = 0
 DEBUG = 0
 HDF5 = 0
 MPIF90 = mpif90
@@ -169,13 +168,8 @@ endif
 #############################################################################
 # NVHPC compiler
 ifeq ($(COMPILER),NVHPC)
-ifeq ($(FASTMATH),1)
-   GPU_ARCH_OPTS = $(CUDA_ARCH),fastmath
-else
-   GPU_ARCH_OPTS = $(CUDA_ARCH)
-endif
-   FFLAGS = -cpp -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx $(DEFINES)
-   LIBS = -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx -lstdc++
+   FFLAGS = -cpp -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx $(DEFINES)
+   LIBS = -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx -lstdc++
    GPU_PATH = ../gpu
    ifeq ($(CUDA_PROFILE),1)
       FFLAGS += -gpu=lineinfo,ptxinfo -Minstrument -traceback -gopt
