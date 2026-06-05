@@ -694,11 +694,19 @@ subroutine gpu_sort_part(sim, ilevel)
 
 #if defined(CUB_SORT_PART)
   ! idp_swap has keys to sort by. isp_swap is empty array where indices are
-  ! created. sortp has the sorted indices. xp_swap will have the sorted keys. we
-  ! don't need input indices or sorted keys but cub requires no overlap on
-  ! input and output buffers so we need to provide space for these. xp_swap and
-  ! isp_swap just happen to be available and the right size.
-  call radix_sort(c_loc(idp_swap(head_idx)), c_loc(xp_swap(head_idx)), &
+  ! created. sortp has the sorted indices. xp_swap holds the (discarded) sorted
+  ! keys -- cub requires no overlap on input and output buffers so we need to
+  ! provide space for it. xp_swap and isp_swap just happen to be available.
+  !
+  ! NOTE: the sorted-keys buffer is int64 in cub (see cub_module_radix_sort.cu),
+  ! so its base pointer must be 8-byte aligned. With NPRE=4 xp_swap is real*4, so
+  ! c_loc(xp_swap(head_idx)) is only 4-byte aligned for even head_idx and cub's
+  ! 8-byte key stores then fault with CUDA 716 (misaligned address). xp_swap(1) is
+  ! the allocation base (cudaMalloc is >=256-byte aligned), so start the scratch
+  ! keys there. It is sized to hold npartmax int64 keys (see init_part.f90), and
+  ! the sorted keys are discarded (only the index permutation in sortp is used),
+  ! so absolute indexing of this throwaway buffer does not matter.
+  call radix_sort(c_loc(idp_swap(head_idx)), c_loc(xp_swap(1)), &
                 & c_loc(isp_swap(head_idx)), c_loc(sortp(head_idx)), &
                 & head_idx, num_parts, 0,  ndim * level - 1)
 #else
