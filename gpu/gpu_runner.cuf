@@ -541,6 +541,7 @@ contains
           ! Compute prefix sum
 #if defined(CUB_SCAN_REFINE)
           call cub_inclusive_sum(c_loc(prefix_sum), head_idx, num_octs)
+          call get_total_sum<<<1,1>>>(prefix_sum, head_idx, num_octs, new_noct_d)
 #else
           call gpu_scan(head_idx, num_octs, new_noct_d)
 #endif
