@@ -22,6 +22,7 @@ module metal_gravity_module
   logical :: metal_enabled = .false.     ! set true by adaptive_loop after mtl_init (needs pic; gravity path)
   logical :: metal_inited  = .false.     ! mtl_init succeeded -> GPU hydro usable even without particles
   integer :: g_hydro_prof = 0            ! one-shot per-phase timing of m_metal_hydro_level (first 3 calls)
+  logical :: g_uold_resident = .false.   ! pure-hydro: B.uold uploaded once + kept GPU-resident
   ! GPU refinement flagging (flag.metal + m_metal_flag), DEFAULT ON.  Connectivity
   ! is fast + verified correct (GPU parallel atomicCAS hash rebuild, cross-checked
   ! 0 lookup failures; per-level nbor/father).  m_metal_flag forces a full grid+
@@ -42,6 +43,11 @@ module metal_gravity_module
   ! refined meshes the cross-level reflux + cache-oct ghost are not yet wired into
   ! the subcycle, so AMR hydro-on-GPU is approximate.  See [[metal-hydro-port]].
   logical :: metal_hydro_on = .false.
+  ! uold/unew GPU-residency for the pure-hydro path (RAMSES_GPU_HYDRO_RESIDENT=1,
+  ! default OFF).  Eliminates the per-call host<->device copies, BUT leaves host uold
+  ! stale -> the CPU newdt/diagnostics/output must device-newdt + uold-sync (not yet
+  ! done) -> EXPERIMENTAL.  See amr_step.
+  logical :: metal_hydro_resident = .false.
   ! GPU AMR refine (data_on_device): create/derefine/compact octs on the GPU
   ! (refine.metal: refine_create/refine_derefine + counting-sort compaction gather
   ! + GPU hash/nbor rebuild), then sync the mesh to the host.  DEFAULT ON.
@@ -870,6 +876,118 @@ contains
     end if
     end associate
   end subroutine m_metal_hydro_level
+
+  !====================================================================
+  ! uold/unew GPU-RESIDENT path (pure hydro: no gravity/particles/cooling, so the
+  ! only host consumer of uold is output).  uold is uploaded ONCE and kept on the
+  ! device; the whole hydro substep (set_unew, godunov, grav, reflux, set_uold,
+  ! upload) runs device-side with NO per-call host<->device copy.  Eliminates the
+  ! per-call whole-grid upload+download (~36% on a large uniform mesh).  Driven by
+  ! amr_step when (gpu_hydro .and. .not. metal_enabled).
+  !====================================================================
+  subroutine m_metal_hydro_setunew(pst, ilevel)   ! at amr_step's pre-recursion set_unew
+    use ramses_commons, only: pst_t
+    use amr_parameters, only: twotondim, dp
+    type(pst_t), target :: pst
+    integer, intent(in) :: ilevel
+    integer :: head, n, num_octs, o, c, ivar, base, nf
+    real(c_float), pointer :: d_uold(:), d_f(:)
+    associate(r=>pst%s%r, m=>pst%s%m)
+    call metal_sync_mesh(pst)
+    if (.not. g_uold_resident) then                ! one-time upload of the host state
+       num_octs = m%ifree - 1; nf = 3
+       call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*5])
+       call c_f_pointer(mtl_ptr_f(),    d_f,    [g_ncell*twotondim*nf])
+       d_f(1:g_ncell*twotondim*nf) = 0.0_c_float   ! pure hydro: no gravity force
+       do o = 1, num_octs
+          base = (o-1)*5*twotondim
+          do ivar = 1, 5
+             do c = 1, twotondim
+                d_uold(base + (ivar-1)*twotondim + c) = real(m%uold(c, ivar, o), c_float)
+             end do
+          end do
+       end do
+       call mtl_drain()
+       g_uold_resident = .true.
+    end if
+    head = m%head(ilevel); n = m%noct(ilevel)
+    if (n > 0) then
+       call mtl_hydro_set_unew(head, n)            ! B.unew(ilevel) = B.uold(ilevel)
+       call mtl_hydro_reflux_zero(head, n)         ! zero the accumulator finer levels scatter into
+    end if
+    end associate
+  end subroutine m_metal_hydro_setunew
+
+  subroutine m_metal_hydro_resident(pst, ilevel)   ! at amr_step's post-recursion godunov
+    use ramses_commons, only: pst_t
+    use amr_parameters, only: dp
+    type(pst_t), target :: pst
+    integer, intent(in) :: ilevel
+    integer :: head, n, ncache
+    real(dp) :: dx, dt, fp_scale
+    logical :: per0, per1, per2, hascoarse
+    associate(r=>pst%s%r, m=>pst%s%m, g=>pst%s%g)
+    if (metal_cache_on) then; g_synced_ifree = -1; g_nbor_synced = -1; end if
+    call metal_sync_mesh(pst)
+    head = m%head(ilevel); n = m%noct(ilevel)
+    if (n > 0) then
+       fp_scale = 2.0_dp**20; dx = r%boxlen / 2.0_dp**ilevel; dt = g%dtnew(ilevel)
+       hascoarse = (ilevel > r%levelmin)
+       if (metal_cache_on .and. hascoarse) then    ! coarse-fine ghost (faces+edges)
+          per0=r%periodic(1); per1=r%periodic(2); per2=r%periodic(3)
+          ncache = mtl_make_cache(ilevel, head, n, r%nlevelmax, &
+               merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), 0.0_c_float, 1)
+          if (ncache > 0) call mtl_hydro_fill_cache(g_ngridmax+1, ncache, &
+               r%interpol_var, r%interpol_type, real(r%smallr,c_double))
+       end if
+       call mtl_hydro_godunov_only(ilevel, head, n, r%levelmin, r%nlevelmax, &
+            real(r%gamma,c_double), real(dt,c_double), real(dx,c_double), &
+            r%slope_type, r%riemann, real(r%courant_factor,c_double), real(fp_scale,c_double))
+       call mtl_hydro_grav(head, n, real(r%gamma,c_double), real(dt,c_double))
+       ! add the reflux from ilevel+1 (resident B.unew(ilevel), no host round-trip)
+       call mtl_hydro_reflux_finalize(head, n, real(fp_scale,c_double))
+       call mtl_drain()
+    end if
+    end associate
+  end subroutine m_metal_hydro_resident
+
+  subroutine m_metal_hydro_setuold(pst, ilevel)    ! device set_uold (B.uold=B.unew)
+    use ramses_commons, only: pst_t
+    type(pst_t), target :: pst
+    integer, intent(in) :: ilevel
+    integer :: head, n
+    head = pst%s%m%head(ilevel); n = pst%s%m%noct(ilevel)
+    if (n > 0) call mtl_hydro_set_uold(head, n)
+  end subroutine m_metal_hydro_setuold
+
+  subroutine m_metal_hydro_upload_dev(pst, ilevel) ! device restriction fine->coarse
+    use ramses_commons, only: pst_t
+    type(pst_t), target :: pst
+    integer, intent(in) :: ilevel
+    integer :: head, n
+    head = pst%s%m%head(ilevel); n = pst%s%m%noct(ilevel)
+    if (n > 0) call mtl_hydro_upload(head, n)
+  end subroutine m_metal_hydro_upload_dev
+
+  subroutine m_metal_uold_to_host(pst)             ! sync resident B.uold -> host (output)
+    use ramses_commons, only: pst_t
+    use amr_parameters, only: twotondim, dp
+    type(pst_t), target :: pst
+    integer :: num_octs, o, c, ivar, base
+    real(c_float), pointer :: d_uold(:)
+    if (.not. g_uold_resident) return
+    call mtl_drain()
+    num_octs = pst%s%m%ifree - 1
+    call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*5])
+    do o = 1, num_octs
+       base = (o-1)*5*twotondim
+       do ivar = 1, 5
+          do c = 1, twotondim
+             pst%s%m%uold(c, ivar, o) = real(d_uold(base + (ivar-1)*twotondim + c), dp)
+          end do
+       end do
+    end do
+  end subroutine m_metal_uold_to_host
 #endif
 
   !====================================================================

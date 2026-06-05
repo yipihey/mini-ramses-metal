@@ -26,7 +26,7 @@ subroutine adaptive_loop(pst)
 #endif
 #ifdef _METAL
   use metal_bridge_iface
-  use metal_gravity_module, only: metal_enabled, metal_inited, metal_flag_on, metal_hydro_on, refine_rehash, refine_hostflag1, refine_hostmed, m_metal_prof_report, g_ncyc_fine, g_ncyc_base, g_mg_check_every, g_sort_every, metal_mg_driver_on, metal_mg_all_levels, m_metal_part_to_host, m_metal_grid_to_host
+  use metal_gravity_module, only: metal_enabled, metal_inited, metal_flag_on, metal_hydro_on, metal_hydro_resident, refine_rehash, refine_hostflag1, refine_hostmed, m_metal_prof_report, g_ncyc_fine, g_ncyc_base, g_mg_check_every, g_sort_every, metal_mg_driver_on, metal_mg_all_levels, m_metal_part_to_host, m_metal_grid_to_host
   use iso_c_binding
   use amr_parameters, only: ndim
 #endif
@@ -174,6 +174,8 @@ subroutine adaptive_loop(pst)
      metal_inited = .true.
      call get_environment_variable('RAMSES_GPU_HYDRO', m_mlib)
      if (trim(m_mlib) == '1') metal_hydro_on = .true.
+     call get_environment_variable('RAMSES_GPU_HYDRO_RESIDENT', m_mlib)
+     if (trim(m_mlib) == '1') metal_hydro_resident = .true.
   end if
   if (m_ierr == 0 .and. r%pic) then
      ! Hybrid: enable the in-loop Metal base-level gravity (deposit -> grouped

@@ -42,9 +42,10 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   use gpu_manager, only: r_transfer_grid_host
 #endif
 #ifdef _METAL
-  use metal_gravity_module, only: m_metal_poisson, metal_enabled, m_metal_grid_to_host, m_metal_part_to_host, metal_hydro_on, metal_inited
+  use metal_gravity_module, only: m_metal_poisson, metal_enabled, m_metal_grid_to_host, m_metal_part_to_host, metal_hydro_on, metal_inited, metal_hydro_resident
 #ifdef HYDRO
-  use metal_gravity_module, only: m_metal_hydro_level
+  use metal_gravity_module, only: m_metal_hydro_level, m_metal_hydro_setunew, &
+       m_metal_hydro_resident, m_metal_hydro_setuold, m_metal_hydro_upload_dev, m_metal_uold_to_host
 #endif
 #endif
 
@@ -67,13 +68,20 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   real(kind=8), save :: tprev=0.
   real(kind=8), external :: wallclock
   logical, save :: bkp_last_done=.false.
-  logical :: gpu_hydro
+  logical :: gpu_hydro, resident
 
   associate(r=>pst%s%r, g=>pst%s%g, m=>pst%s%m, mdl=>pst%s%mdl)
 
-  gpu_hydro = .false.
+  gpu_hydro = .false.; resident = .false.
 #ifdef _METAL
   gpu_hydro = metal_inited .and. metal_hydro_on   ! route the godunov step to the GPU (no pic needed)
+  ! uold/unew GPU-RESIDENCY (m_metal_hydro_resident path) is wired but DISABLED:
+  ! it leaves host uold stale, which breaks the CPU consumers that read uold every
+  ! step (newdt CFL, write_screen conservation, output).  Making it correct needs
+  ! device newdt (mtl_hydro_cmpdt) + a per-step uold->host diagnostic sync; the net
+  ! win is modest since the kernel already dominates and is ~115x faster than CPU.
+  ! Set RAMSES_GPU_HYDRO_RESIDENT=1 to exercise it (incl. the stale-host caveat).
+  if (metal_hydro_resident) resident = gpu_hydro .and. .not. metal_enabled
 #endif
 
   if(m%noct_tot(ilevel)==0)return
@@ -127,6 +135,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
 #ifdef _METAL
            call m_metal_grid_to_host(pst)
            call m_metal_part_to_host(pst)
+           call m_metal_uold_to_host(pst)   ! sync resident hydro state for output (no-op if not resident)
 #endif
            call m_dump_all(pst,.false.)
         endif
@@ -143,6 +152,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
 #ifdef _METAL
            call m_metal_grid_to_host(pst)
            call m_metal_part_to_host(pst)
+           call m_metal_uold_to_host(pst)   ! sync resident hydro state for output (no-op if not resident)
 #endif
         call m_dump_all(pst,.true.)
         tprev=tcurr
@@ -156,6 +166,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
 #ifdef _METAL
            call m_metal_grid_to_host(pst)
            call m_metal_part_to_host(pst)
+           call m_metal_uold_to_host(pst)   ! sync resident hydro state for output (no-op if not resident)
 #endif
            call m_dump_all(pst,.true.)
            bkp_last_done=.true.
@@ -284,7 +295,15 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   !-----------------------
   if(r%hydro.and..not.r%static_gas)then
      call m_timer('hydro - set unew','start')
-     call r_set_unew(pst,ilevel,1)   ! host unew=uold (GPU path uploads this, +finer reflux)
+#ifdef _METAL
+     if(resident)then
+        call m_metal_hydro_setunew(pst,ilevel)   ! device set_unew + (1st call) upload uold resident
+     else
+#endif
+        call r_set_unew(pst,ilevel,1)   ! host unew=uold (GPU per-call path uploads this, +finer reflux)
+#ifdef _METAL
+     endif
+#endif
   endif
 
   !---------------------------
@@ -381,17 +400,25 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
      if(.not.r%static_gas)then
 #ifdef _METAL
       if(gpu_hydro)then
-        ! GPU hydro: godunov_only (unew += du, + gravity predictor from the resident
-        ! B.f, + coarse-fine reflux scatter via cache octs) and grav_hydro, on the
-        ! device.  Host set_unew (above, pre-recursion) + finer-level reflux are
-        ! already in host unew; this uploads them, runs, and downloads unew.  source
-        ! is a no-op here (nvar=5).  Then the CPU set_uold commits unew->uold.
+        ! GPU hydro: godunov_only (unew += du, gravity predictor from B.f, coarse-fine
+        ! reflux scatter via cache octs) + grav_hydro, on the device.  source is a
+        ! no-op here (nvar=5).  RESIDENT path (pure hydro): uold/unew stay GPU-resident
+        ! -- set_unew/set_uold are device, no host copy.  Per-call path (cosmo): host
+        ! set_unew (pre-recursion) + finer reflux are in host unew; upload/run/download.
         call m_timer('hydro - godunov','start')
-        call m_metal_hydro_level(pst,ilevel)
+        if(resident)then
+           call m_metal_hydro_resident(pst,ilevel)
+        else
+           call m_metal_hydro_level(pst,ilevel)
+        endif
         call m_timer('hydro - source','start')
         call r_source_hydro_fine(pst,ilevel,1)
         call m_timer('hydro - set uold','start')
-        call r_set_uold(pst,ilevel,1)
+        if(resident)then
+           call m_metal_hydro_setuold(pst,ilevel)
+        else
+           call r_set_uold(pst,ilevel,1)
+        endif
       else
 #endif
         ! Hyperbolic solver
@@ -432,7 +459,15 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
      ! Restriction operator
      if(ilevel<r%nlevelmax)then
         call m_timer('hydro - upload','start')
-        call m_upload_fine(pst,ilevel)
+#ifdef _METAL
+        if(resident)then
+           call m_metal_hydro_upload_dev(pst,ilevel)   ! device fine->coarse restriction
+        else
+#endif
+           call m_upload_fine(pst,ilevel)
+#ifdef _METAL
+        endif
+#endif
      endif
   endif
 

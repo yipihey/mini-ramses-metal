@@ -310,6 +310,15 @@ module metal_bridge_iface
        integer(c_int), value :: ilevel, head, num, levelmin, levelmax, slope, riemann
        real(c_double), value :: gamma, dt, dx, courant, fp_scale
      end subroutine mtl_godunov_fine
+     subroutine mtl_hydro_set_unew(head, num) bind(C, name="mtl_hydro_set_unew")
+       import :: c_int; integer(c_int), value :: head, num
+     end subroutine mtl_hydro_set_unew
+     subroutine mtl_hydro_set_uold(head, num) bind(C, name="mtl_hydro_set_uold")
+       import :: c_int; integer(c_int), value :: head, num
+     end subroutine mtl_hydro_set_uold
+     subroutine mtl_hydro_upload(head, num) bind(C, name="mtl_hydro_upload")
+       import :: c_int; integer(c_int), value :: head, num
+     end subroutine mtl_hydro_upload
      subroutine mtl_hydro_godunov_only(ilevel, head, num, levelmin, levelmax, &
           gamma, dt, dx, slope, riemann, courant, fp_scale) bind(C, name="mtl_hydro_godunov_only")
        import :: c_int, c_double
