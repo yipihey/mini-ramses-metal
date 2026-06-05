@@ -693,15 +693,19 @@ void* mtl_ptr_reflux_hi() { return B.reflux_hi.contents; }
 // rho accumulator (so DM+gas self-gravitates).  B.uold must hold the current gas
 // density; rho_lo/hi must already be zeroed + particle-deposited (this adds before
 // rho_finalize).  Same fixed-point scale as the particle CIC.
-extern "C" void mtl_gas_deposit(int head, int num, double vol_loc, double fp_scale) {
+extern "C" void mtl_gas_deposit(int head, int num, double vol_loc, double fp_scale,
+                                double mass_sph, int refine_on) {
     if (num <= 0) return;
     GasDepParams P{}; P.vol_loc=(float)vol_loc; P.fp_scale=(float)fp_scale; P.head_idx=head; P.num_octs=num;
+    P.inv_mass_sph=(mass_sph>0.0)?(float)(1.0/mass_sph):0.0f; P.refine_on=refine_on;
     id<MTLCommandBuffer> cb = [g_queue commandBuffer];
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
     [e setComputePipelineState:pso("gas_deposit")];
     [e setBuffer:B.uold offset:0 atIndex:0]; [e setBuffer:B.grid offset:0 atIndex:1];
     [e setBuffer:B.rho_lo offset:0 atIndex:2]; [e setBuffer:B.rho_hi offset:0 atIndex:3];
-    [e setBytes:&P length:sizeof(P) atIndex:4]; dispatch1d(e, pso("gas_deposit"), num*TWOTONDIM);
+    [e setBytes:&P length:sizeof(P) atIndex:4];
+    [e setBuffer:B.nref_lo offset:0 atIndex:5]; [e setBuffer:B.nref_hi offset:0 atIndex:6];
+    dispatch1d(e, pso("gas_deposit"), num*TWOTONDIM);
     [e endEncoding]; submit_async(cb);
 }
 

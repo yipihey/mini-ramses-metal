@@ -222,11 +222,13 @@ kernel void rho_finalize(
 // is the natural, self-consistent source -> the gas now self-gravitates (the CPU
 // gas multipole was never uploaded to the GPU -> econs was badly broken).
 //============================================================================
-kernel void gas_deposit(device const float*       uold   [[buffer(0)]],
-                        device const Oct*         grid   [[buffer(1)]],
-                        device atomic_uint*       rho_lo [[buffer(2)]],
-                        device atomic_uint*       rho_hi [[buffer(3)]],
-                        constant     GasDepParams& P     [[buffer(4)]],
+kernel void gas_deposit(device const float*       uold    [[buffer(0)]],
+                        device const Oct*         grid    [[buffer(1)]],
+                        device atomic_uint*       rho_lo  [[buffer(2)]],
+                        device atomic_uint*       rho_hi  [[buffer(3)]],
+                        constant     GasDepParams& P      [[buffer(4)]],
+                        device atomic_uint*       nref_lo [[buffer(5)]],
+                        device atomic_uint*       nref_hi [[buffer(6)]],
                         uint gid [[thread_position_in_grid]]) {
     if (gid >= (uint)(P.num_octs * TWOTONDIM)) return;
     int oct  = P.head_idx + (int)gid / TWOTONDIM;
@@ -234,6 +236,12 @@ kernel void gas_deposit(device const float*       uold   [[buffer(0)]],
     if (grid[oct-1].refined[cell-1] != 0) return;          // leaf cells only
     float gas_mass = uold[UH(cell,1,oct)] * P.vol_loc;
     atomic_add_fixed(rho_lo, rho_hi, IDX2(cell, oct), gas_mass, P.fp_scale);
+    // Gas also counts toward the refinement criterion nref (poisson_flag uses
+    // nref >= m_refine for GRAV builds, and rho_fine adds gas as mmm/mass_sph).
+    // Monopole (cell-local) -> same per-cell total as the CPU CIC of the gas
+    // multipole; without this the GPU refines on particles only -> under-refines.
+    if (P.refine_on)
+        atomic_add_fixed(nref_lo, nref_hi, IDX2(cell, oct), gas_mass*P.inv_mass_sph, P.fp_scale);
 }
 
 //============================================================================

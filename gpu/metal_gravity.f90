@@ -1646,7 +1646,11 @@ contains
        if (n > 0) then
           dx = r%boxlen / 2.0_dp**lev
           vol_loc = dx**ndim
-          call mtl_gas_deposit(hd, n, real(vol_loc,c_double), real(fp_scale,c_double))
+          ! Gas also feeds the refinement counter nref (gas_mass/mass_sph), matching
+          ! the CPU rho_fine -> poisson_flag nref>=m_refine; else the GPU refines on
+          ! particles only and under-refines the gas (cosmo_iso L8 ~5x too few).
+          call mtl_gas_deposit(hd, n, real(vol_loc,c_double), real(fp_scale,c_double), &
+               real(r%mass_sph,c_double), merge(1,0,r%m_refine(lev)>=0.0_dp))
        end if
     end do
     call mtl_drain()

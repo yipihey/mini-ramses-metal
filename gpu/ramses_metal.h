@@ -340,6 +340,8 @@ typedef struct {
     float fp_scale;        // 2^FP_SHIFT_RHO (same fixed-point scale as the particle CIC)
     int   head_idx;        // 1-based first oct of this level
     int   num_octs;
+    float inv_mass_sph;    // 1/mass_sph: gas adds gas_mass/mass_sph to nref (refine counter)
+    int   refine_on;       // m_refine(ilevel)>=0: deposit gas into nref too (else rho only)
 } GasDepParams;
 
 // potential-energy reduction: sum f^2 over leaf cells (host multiplies by the
