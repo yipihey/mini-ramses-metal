@@ -241,8 +241,26 @@ typedef struct {
     int nlevelmax;
     int per[3];        // periodic(1:3)
     float tfrac;       // time-extrapolation factor: phi_b = corr + (corr - corr_old)*tfrac
-    int _pad[2];
+    int nbound;        // number of non-periodic boundary regions (0 = none)
+    int _pad[1];
 } CacheParams;
+
+// Non-periodic boundary fill (hydro_fill_boundary): mirrors init_bound_refine.
+// One thread per cache-oct cell.  Cache octs whose cache_ibound[k] > 0 are domain
+// boundary octs (off-domain ckey); they copy from their same-level interior
+// reference oct (father[cache]) using the bound_type rule (1=reflexive,
+// 2=zero-gradient, 3=imposed constant).  bnd_* device buffers hold the per-region
+// metadata; bound layout below.
+typedef struct {
+    int head_idx;      // first cache oct (ngridmax+1)
+    int num_octs;      // ncache (number of cache octs)
+    int ngridmax;
+    int nbound;
+    float gamma;       // for type-3 imposed-constant energy assembly
+    int _pad[3];
+} HydroBndParams;
+// bnd_const layout: 5 floats per region [d,u,v,w,p], index 5*(ib-1)+k (k=0..4).
+#define BND_CONST_N 5
 
 // Generic per-bit radix-sort / scan / elementwise launch params
 typedef struct {

@@ -141,6 +141,9 @@ contains
          call get_environment_variable("RAMSES_METAL_CACHE", ce)
          metal_cache_on = (len_trim(ce) > 0 .and. ce(1:1) /= '0')
        end block
+       ! Non-periodic boundaries need a cache region too (boundary octs live there),
+       ! so force it on when nbound>0 even if RAMSES_METAL_CACHE is unset.
+       if (r%nbound > 0) metal_cache_on = .true.
        g_ngridmax = m%ngridmax              ! real-oct bound
        g_ncell = m%ngridmax                 ! main region only...
        ! main region (ngridmax) + coarse-fine GHOST cache region.  The cache holds one
@@ -161,6 +164,7 @@ contains
        g_npm   = r%npartmax
        call mtl_alloc_buffers(g_ncell, g_npm, g_hash, r%nlevelmax)
        if (metal_cache_on) call mtl_set_cache_region(g_ngridmax)  ! octs >ngridmax = cache
+       call m_metal_set_boundary(pst)            ! upload non-periodic boundary metadata
        ! per-level ckey_max / key_off (1-based-padded: C slot L <-> Fortran L+1)
        call c_f_pointer(mtl_ptr_ckey_max(), m_ckmax, [r%nlevelmax+2])
        call c_f_pointer(mtl_ptr_key_off(),  m_koff,  [r%nlevelmax+2])
@@ -849,12 +853,19 @@ contains
        ! Only the levels with a COARSER neighbour (ilevel>levelmin) have a coarse-fine
        ! boundary -> skip the (expensive) make_cache scan on the coarsest level.
        if (hascoarse) call mtl_hydro_reflux_zero(chead, cn)
-       if (metal_cache_on .and. hascoarse) then
+       ! make_cache materializes coarse-fine ghosts (ilevel>levelmin) AND non-periodic
+       ! DOMAIN boundary octs (any level).  Run it when either is present.
+       if (metal_cache_on .and. (hascoarse .or. r%nbound > 0)) then
           per0=r%periodic(1); per1=r%periodic(2); per2=r%periodic(3)
           ncache = mtl_make_cache(ilevel, head, n, r%nlevelmax, &
                merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), 0.0_c_float, 1)
-          if (ncache > 0) call mtl_hydro_fill_cache(g_ngridmax+1, ncache, &
-               r%interpol_var, r%interpol_type, real(r%smallr,c_double))
+          if (ncache > 0) then
+             call mtl_hydro_fill_cache(g_ngridmax+1, ncache, &
+                  r%interpol_var, r%interpol_type, real(r%smallr,c_double))
+             ! fill non-periodic boundary octs from their interior reference (after the
+             ! coarse-fine fill; no-op if nbound==0).
+             call mtl_hydro_fill_boundary(g_ngridmax+1, ncache, real(r%gamma,c_double))
+          end if
           call mtl_drain()
        end if
        if (prof) call system_clock(tc3)
@@ -1561,6 +1572,39 @@ contains
     call system_clock(c1); gt_dep = gt_dep + dble(c1-c0)/rate
     end associate
   end subroutine m_metal_deposit
+
+  ! Upload the non-periodic boundary metadata (r%bound_* + m%bound_ckey_*) to the
+  ! device once at init.  nbound==0 (the periodic default) leaves the GPU boundary
+  ! path inert.  bound_ckey_{min,max} are integer(4) and contiguous (3,nbound,
+  ! nlevelmax+1) -> passed straight through; the per-region constants (real8) are
+  ! packed to c_float [d,u,v,w,p] per region for the imposed (type-3) BC.
+  subroutine m_metal_set_boundary(pst)
+    use ramses_commons, only: pst_t
+    type(pst_t), target :: pst
+    integer :: ib, nb, per0, per1, per2
+    real(c_float), allocatable :: bconst(:)
+    associate(r=>pst%s%r, m=>pst%s%m)
+    nb = r%nbound
+    per0 = merge(1,0,r%periodic(1)); per1 = merge(1,0,r%periodic(2)); per2 = merge(1,0,r%periodic(3))
+    if (nb <= 0) then
+       call mtl_set_boundary(0, per0, per1, per2, (/0/), (/0/), (/0/), (/0.0_c_float/), &
+            (/0/), (/0/), r%nlevelmax+1)
+       return
+    end if
+    allocate(bconst(5*nb))
+    do ib = 1, nb
+       bconst(5*(ib-1)+1) = real(r%d_bound(ib), c_float)
+       bconst(5*(ib-1)+2) = real(r%u_bound(ib), c_float)
+       bconst(5*(ib-1)+3) = real(r%v_bound(ib), c_float)
+       bconst(5*(ib-1)+4) = real(r%w_bound(ib), c_float)
+       bconst(5*(ib-1)+5) = real(r%p_bound(ib), c_float)
+    end do
+    call mtl_set_boundary(nb, per0, per1, per2, &
+         r%bound_type(1:nb), r%bound_dir(1:nb), r%bound_shift(1:nb), bconst, &
+         m%bound_ckey_min, m%bound_ckey_max, r%nlevelmax+1)
+    deallocate(bconst)
+    end associate
+  end subroutine m_metal_set_boundary
 
   ! Deposit the GAS density into the resident rho accumulators (monopole: each
   ! leaf cell adds its own gas mass uold(rho)*vol_loc into rho_lo/hi at its own

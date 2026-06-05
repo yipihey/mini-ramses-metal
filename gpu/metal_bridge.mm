@@ -58,6 +58,11 @@ struct Buffers {
     // Cache-oct (coarse-fine boundary ghost) compaction scratch: per-oct missing-nbor
     // predicate / inclusive scan, oct-indexed.
     id<MTLBuffer> cache_pre;
+    // Non-periodic boundary metadata (uploaded by mtl_set_boundary) + per-cache-oct
+    // boundary-region marker (0 = coarse-fine ghost, >0 = domain boundary region).
+    id<MTLBuffer> bnd_type, bnd_dir, bnd_shift, bnd_const, bnd_ckmin, bnd_ckmax, cache_ibound;
+    int nbound;          // number of non-periodic boundary regions (0 = all periodic)
+    int per_x, per_y, per_z;   // domain periodicity per dim (1 = periodic)
     int ncell, npartmax, hash_size, nlevelmax;
     int ngridmax;        // real-oct bound; cache (ghost) octs live at (ngridmax, ncell]
     int ifree_cache;     // next free cache slot offset (0-based, beyond ngridmax)
@@ -448,6 +453,15 @@ void mtl_alloc_buffers(int ncell, int npartmax, int hash_size, int nlevelmax) {
     B.mgnorm    = newbuf<float>(2*((size_t)((nc + 255) / 256) + 1));  // MG residual-norm df64 partials
     B.mgnorm_i  = newbuf<float>(2*((size_t)((nc + 255) / 256) + 1));  // iter-1 initial-norm df64 partials
     B.cache_pre = newbuf<int>(nc);                                // cache-oct missing-nbor predicate/scan
+    // Non-periodic boundary metadata (small) + per-cache-oct region marker.
+    { const int MB = 100;                                         // MAXBOUND (amr_parameters.f90)
+      int nlv = nlevelmax + 2;
+      B.bnd_type  = newbuf<int>(MB);   B.bnd_dir   = newbuf<int>(MB);  B.bnd_shift = newbuf<int>(MB);
+      B.bnd_const = newbuf<float>(BND_CONST_N*MB);
+      B.bnd_ckmin = newbuf<int>(3*MB*nlv); B.bnd_ckmax = newbuf<int>(3*MB*nlv);
+      B.cache_ibound = newbuf<int>(nc);
+      memset(B.cache_ibound.contents, 0, nc*sizeof(int)); }
+    B.nbound = 0; B.per_x = 1; B.per_y = 1; B.per_z = 1;          // default: periodic, no boundaries
     // Real-oct bound: cache (ghost) octs occupy (ngridmax, ncell].  When the caller
     // sizes ncell == ngridmax (no cache region) ngridmax == ncell and every nbor is
     // "real" -> the cache-oct boundary path is inert (identical to the pre-cache port).
@@ -616,8 +630,45 @@ extern "C" void mtl_hydro_fill_cache(int head, int num, int interpol_var, int in
     [e setComputePipelineState:pso("hydro_fill_cache")];
     [e setBuffer:B.uold offset:0 atIndex:0]; [e setBuffer:B.grid offset:0 atIndex:1];
     [e setBuffer:B.nbor offset:0 atIndex:2]; [e setBuffer:B.father offset:0 atIndex:3];
-    [e setBytes:&P length:sizeof(P) atIndex:4]; dispatch1d(e, pso("hydro_fill_cache"), num);
+    [e setBytes:&P length:sizeof(P) atIndex:4]; [e setBuffer:B.cache_ibound offset:0 atIndex:5];
+    dispatch1d(e, pso("hydro_fill_cache"), num);
     [e endEncoding]; submit_async(cb);
+}
+
+// Fill non-periodic DOMAIN boundary octs' uold from their interior reference oct
+// (hydro_fill_boundary, types 1/2/3).  Run after mtl_hydro_fill_cache (coarse-fine)
+// so both ghost kinds are populated before the Godunov gather.  No-op if nbound==0.
+extern "C" void mtl_hydro_fill_boundary(int head, int num, double gamma) {
+    if (num <= 0 || B.nbound <= 0) return;
+    HydroBndParams P{}; P.head_idx=head; P.num_octs=num; P.ngridmax=B.ngridmax;
+    P.nbound=B.nbound; P.gamma=(float)gamma;
+    id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:pso("hydro_fill_boundary")];
+    [e setBuffer:B.uold offset:0 atIndex:0]; [e setBuffer:B.father offset:0 atIndex:1];
+    [e setBuffer:B.cache_ibound offset:0 atIndex:2]; [e setBuffer:B.bnd_type offset:0 atIndex:3];
+    [e setBuffer:B.bnd_dir offset:0 atIndex:4]; [e setBuffer:B.bnd_shift offset:0 atIndex:5];
+    [e setBuffer:B.bnd_const offset:0 atIndex:6]; [e setBytes:&P length:sizeof(P) atIndex:7];
+    dispatch1d(e, pso("hydro_fill_boundary"), num*TWOTONDIM);
+    [e endEncoding]; submit_async(cb);
+}
+
+// Upload the non-periodic boundary metadata (mirrors r%bound_* + m%bound_ckey_*).
+// nbound==0 disables the boundary path (all dims periodic).  Arrays are 1-based on
+// the Fortran side; bnd_ck{min,max} use the Fortran column-major layout
+// (d,ib,lev) -> (lev-1)*3*nbound + (ib-1)*3 + (d-1), which dev_get_bound mirrors.
+extern "C" void mtl_set_boundary(int nbound, int per0, int per1, int per2,
+        const int* btype, const int* bdir, const int* bshift,
+        const float* bconst, const int* bckmin, const int* bckmax, int nlevp1) {
+    B.per_x=per0; B.per_y=per1; B.per_z=per2; B.nbound=nbound;
+    if (nbound <= 0) return;
+    memcpy(B.bnd_type.contents,  btype,  nbound*sizeof(int));
+    memcpy(B.bnd_dir.contents,   bdir,   nbound*sizeof(int));
+    memcpy(B.bnd_shift.contents, bshift, nbound*sizeof(int));
+    memcpy(B.bnd_const.contents, bconst, BND_CONST_N*nbound*sizeof(float));
+    size_t nck = (size_t)3*nbound*nlevp1;
+    memcpy(B.bnd_ckmin.contents, bckmin, nck*sizeof(int));
+    memcpy(B.bnd_ckmax.contents, bckmax, nck*sizeof(int));
 }
 
 // grav_hydro on its own (the velocity kick on unew with the rho_old/rho_new factor)
@@ -1183,7 +1234,8 @@ void mtl_conn_build_range(int nbor_head, int nbor_num, int father_head, int fath
         }
         if (nbor_num > 0) {
             ConnParams P{}; P.num_octs=nbor_num; P.hash_size=B.hash_size; P.nlevelmax=nlevelmax; P.head_idx=nbor_head;
-            P.per[0]=1; P.per[1]=1; P.per[2]=1;     // periodic (dmo); box bounds in B.box_*
+            P.per[0]=B.per_x; P.per[1]=B.per_y; P.per[2]=B.per_z;  // periodicity from mtl_set_boundary
+            // (default {1,1,1}; non-periodic dims skip wrap -> off-domain nbor=0 -> boundary oct)
             [e setComputePipelineState:pso("conn_build_nbor")];
             [e setBuffer:B.grid offset:0 atIndex:0]; [e setBuffer:B.nbor offset:0 atIndex:1];
             [e setBuffer:B.hash_key offset:0 atIndex:2]; [e setBuffer:B.hash_val offset:0 atIndex:3];
@@ -1220,10 +1272,10 @@ int mtl_make_cache(int ilevel, int head_idx, int num_octs, int nlevelmax,
         // Hydro only touches FACE+EDGE cube neighbours in the godunov gather (the
         // reflux uses faces only); the CORNER ghosts (all NDIM offsets nonzero) are
         // never read -> skip them.  Gravity passes faces_edges_only=0 (CIC needs all).
-        if (faces_edges_only) {
+        if (faces_edges_only && NDIM > 1) {                 // NDIM==1: the only nbrs are faces -> keep all
             int rem = input_ind - 1, nz = 0;
             for (int d = 0; d < NDIM; ++d) { if ((rem % 3) - 1 != 0) ++nz; rem /= 3; }
-            if (nz == NDIM) continue;                       // corner -> skip
+            if (nz == NDIM) continue;                       // corner (all dims offset) -> skip
         }
         // (1) predicate -> B.cache_pre[oct-1]; (2) inclusive scan over [head,head+num)
         @autoreleasepool {
@@ -1256,7 +1308,7 @@ int mtl_make_cache(int ilevel, int head_idx, int num_octs, int nlevelmax,
             dispatch1d(e, pso("compute_cache_swap_table"), num_octs);
             CacheParams P{}; P.num_octs=count; P.ngridmax=B.ngridmax; P.ifree_cache=B.ifree_cache;
             P.input_ind=input_ind; P.hash_size=B.hash_size; P.nlevelmax=nlevelmax;
-            P.per[0]=per0; P.per[1]=per1; P.per[2]=per2; P.tfrac=tfrac;
+            P.per[0]=per0; P.per[1]=per1; P.per[2]=per2; P.tfrac=tfrac; P.nbound=B.nbound;
             [e setComputePipelineState:pso("make_cache_octs")];
             [e setBuffer:B.grid offset:0 atIndex:0]; [e setBuffer:B.flag1 offset:0 atIndex:1];
             [e setBuffer:B.f offset:0 atIndex:2]; [e setBuffer:B.phi offset:0 atIndex:3];
@@ -1266,6 +1318,9 @@ int mtl_make_cache(int ilevel, int head_idx, int num_octs, int nlevelmax,
             [e setBuffer:B.ckey_max offset:0 atIndex:10]; [e setBuffer:B.key_off offset:0 atIndex:11];
             [e setBuffer:B.box_min offset:0 atIndex:12]; [e setBuffer:B.box_max offset:0 atIndex:13];
             [e setBytes:&P length:sizeof(P) atIndex:14];
+            [e setBuffer:B.bnd_dir offset:0 atIndex:15]; [e setBuffer:B.bnd_shift offset:0 atIndex:16];
+            [e setBuffer:B.bnd_ckmin offset:0 atIndex:17]; [e setBuffer:B.bnd_ckmax offset:0 atIndex:18];
+            [e setBuffer:B.cache_ibound offset:0 atIndex:19];
             dispatch1d(e, pso("make_cache_octs"), count);
             ConnParams CP{}; CP.num_octs=count; CP.head_idx=B.ngridmax+B.ifree_cache+1;
             CP.hash_size=B.hash_size; CP.nlevelmax=nlevelmax;

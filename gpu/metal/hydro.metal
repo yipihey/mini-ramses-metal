@@ -381,9 +381,11 @@ kernel void hydro_fill_cache(device       float*               uold  [[buffer(0)
                              device const int*                 nbor  [[buffer(2)]],
                              device const int*                 father[[buffer(3)]],
                              constant     HydroInterpolParams& P     [[buffer(4)]],
+                             device const int*                 cache_ibound [[buffer(5)]],
                              uint gid [[thread_position_in_grid]]) {
     if (gid >= (uint)P.num_octs) return;
     int cache = P.head_idx + (int)gid;
+    if (cache_ibound[cache-1] > 0) return;        // domain boundary oct: filled by hydro_fill_boundary
     int fa = father[cache-1];
     if (fa <= 0) return;
     // parent cell of the cache oct within its coarse father
@@ -415,5 +417,68 @@ kernel void hydro_fill_cache(device       float*               uold  [[buffer(0)
         uold[UH(c,1,cache)] = u2[c-1].density;    uold[UH(c,2,cache)] = u2[c-1].momentum_x;
         uold[UH(c,3,cache)] = u2[c-1].momentum_y; uold[UH(c,4,cache)] = u2[c-1].momentum_z;
         uold[UH(c,5,cache)] = u2[c-1].energy;
+    }
+}
+
+//============================================================================
+// hydro_fill_boundary — fill non-periodic DOMAIN boundary octs' uold, mirroring
+// amr/boundaries.f90 init_bound_refine (types 1=reflexive, 2=zero-gradient,
+// 3=imposed constant).  A cache oct with cache_ibound>0 copies from its same-level
+// interior reference oct (father[cache]) using the in-oct cell maps below; the cell
+// maps + the velocity reversal for the reflexive case are identical to the CPU.
+// Types 4/5 (condinit/boundana) call Fortran routines that cannot run on the GPU
+// -> the host falls back to the CPU hydro for those (see m_metal_hydro_level).
+//============================================================================
+// CPU ind1_* (reflexive) and ind2_* (zero-gradient) cell maps, [cell-1][dir-1].
+// ind1_left == ind1_right (boundaries.f90).  twotondim<=8; only the first
+// twotondim rows / ndim cols are read.
+constant int BND_IND1[8][3] = {
+    {2,3,5},{1,4,6},{4,1,7},{3,2,8},{6,7,1},{5,8,2},{8,5,3},{7,6,4} };
+constant int BND_IND2_R[8][3] = {
+    {1,1,1},{1,2,2},{3,1,3},{3,2,4},{5,5,1},{5,6,2},{7,5,3},{7,6,4} };
+constant int BND_IND2_L[8][3] = {
+    {2,3,5},{2,4,6},{4,3,7},{4,4,8},{6,7,5},{6,8,6},{8,7,7},{8,8,8} };
+
+kernel void hydro_fill_boundary(device       float*          uold        [[buffer(0)]],
+                                device const int*            father       [[buffer(1)]],
+                                device const int*            cache_ibound [[buffer(2)]],
+                                device const int*            bnd_type     [[buffer(3)]],
+                                device const int*            bnd_dir      [[buffer(4)]],
+                                device const int*            bnd_shift    [[buffer(5)]],
+                                device const float*          bnd_const    [[buffer(6)]],
+                                constant     HydroBndParams& P            [[buffer(7)]],
+                                uint gid [[thread_position_in_grid]]) {
+    if (gid >= (uint)(P.num_octs * TWOTONDIM)) return;
+    int cache = P.head_idx + (int)gid / TWOTONDIM;
+    int cell  = (int)gid % TWOTONDIM + 1;
+    int ib = cache_ibound[cache-1];
+    if (ib <= 0) return;                                    // not a boundary oct
+    int type  = bnd_type[ib-1];
+    int dir   = bnd_dir[ib-1];
+    int shift = bnd_shift[ib-1];
+    int ref   = father[cache-1];
+
+    if (type == 3) {                                        // imposed constant (d,u,v,w,p)
+        float d = bnd_const[BND_CONST_N*(ib-1)+0];
+        float u = bnd_const[BND_CONST_N*(ib-1)+1];
+        float v = bnd_const[BND_CONST_N*(ib-1)+2];
+        float w = bnd_const[BND_CONST_N*(ib-1)+3];
+        float p = bnd_const[BND_CONST_N*(ib-1)+4];
+        float ek = 0.5f*d*(u*u+v*v+w*w);
+        uold[UH(cell,1,cache)] = d;
+        uold[UH(cell,2,cache)] = d*u;
+        uold[UH(cell,3,cache)] = d*v;
+        uold[UH(cell,4,cache)] = d*w;
+        uold[UH(cell,5,cache)] = p/(P.gamma-1.0f) + ek;
+        return;
+    }
+    if (ref <= 0) return;                                   // no interior reference (shouldn't happen)
+    // src cell within the reference oct, per type + shift (CPU ind1/ind2 maps)
+    int src;
+    if (type == 1) src = BND_IND1[cell-1][dir-1];           // reflexive (same map L/R)
+    else           src = (shift == 1) ? BND_IND2_R[cell-1][dir-1] : BND_IND2_L[cell-1][dir-1];
+    for (int ivar = 1; ivar <= NHVAR; ++ivar) {
+        float rev = (type == 1 && ivar == 1+dir) ? -1.0f : 1.0f;
+        uold[UH(cell,ivar,cache)] = uold[UH(src,ivar,ref)] * rev;
     }
 }

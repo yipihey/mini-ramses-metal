@@ -164,6 +164,22 @@ kernel void refine_gather_int(
 // make_initial_phi then CIC-refines it.  This is the faithful coarse-fine boundary
 // (correct father -> correct CIC), replacing the invented inline mg_ghost_cell.
 // nsubgrid=1: subgrid_idx == oct_idx; box arrays indexed [(lev-1)*3 + d].
+// Device get_bound (mirrors amr/boundaries.f90): which boundary region contains
+// ckey at level lev?  Returns 1..nbound or 0 (none).  bnd_ck{min,max} layout matches
+// Fortran m%bound_ckey_{min,max}(d,ib,lev): flat = (lev-1)*3*nbound + (ib-1)*3 + d.
+inline int dev_get_bound(thread const int* ckey, int lev, int nbound,
+                         device const int* bnd_ckmin, device const int* bnd_ckmax) {
+    for (int ib = 1; ib <= nbound; ++ib) {
+        bool in = true;
+        for (int d = 0; d < NDIM; ++d) {
+            int base = (lev-1)*3*nbound + (ib-1)*3 + d;
+            in = in && (ckey[d] >= bnd_ckmin[base]) && (ckey[d] < bnd_ckmax[base]);
+        }
+        if (in) return ib;
+    }
+    return 0;
+}
+
 kernel void make_cache_octs(
     device Oct*         grid       [[buffer(0)]],
     device int*         flag1      [[buffer(1)]],
@@ -180,6 +196,11 @@ kernel void make_cache_octs(
     device const int*   box_min    [[buffer(12)]],
     device const int*   box_max    [[buffer(13)]],
     constant CacheParams& P        [[buffer(14)]],
+    device const int*   bnd_dir    [[buffer(15)]],
+    device const int*   bnd_shift  [[buffer(16)]],
+    device const int*   bnd_ckmin  [[buffer(17)]],
+    device const int*   bnd_ckmax  [[buffer(18)]],
+    device int*         cache_ibound [[buffer(19)]],
     uint gid [[thread_position_in_grid]])
 {
     if ((int)gid >= P.num_octs) return;
@@ -187,22 +208,50 @@ kernel void make_cache_octs(
     int oct     = subgrid;                                  // nsubgrid=1
     int cache   = P.ngridmax + P.ifree_cache + (int)gid + 1;// 1-based cache-oct index
     nbor[(subgrid-1)*SUBGRIDSIZE + (P.input_ind-1)] = cache;// patch the boundary nbor
+    cache_ibound[cache-1] = 0;                              // default: coarse-fine ghost
 
     int rem = P.input_ind - 1, off[3] = {0,0,0};            // decode 3^NDIM-cube offset
     for (int d=0; d<NDIM; ++d) { off[d] = (rem % 3) - 1; rem /= 3; }
     int lev = grid[oct-1].lev;
     int ckey[3] = {0,0,0};
+    bool off_domain = false;
     for (int d=0; d<NDIM; ++d) {
         int c = grid[oct-1].ckey[d] + off[d];
         if (P.per[d]) { int bmn = box_min[(lev-1)*3 + d], bmx = box_max[(lev-1)*3 + d];
                         if (c <  bmn) c = bmx - 1;
                         if (c >= bmx) c = bmn; }
+        else { int bmn = box_min[(lev-1)*3 + d], bmx = box_max[(lev-1)*3 + d];
+               if (c < bmn || c >= bmx) off_domain = true; }
         ckey[d] = c;
     }
     grid[cache-1].lev = lev;
     for (int d=0; d<NDIM; ++d) grid[cache-1].ckey[d] = ckey[d];
     for (int c=1; c<=TWOTONDIM; ++c) { grid[cache-1].refined[c-1] = 0; flag1[IDX2(c, cache)] = 0; }
     grid[cache-1].hkey[0] = hilbert_key(int3(ckey[0], ckey[1], ckey[2]), lev - 1);
+
+    // ---- Non-periodic DOMAIN boundary oct -------------------------------------
+    // ckey is outside the box in a non-periodic dim -> this is a boundary oct, NOT
+    // a coarse-fine ghost.  Find its region + same-level interior reference oct
+    // (ckey shifted by bound_shift along bound_dir, mirroring nbors_utils.f90), mark
+    // it, and skip the coarse-parent interpolation (whose parent hash would miss ->
+    // OOB).  hydro_fill_boundary fills uold from the reference per bound_type.
+    if (off_domain) {
+        int ib = dev_get_bound(ckey, lev, P.nbound, bnd_ckmin, bnd_ckmax);
+        int ref = 0;
+        if (ib > 0) {
+            int rck[3] = {ckey[0], ckey[1], ckey[2]};
+            rck[bnd_dir[ib-1]-1] += bnd_shift[ib-1];
+            long rkey = mg_oct_key(ckey_max[lev], key_off[lev], rck);
+            ref = hash_get(hash_key, hash_val, P.hash_size, rkey);
+        }
+        cache_ibound[cache-1] = ib;
+        father[cache-1] = ref;                              // same-level interior reference
+        for (int c=1; c<=TWOTONDIM; ++c) {                  // zero gravity fields (filled by BC if active)
+            phi[IDX2(c,cache)] = 0.0f; phi_old[IDX2(c,cache)] = 0.0f;
+            f[IDX3(c,1,cache)] = 0.0f; f[IDX3(c,2,cache)] = 0.0f; f[IDX3(c,3,cache)] = 0.0f;
+        }
+        return;
+    }
 
     int pl = lev - 1;                                       // parent (coarse) level
     int pck[3] = {0,0,0};

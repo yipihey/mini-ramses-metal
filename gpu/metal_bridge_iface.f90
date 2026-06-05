@@ -306,6 +306,16 @@ module metal_bridge_iface
      function mtl_epot(head, num, fp_scale) bind(C, name="mtl_epot") result(s)
        import :: c_int, c_double; integer(c_int), value :: head, num; real(c_double), value :: fp_scale; real(c_double) :: s
      end function mtl_epot
+     subroutine mtl_hydro_fill_boundary(head, num, gamma) bind(C, name="mtl_hydro_fill_boundary")
+       import :: c_int, c_double; integer(c_int), value :: head, num; real(c_double), value :: gamma
+     end subroutine mtl_hydro_fill_boundary
+     subroutine mtl_set_boundary(nbound, per0, per1, per2, btype, bdir, bshift, &
+          bconst, bckmin, bckmax, nlevp1) bind(C, name="mtl_set_boundary")
+       import :: c_int, c_float
+       integer(c_int), value :: nbound, per0, per1, per2, nlevp1
+       integer(c_int) :: btype(*), bdir(*), bshift(*), bckmin(*), bckmax(*)
+       real(c_float)  :: bconst(*)
+     end subroutine mtl_set_boundary
      function mtl_ptr_uold()      bind(C, name="mtl_ptr_uold")      result(p); import::c_ptr; type(c_ptr)::p; end function
      function mtl_ptr_unew()      bind(C, name="mtl_ptr_unew")      result(p); import::c_ptr; type(c_ptr)::p; end function
 
