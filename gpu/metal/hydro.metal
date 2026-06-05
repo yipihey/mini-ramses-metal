@@ -366,3 +366,54 @@ kernel void hydro_flag(device       int*             flag1 [[buffer(0)]],
             flag1[IDX2(cell, oct)] = 1;
     }
 }
+
+//----------------------------------------------------------------------------
+// Fill a coarse-fine CACHE (ghost) oct's uold by interpol_hydro from its coarse
+// parent cell + that cell's 2*NDIM coarse face neighbours (interpol_hydro.f90,
+// the godfine1:534 ghost).  One thread per cache oct.  After mtl_make_cache has
+// created the cache octs (correct father/ckey + patched the fine octs' nbor),
+// this gives them the SAME ghost the CPU Godunov reads, so the coarse-fine flux
+// (and hence the reflux) matches.  Coarse neighbour gather: FLAG_hhh/FLAG_iii +
+// mg_nbor on the COARSE parent oct (== get_twondim_nbor_parent_cell).
+//----------------------------------------------------------------------------
+kernel void hydro_fill_cache(device       float*               uold  [[buffer(0)]],
+                             device const Oct*                 grid  [[buffer(1)]],
+                             device const int*                 nbor  [[buffer(2)]],
+                             device const int*                 father[[buffer(3)]],
+                             constant     HydroInterpolParams& P     [[buffer(4)]],
+                             uint gid [[thread_position_in_grid]]) {
+    if (gid >= (uint)P.num_octs) return;
+    int cache = P.head_idx + (int)gid;
+    int fa = father[cache-1];
+    if (fa <= 0) return;
+    // parent cell of the cache oct within its coarse father
+    int cellp = 1 + (grid[cache-1].ckey[0] - 2*grid[fa-1].ckey[0]);
+#if NDIM >= 2
+    cellp += 2 * (grid[cache-1].ckey[1] - 2*grid[fa-1].ckey[1]);
+#endif
+#if NDIM >= 3
+    cellp += 4 * (grid[cache-1].ckey[2] - 2*grid[fa-1].ckey[2]);
+#endif
+    // gather the coarse stencil: u1[0]=parent cell, u1[2i-1]=- nbr, u1[2i]=+ nbr
+    HConserved u1[1 + 2*NDIM];
+    u1[0] = (HConserved){ uold[UH(cellp,1,fa)], uold[UH(cellp,2,fa)], uold[UH(cellp,3,fa)],
+                          uold[UH(cellp,4,fa)], uold[UH(cellp,5,fa)] };
+    for (int dir = 1; dir <= 2*NDIM; ++dir) {
+        int idim = (dir-1)/2;
+        int off  = FLAG_iii[dir-1][cellp-1];
+        int nc   = FLAG_hhh[dir-1][cellp-1];
+        int in=0,jn=0,kn=0;
+        if      (idim==0) in=off; else if (idim==1) jn=off; else kn=off;
+        int no = mg_nbor(nbor, fa, in, jn, kn);
+        if (no <= 0) no = fa;                         // domain edge fallback (periodic resolves)
+        u1[dir] = (HConserved){ uold[UH(nc,1,no)], uold[UH(nc,2,no)], uold[UH(nc,3,no)],
+                                uold[UH(nc,4,no)], uold[UH(nc,5,no)] };
+    }
+    HConserved u2[TWOTONDIM];
+    interpol_hydro_oct(u1, P.interpol_var, P.interpol_type, P.smallr, u2);
+    for (int c = 1; c <= TWOTONDIM; ++c) {
+        uold[UH(c,1,cache)] = u2[c-1].density;    uold[UH(c,2,cache)] = u2[c-1].momentum_x;
+        uold[UH(c,3,cache)] = u2[c-1].momentum_y; uold[UH(c,4,cache)] = u2[c-1].momentum_z;
+        uold[UH(c,5,cache)] = u2[c-1].energy;
+    }
+}

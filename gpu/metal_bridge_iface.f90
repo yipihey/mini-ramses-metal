@@ -316,6 +316,12 @@ module metal_bridge_iface
        integer(c_int), value :: ilevel, head, num, levelmin, levelmax, slope, riemann
        real(c_double), value :: gamma, dt, dx, courant, fp_scale
      end subroutine mtl_hydro_godunov_only
+     subroutine mtl_hydro_fill_cache(head, num, interpol_var, interpol_type, smallr) &
+          bind(C, name="mtl_hydro_fill_cache")
+       import :: c_int, c_double
+       integer(c_int), value :: head, num, interpol_var, interpol_type
+       real(c_double), value :: smallr
+     end subroutine mtl_hydro_fill_cache
      subroutine mtl_hydro_reflux_zero(head, num) bind(C, name="mtl_hydro_reflux_zero")
        import :: c_int; integer(c_int), value :: head, num
      end subroutine mtl_hydro_reflux_zero

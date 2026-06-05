@@ -569,6 +569,22 @@ extern "C" void mtl_hydro_godunov_only(int ilevel, int head, int num, int levelm
     [e endEncoding]; submit_async(cb);
 }
 
+// Fill cache (coarse-fine ghost) octs' uold by interpol_hydro from their coarse
+// parents -- run after mtl_make_cache so the fine Godunov reads the SAME ghost the
+// CPU does (and the reflux matches).  head = ngridmax+1, num = #cache octs.
+extern "C" void mtl_hydro_fill_cache(int head, int num, int interpol_var, int interpol_type, double smallr) {
+    if (num <= 0) return;
+    HydroInterpolParams P{}; P.smallr=(float)smallr; P.interpol_var=interpol_var;
+    P.interpol_type=interpol_type; P.head_idx=head; P.num_octs=num; P.ngridmax=B.ngridmax;
+    id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:pso("hydro_fill_cache")];
+    [e setBuffer:B.uold offset:0 atIndex:0]; [e setBuffer:B.grid offset:0 atIndex:1];
+    [e setBuffer:B.nbor offset:0 atIndex:2]; [e setBuffer:B.father offset:0 atIndex:3];
+    [e setBytes:&P length:sizeof(P) atIndex:4]; dispatch1d(e, pso("hydro_fill_cache"), num);
+    [e endEncoding]; submit_async(cb);
+}
+
 // Zero the coarse-fine reflux fixed-point accumulators for a level's octs before a
 // finer level scatters into them.  head/num = the COARSE-level octs being protected.
 extern "C" void mtl_hydro_reflux_zero(int head, int num) {

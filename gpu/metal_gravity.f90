@@ -665,10 +665,12 @@ contains
     use amr_parameters, only: ndim, twotondim, dp
     type(pst_t), target :: pst
     integer, intent(in) :: ilevel
-    integer :: head, n, chead, cn, num_octs, o, c, ivar, base, nf
+    integer :: head, n, chead, cn, num_octs, o, c, ivar, base, nf, ncache
     real(dp) :: dx, dt, fp_scale
+    logical :: per0, per1, per2
     real(c_float), pointer :: d_uold(:), d_unew(:), d_f(:)
     associate(r=>pst%s%r, m=>pst%s%m, g=>pst%s%g)
+    if (metal_cache_on) then; g_synced_ifree = -1; g_nbor_synced = -1; end if
     call metal_sync_mesh(pst)
     head = m%head(ilevel);     n  = m%noct(ilevel)
     chead= m%head(ilevel-1);   cn = m%noct(ilevel-1)
@@ -693,6 +695,17 @@ contains
           end do
        end do
        call mtl_drain()
+       ! Materialize the coarse-fine boundary as CACHE octs (nbor>ngridmax) and fill
+       ! their uold via interpol_hydro, so the fine Godunov's reflux scatter fires
+       ! with the SAME ghost the CPU uses (godfine1:534).  Needs RAMSES_METAL_CACHE=1.
+       if (metal_cache_on) then
+          per0=r%periodic(1); per1=r%periodic(2); per2=r%periodic(3)
+          ncache = mtl_make_cache(ilevel, head, n, r%nlevelmax, &
+               merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), 0.0_c_float)
+          if (ncache > 0) call mtl_hydro_fill_cache(g_ngridmax+1, ncache, &
+               r%interpol_var, r%interpol_type, real(r%smallr,c_double))
+          call mtl_drain()
+       end if
        call mtl_hydro_reflux_zero(chead, cn)
        call mtl_hydro_godunov_only(ilevel, head, n, r%levelmin, r%nlevelmax, &
             real(r%gamma,c_double), real(dt,c_double), real(dx,c_double), &

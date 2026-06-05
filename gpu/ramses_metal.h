@@ -306,6 +306,16 @@ typedef struct {
     int   num_octs;
 } HydroFlagParams;
 
+// hydro cache-oct uold fill (interpol_hydro coarse-fine ghost prolongation).
+typedef struct {
+    float smallr;
+    int   interpol_var;    // 0=conserved (rho,rhou,E), 1=internal-energy form
+    int   interpol_type;   // 0=inject, 1=minmod
+    int   head_idx;        // 1-based first CACHE oct (ngridmax+1)
+    int   num_octs;        // number of cache octs
+    int   ngridmax;
+} HydroInterpolParams;
+
 // cmpdt reduction buffer (atomic_uint[9]): [0]=dt min (FLT_MAX-bits init),
 // [1,2]=mass lo/hi, [3,4]=ekin, [5,6]=eint, [7,8]=emag (all two-word fixed-point
 // at HydroParams.fp_scale).  Host inits red[0]=0x7F7FFFFF, rest 0.

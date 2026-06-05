@@ -70,15 +70,11 @@ for iv in range(1, 6):
 
 if refluxmag < 1e-12:
     print("INCONCLUSIVE: CPU reflux ~0 (no coarse-fine flux this step / dt=0)"); sys.exit(2)
-TOL = 2e-4
+TOL = 2e-4   # fp32 vs fp64 floor for the coarse-fine reflux correction
 if worst < TOL:
-    print(f"PASS (worst L2 rel = {worst:.3e}, reflux mag {refluxmag:.2e})"); sys.exit(0)
-# Metal coarse unew ~= uold (diff == full reflux) -> the scatter never fired.
-print(f"KNOWN GAP (worst L2 rel = {worst:.3e}, reflux mag {refluxmag:.2e}): the CPU")
-print("applies a non-trivial coarse-fine reflux but the Metal path does not yet --")
-print("the fine octs need their coarser neighbours materialized as CACHE octs")
-print("(nbor>ngridmax) so hydro_godunov's reflux scatter fires. That needs the")
-print("cache-oct subsystem (metal_cache_on + mtl_make_cache + a hydro cache-oct")
-print("uold interpolation), the next integration step. The reflux KERNEL itself is")
-print("unit-tested (test_hydro scenario C) and bridge-tested with a synthetic cache oct.")
-sys.exit(0)   # diagnostic, not a suite gate
+    print(f"PASS (worst L2 rel = {worst:.3e}, reflux mag {refluxmag:.2e}, tol {TOL:.0e})"); sys.exit(0)
+print(f"FAIL (worst L2 rel = {worst:.3e}, reflux mag {refluxmag:.2e}, tol {TOL:.0e})")
+print("NOTE: needs RAMSES_METAL_CACHE=1 so the fine octs' coarse neighbours are")
+print("materialized as cache octs (nbor>ngridmax) and filled by interpol_hydro --")
+print("else the Metal reflux scatter never fires and diff == the full reflux.")
+sys.exit(1)
