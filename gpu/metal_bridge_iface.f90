@@ -325,6 +325,11 @@ module metal_bridge_iface
      subroutine mtl_hydro_reflux_zero(head, num) bind(C, name="mtl_hydro_reflux_zero")
        import :: c_int; integer(c_int), value :: head, num
      end subroutine mtl_hydro_reflux_zero
+     subroutine mtl_hydro_grav(head, num, gamma, dt) bind(C, name="mtl_hydro_grav")
+       import :: c_int, c_double; integer(c_int), value :: head, num; real(c_double), value :: gamma, dt
+     end subroutine mtl_hydro_grav
+     function mtl_ptr_reflux_lo() bind(C, name="mtl_ptr_reflux_lo") result(p); import::c_ptr; type(c_ptr)::p; end function
+     function mtl_ptr_reflux_hi() bind(C, name="mtl_ptr_reflux_hi") result(p); import::c_ptr; type(c_ptr)::p; end function
      subroutine mtl_hydro_reflux_finalize(head, num, fp_scale) bind(C, name="mtl_hydro_reflux_finalize")
        import :: c_int, c_double; integer(c_int), value :: head, num; real(c_double), value :: fp_scale
      end subroutine mtl_hydro_reflux_finalize

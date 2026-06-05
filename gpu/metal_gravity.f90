@@ -737,6 +737,111 @@ contains
     end if
     end associate
   end subroutine m_metal_godunov_reflux
+
+  !====================================================================
+  ! PRODUCTION per-level hydro on the GPU for the amr_step subcycle (granular, so
+  ! it composes with the CPU set_unew-before-recursion + finer-level reflux).  On
+  ! entry host m%unew(ilevel) = uold (CPU set_unew) PLUS any reflux already added
+  ! by finer levels.  This uploads host uold (whole grid, for the gather) + host
+  ! unew(ilevel), materializes+fills the coarse-fine CACHE octs (so refined-boundary
+  ! fluxes use the interpol_hydro ghost AND the reflux scatter fires), runs
+  ! godunov_only (unew += du, scatter reflux -> ilevel-1) + grav_hydro (resident
+  ! B.f), downloads unew(ilevel), then finalizes the reflux into host unew(ilevel-1)
+  ! (which the coarse godunov uploads later).  Uses RAMSES_METAL_CACHE for the cache.
+  !====================================================================
+  subroutine m_metal_hydro_level(pst, ilevel)
+    use ramses_commons, only: pst_t
+    use amr_parameters, only: ndim, twotondim, dp
+    type(pst_t), target :: pst
+    integer, intent(in) :: ilevel
+    integer :: head, n, chead, cn, num_octs, o, c, ivar, base, ncache
+    real(dp) :: dx, dt, fp_scale
+    logical :: per0, per1, per2, hascoarse
+    real(c_float), pointer :: d_uold(:), d_unew(:)
+    associate(r=>pst%s%r, m=>pst%s%m, g=>pst%s%g)
+    if (metal_cache_on) then; g_synced_ifree = -1; g_nbor_synced = -1; end if
+    call metal_sync_mesh(pst)
+    head = m%head(ilevel); n = m%noct(ilevel)
+    if (n > 0) then
+       num_octs = m%ifree - 1
+       fp_scale = 2.0_dp**20
+       dx = r%boxlen / 2.0_dp**ilevel
+       dt = g%dtnew(ilevel)
+       hascoarse = (ilevel > r%levelmin)
+       chead = m%head(ilevel-1); cn = m%noct(ilevel-1)
+       call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*5])
+       call c_f_pointer(mtl_ptr_unew(), d_unew, [g_ncell*twotondim*5])
+       ! upload host uold (whole grid, for the gather) + host unew(ilevel)
+       ! (carries the reflux already accumulated from finer levels).
+       do o = 1, num_octs
+          base = (o-1)*5*twotondim
+          do ivar = 1, 5
+             do c = 1, twotondim
+                d_uold(base + (ivar-1)*twotondim + c) = real(m%uold(c, ivar, o), c_float)
+             end do
+          end do
+       end do
+       do o = head, head + n - 1
+          base = (o-1)*5*twotondim
+          do ivar = 1, 5
+             do c = 1, twotondim
+                d_unew(base + (ivar-1)*twotondim + c) = real(m%unew(c, ivar, o), c_float)
+             end do
+          end do
+       end do
+       call mtl_drain()
+       ! coarse-fine: zero the coarse reflux accumulator, materialize+fill cache octs.
+       if (hascoarse) call mtl_hydro_reflux_zero(chead, cn)
+       if (metal_cache_on) then
+          per0=r%periodic(1); per1=r%periodic(2); per2=r%periodic(3)
+          ncache = mtl_make_cache(ilevel, head, n, r%nlevelmax, &
+               merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), 0.0_c_float)
+          if (ncache > 0) call mtl_hydro_fill_cache(g_ngridmax+1, ncache, &
+               r%interpol_var, r%interpol_type, real(r%smallr,c_double))
+          call mtl_drain()
+       end if
+       ! godunov (unew += du, reflux scatter to ilevel-1) + gravity kick.
+       call mtl_hydro_godunov_only(ilevel, head, n, r%levelmin, r%nlevelmax, &
+            real(r%gamma,c_double), real(dt,c_double), real(dx,c_double), &
+            r%slope_type, r%riemann, real(r%courant_factor,c_double), real(fp_scale,c_double))
+       call mtl_hydro_grav(head, n, real(r%gamma,c_double), real(dt,c_double))
+       call mtl_drain()
+       ! download this level's unew -> host
+       do o = head, head + n - 1
+          base = (o-1)*5*twotondim
+          do ivar = 1, 5
+             do c = 1, twotondim
+                m%unew(c, ivar, o) = real(d_unew(base + (ivar-1)*twotondim + c), dp)
+             end do
+          end do
+       end do
+       ! finalize the coarse-fine reflux into host unew(ilevel-1): upload host coarse
+       ! unew -> device, add the reflux accumulator, download (accumulates on host
+       ! across this level's subcycles; the coarse godunov uploads it later).
+       if (hascoarse .and. cn > 0) then
+          do o = chead, chead + cn - 1
+             base = (o-1)*5*twotondim
+             do ivar = 1, 5
+                do c = 1, twotondim
+                   d_unew(base + (ivar-1)*twotondim + c) = real(m%unew(c, ivar, o), c_float)
+                end do
+             end do
+          end do
+          call mtl_drain()
+          call mtl_hydro_reflux_finalize(chead, cn, real(fp_scale,c_double))
+          call mtl_drain()
+          do o = chead, chead + cn - 1
+             base = (o-1)*5*twotondim
+             do ivar = 1, 5
+                do c = 1, twotondim
+                   m%unew(c, ivar, o) = real(d_unew(base + (ivar-1)*twotondim + c), dp)
+                end do
+             end do
+          end do
+       end if
+    end if
+    end associate
+  end subroutine m_metal_hydro_level
 #endif
 
   !====================================================================

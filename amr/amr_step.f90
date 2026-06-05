@@ -44,7 +44,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
 #ifdef _METAL
   use metal_gravity_module, only: m_metal_poisson, metal_enabled, m_metal_grid_to_host, m_metal_part_to_host, metal_hydro_on
 #ifdef HYDRO
-  use metal_gravity_module, only: m_metal_godunov_fine
+  use metal_gravity_module, only: m_metal_hydro_level
 #endif
 #endif
 
@@ -282,9 +282,9 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   !-----------------------
   ! Set unew equal to uold
   !-----------------------
-  if(r%hydro.and..not.r%static_gas.and..not.gpu_hydro)then
+  if(r%hydro.and..not.r%static_gas)then
      call m_timer('hydro - set unew','start')
-     call r_set_unew(pst,ilevel,1)   ! GPU path: m_metal_godunov_fine does set_unew itself
+     call r_set_unew(pst,ilevel,1)   ! host unew=uold (GPU path uploads this, +finer reflux)
   endif
 
   !---------------------------
@@ -381,12 +381,17 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
      if(.not.r%static_gas)then
 #ifdef _METAL
       if(gpu_hydro)then
-        ! GPU godunov bundle: set_unew -> hydro_godunov (+ gravity predictor from the
-        ! resident B.f) -> grav_hydro -> set_uold, all on the device.  Correct for a
-        ! UNIFORM level (no coarse-fine boundaries); source_hydro is a no-op here
-        ! (nvar=5, no entropy/nener/sgs).  See metal_gravity_module%metal_hydro_on.
+        ! GPU hydro: godunov_only (unew += du, + gravity predictor from the resident
+        ! B.f, + coarse-fine reflux scatter via cache octs) and grav_hydro, on the
+        ! device.  Host set_unew (above, pre-recursion) + finer-level reflux are
+        ! already in host unew; this uploads them, runs, and downloads unew.  source
+        ! is a no-op here (nvar=5).  Then the CPU set_uold commits unew->uold.
         call m_timer('hydro - godunov','start')
-        call m_metal_godunov_fine(pst,ilevel,.false.)
+        call m_metal_hydro_level(pst,ilevel)
+        call m_timer('hydro - source','start')
+        call r_source_hydro_fine(pst,ilevel,1)
+        call m_timer('hydro - set uold','start')
+        call r_set_uold(pst,ilevel,1)
       else
 #endif
         ! Hyperbolic solver

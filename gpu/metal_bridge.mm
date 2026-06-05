@@ -585,6 +585,24 @@ extern "C" void mtl_hydro_fill_cache(int head, int num, int interpol_var, int in
     [e endEncoding]; submit_async(cb);
 }
 
+// grav_hydro on its own (the velocity kick on unew with the rho_old/rho_new factor)
+// -- the granular AMR production path runs godunov_only then this, vs the bundled
+// mtl_godunov_fine.  Uses the resident B.f gravity force.
+extern "C" void mtl_hydro_grav(int head, int num, double gamma, double dt) {
+    if (num <= 0) return;
+    HydroParams P = hydro_params(0, head, num, gamma, dt, 1, 0, 0, 0, 0, 0, 0);
+    id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:pso("grav_hydro")];
+    [e setBuffer:B.uold offset:0 atIndex:0]; [e setBuffer:B.unew offset:0 atIndex:1];
+    [e setBuffer:B.f offset:0 atIndex:2];    [e setBytes:&P length:sizeof(P) atIndex:3];
+    dispatch1d(e, pso("grav_hydro"), num*TWOTONDIM);
+    [e endEncoding]; submit_async(cb);
+}
+
+void* mtl_ptr_reflux_lo() { return B.reflux_lo.contents; }
+void* mtl_ptr_reflux_hi() { return B.reflux_hi.contents; }
+
 // Zero the coarse-fine reflux fixed-point accumulators for a level's octs before a
 // finer level scatters into them.  head/num = the COARSE-level octs being protected.
 extern "C" void mtl_hydro_reflux_zero(int head, int num) {
