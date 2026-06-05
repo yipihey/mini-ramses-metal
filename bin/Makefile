@@ -53,13 +53,16 @@ NION := $(NION)+$(N_SULFUR_IONS)+$(N_IRON_IONS)
 NION := $(NION)+$(N_HYDROGEN_IONS)+$(N_H2)+$(N_HELIUM_IONS)
 endif
 NVAR := $(NHYDRO)+$(NENER)+$(NPSCAL)+$(NMETAL)+$(NION)
+DEFINES = -DNDIM=$(NDIM) -DNVAR=$(NVAR)
 #############################################################################
+# Collect git version and Makefile options
 GITBRANCH = $(shell git rev-parse --abbrev-ref HEAD)
 GITHASH = $(shell git log --pretty=format:'%H' -n 1)
 GITREPO = $(shell git config --get remote.origin.url)
 BUILDDATE = $(shell date +"%D-%T")
 BUILDCOMMAND = ${MAKE} ${MAKEFLAGS}
-DEFINES = -DNDIM=$(NDIM) -DNVAR=$(NVAR)
+#############################################################################
+# RTZ options
 ifeq ($(RTZ),1)
 DEFINES += -DN_HYDROGEN_IONS=$(N_HYDROGEN_IONS)
 DEFINES += -DN_HELIUM_IONS=$(N_HELIUM_IONS)
@@ -73,6 +76,8 @@ DEFINES += -DN_SULFUR_IONS=$(N_SULFUR_IONS)
 DEFINES += -DN_IRON_IONS=$(N_IRON_IONS)
 DEFINES += -DN_H2=$(N_H2)
 endif
+#############################################################################
+# Main compilation options
 ifneq ($(NION),0)
    DEFINES += -DNION=$(NION)
 endif
@@ -172,8 +177,8 @@ ifeq ($(COMPILER),NVHPC)
    ifneq ($(CUB_SCAN_REFINE),0)
       DEFINES += -DCUB_SCAN_REFINE
    endif
-   FFLAGS = -cpp -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx $(DEFINES)
-   LIBS = -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx -lstdc++
+   FFLAGS = -cpp -gpu=$(CUDA_ARCH),fastmath -cuda -cudalib=nvtx $(DEFINES)
+   LIBS = -gpu=$(CUDA_ARCH),fastmath -cuda -cudalib=nvtx -lstdc++
    GPU_PATH = ../gpu
    ifeq ($(CUDA_PROFILE),1)
       FFLAGS += -gpu=lineinfo,ptxinfo -Minstrument -traceback -gopt
