@@ -42,7 +42,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   use gpu_manager, only: r_transfer_grid_host
 #endif
 #ifdef _METAL
-  use metal_gravity_module, only: m_metal_poisson, m_metal_epot, metal_enabled, m_metal_grid_to_host, m_metal_part_to_host, metal_hydro_on, metal_inited, metal_hydro_resident
+  use metal_gravity_module, only: m_metal_poisson, m_metal_epot, m_metal_force_to_host, metal_enabled, m_metal_grid_to_host, m_metal_part_to_host, metal_hydro_on, metal_inited, metal_hydro_resident
 #ifdef HYDRO
   use metal_gravity_module, only: m_metal_hydro_level, m_metal_hydro_setunew, &
        m_metal_hydro_resident, m_metal_hydro_setuold, m_metal_hydro_upload_dev, m_metal_uold_to_host
@@ -258,6 +258,11 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
      ! (else epot_tot stays 0 -> spurious cosmo econs).
      if(metal_enabled)then
         call m_metal_epot(pst,ilevel)
+        ! Sync the resident GPU force B.f -> host m%f so the host gas-gravity
+        ! leapfrog (gravity_hydro_fine + synchro_hydro_fine below) feels the real,
+        ! current force.  Without this m%f is stale -> the gas misses the leapfrog
+        ! and the device single-kick over-energizes refined levels.
+        if(r%hydro) call m_metal_force_to_host(pst)
      else
         call m_force_fine(pst,ilevel,icount)
      end if
@@ -416,6 +421,13 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
            call m_metal_hydro_resident(pst,ilevel)
         else
            call m_metal_hydro_level(pst,ilevel)
+        endif
+        ! Gas gravity source on the HOST leapfrog (m_metal_hydro_level no longer
+        ! applies the device kick): +0.5dt new force to unew, matching the CPU
+        ! r_godunov_fine -> r_gravity_hydro_fine sequence.  m%f was synced from B.f.
+        if(r%poisson.or.maxval(abs(r%constant_gravity))>0)then
+           call m_timer('hydro - gravity','start')
+           call r_gravity_hydro_fine(pst,ilevel,1)
         endif
         call m_timer('hydro - source','start')
         call r_source_hydro_fine(pst,ilevel,1)

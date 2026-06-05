@@ -869,11 +869,16 @@ contains
           call mtl_drain()
        end if
        if (prof) call system_clock(tc3)
-       ! godunov (unew += du, reflux scatter to ilevel-1) + gravity kick.
+       ! godunov (unew += du, reflux scatter to ilevel-1).  The gravity PREDICTOR
+       ! (half-dt, in the trace) stays on-device, but the explicit gravity SOURCE is
+       ! NOT applied here: mtl_hydro_grav was a single full-dt non-time-symmetric kick
+       ! that injected spurious ~0.5*rho*(g*dt)^2 energy, negligible at levelmin but
+       ! growing with g at refined levels -> over-energization. Instead the host
+       ! applies the CPU leapfrog (gravity_hydro_fine +0.5dt + synchro_hydro_fine
+       ! ±0.5dt, in amr_step) reading m%f synced from B.f -> parity with the CPU.
        call mtl_hydro_godunov_only(ilevel, head, n, r%levelmin, r%nlevelmax, &
             real(r%gamma,c_double), real(dt,c_double), real(dx,c_double), &
             r%slope_type, r%riemann, real(r%courant_factor,c_double), real(fp_scale,c_double))
-       call mtl_hydro_grav(head, n, real(r%gamma,c_double), real(dt,c_double))
        call mtl_drain()
        if (prof) call system_clock(tc4)
        ! download this level's unew -> host
@@ -1031,6 +1036,29 @@ contains
        end do
     end do
   end subroutine m_metal_uold_to_host
+
+  ! Download the resident GPU force B.f -> host m%f for all real octs.  Needed by
+  ! the host gas-gravity leapfrog (gravity_hydro_fine + synchro_hydro_fine) on the
+  ! metal path: those read m%f, which is otherwise stale (the force lives in B.f).
+  ! Called each step after the Poisson solve so the gas feels the current gravity.
+  subroutine m_metal_force_to_host(pst)
+    use ramses_commons, only: pst_t
+    use amr_parameters, only: ndim, twotondim, dp
+    type(pst_t), target :: pst
+    integer :: num_octs, o, c, ddim
+    real(c_float), pointer :: d_f(:)
+    if (.not. metal_enabled) return
+    call mtl_drain()
+    num_octs = pst%s%m%ifree - 1
+    call c_f_pointer(mtl_ptr_f(), d_f, [g_ncell*twotondim*3])
+    do o = 1, num_octs
+       do c = 1, twotondim
+          do ddim = 1, ndim
+             pst%s%m%f(c, ddim, o) = real(d_f(((o-1)*3 + (ddim-1))*twotondim + c), dp)
+          end do
+       end do
+    end do
+  end subroutine m_metal_force_to_host
 #endif
 
   !====================================================================
