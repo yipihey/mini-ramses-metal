@@ -21,6 +21,7 @@ module metal_gravity_module
 
   logical :: metal_enabled = .false.     ! set true by adaptive_loop after mtl_init (needs pic; gravity path)
   logical :: metal_inited  = .false.     ! mtl_init succeeded -> GPU hydro usable even without particles
+  integer :: g_hydro_prof = 0            ! one-shot per-phase timing of m_metal_hydro_level (first 3 calls)
   ! GPU refinement flagging (flag.metal + m_metal_flag), DEFAULT ON.  Connectivity
   ! is fast + verified correct (GPU parallel atomicCAS hash rebuild, cross-checked
   ! 0 lookup failures; per-level nbor/father).  m_metal_flag forces a full grid+
@@ -759,9 +760,16 @@ contains
     real(dp) :: dx, dt, fp_scale
     logical :: per0, per1, per2, hascoarse
     real(c_float), pointer :: d_uold(:), d_unew(:), d_f(:)
+    integer(8) :: tc0,tc1,tc2,tc3,tc4,tc5,trate
+    logical :: prof
+    character(len=8) :: pe
     associate(r=>pst%s%r, m=>pst%s%m, g=>pst%s%g)
+    call get_environment_variable('RAMSES_HYDRO_PROF', pe)
+    prof = (len_trim(pe) > 0 .and. pe(1:1) /= '0' .and. g_hydro_prof < 6)
+    if (prof) call system_clock(tc0, trate)
     if (metal_cache_on) then; g_synced_ifree = -1; g_nbor_synced = -1; end if
     call metal_sync_mesh(pst)
+    if (prof) call system_clock(tc1)
     head = m%head(ilevel); n = m%noct(ilevel)
     if (n > 0) then
        num_octs = m%ifree - 1
@@ -798,9 +806,12 @@ contains
           end do
        end do
        call mtl_drain()
+       if (prof) call system_clock(tc2)
        ! coarse-fine: zero the coarse reflux accumulator, materialize+fill cache octs.
+       ! Only the levels with a COARSER neighbour (ilevel>levelmin) have a coarse-fine
+       ! boundary -> skip the (expensive) make_cache scan on the coarsest level.
        if (hascoarse) call mtl_hydro_reflux_zero(chead, cn)
-       if (metal_cache_on) then
+       if (metal_cache_on .and. hascoarse) then
           per0=r%periodic(1); per1=r%periodic(2); per2=r%periodic(3)
           ncache = mtl_make_cache(ilevel, head, n, r%nlevelmax, &
                merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), 0.0_c_float)
@@ -808,12 +819,14 @@ contains
                r%interpol_var, r%interpol_type, real(r%smallr,c_double))
           call mtl_drain()
        end if
+       if (prof) call system_clock(tc3)
        ! godunov (unew += du, reflux scatter to ilevel-1) + gravity kick.
        call mtl_hydro_godunov_only(ilevel, head, n, r%levelmin, r%nlevelmax, &
             real(r%gamma,c_double), real(dt,c_double), real(dx,c_double), &
             r%slope_type, r%riemann, real(r%courant_factor,c_double), real(fp_scale,c_double))
        call mtl_hydro_grav(head, n, real(r%gamma,c_double), real(dt,c_double))
        call mtl_drain()
+       if (prof) call system_clock(tc4)
        ! download this level's unew -> host
        do o = head, head + n - 1
           base = (o-1)*5*twotondim
@@ -846,6 +859,13 @@ contains
                 end do
              end do
           end do
+       end if
+       if (prof) then
+          call system_clock(tc5)
+          write(*,'(" [hydro-prof L",I2," n=",I7,"] sync=",F7.4," up=",F7.4," cache=",F7.4," kern=",F7.4," dn+rfx=",F7.4," tot=",F7.4)') &
+               ilevel, n, dble(tc1-tc0)/trate, dble(tc2-tc1)/trate, dble(tc3-tc2)/trate, &
+               dble(tc4-tc3)/trate, dble(tc5-tc4)/trate, dble(tc5-tc0)/trate
+          g_hydro_prof = g_hydro_prof + 1
        end if
     end if
     end associate
