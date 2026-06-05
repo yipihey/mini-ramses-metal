@@ -38,6 +38,8 @@ NPRE = 8
 PATCH =
 PAPER = 0
 CUB_SORT_PART = 1
+# Warp-cooperative fine-force gather in the GPU particle kick (default OFF).
+KICK_COOP_GATHER = 0
 DEBUG = 0
 HDF5 = 0
 MPIF90 = mpif90
@@ -113,6 +115,9 @@ ifeq ($(PAPER),1)
 endif
 ifneq ($(CUB_SORT_PART),0)
    DEFINES += -DCUB_SORT_PART
+endif
+ifeq ($(KICK_COOP_GATHER),1)
+   DEFINES += -DKICK_COOP_GATHER
 endif
 #############################################################################
 # Set proper units and initial conditions
