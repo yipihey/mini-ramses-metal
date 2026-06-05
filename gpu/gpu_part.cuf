@@ -702,7 +702,7 @@ subroutine gpu_sort_part(sim, ilevel)
   call radix_sort(c_loc(idp_swap(head_idx)), c_loc(xp_swap(2*head_idx-1)), &
                 & c_loc(isp_swap(head_idx)), c_loc(sortp(head_idx)), &
                 & head_idx, num_parts, 0, ndim * level)
-#elif
+#else
   call radix_sort(c_loc(idp_swap(head_idx)), c_loc(xp_swap(head_idx)), &
                 & c_loc(isp_swap(head_idx)), c_loc(sortp(head_idx)), &
                 & head_idx, num_parts, 0, ndim * level)
