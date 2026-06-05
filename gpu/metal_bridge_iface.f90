@@ -300,6 +300,12 @@ module metal_bridge_iface
      function mtl_ptr_rho()       bind(C, name="mtl_ptr_rho")       result(p); import::c_ptr; type(c_ptr)::p; end function
      function mtl_ptr_phi()       bind(C, name="mtl_ptr_phi")       result(p); import::c_ptr; type(c_ptr)::p; end function
      function mtl_ptr_f()         bind(C, name="mtl_ptr_f")         result(p); import::c_ptr; type(c_ptr)::p; end function
+     subroutine mtl_gas_deposit(head, num, vol_loc, fp_scale) bind(C, name="mtl_gas_deposit")
+       import :: c_int, c_double; integer(c_int), value :: head, num; real(c_double), value :: vol_loc, fp_scale
+     end subroutine mtl_gas_deposit
+     function mtl_epot(head, num, fp_scale) bind(C, name="mtl_epot") result(s)
+       import :: c_int, c_double; integer(c_int), value :: head, num; real(c_double), value :: fp_scale; real(c_double) :: s
+     end function mtl_epot
      function mtl_ptr_uold()      bind(C, name="mtl_ptr_uold")      result(p); import::c_ptr; type(c_ptr)::p; end function
      function mtl_ptr_unew()      bind(C, name="mtl_ptr_unew")      result(p); import::c_ptr; type(c_ptr)::p; end function
 

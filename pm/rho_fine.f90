@@ -5,7 +5,7 @@ module rho_fine_module
 #endif
 #ifdef _METAL
   use metal_gravity_module, only: m_metal_rho_zero, m_metal_deposit, m_metal_rho_finish, &
-       m_metal_gpu_sort, m_metal_gpu_split, metal_enabled
+       m_metal_gpu_sort, m_metal_gpu_split, m_metal_gas_deposit, metal_enabled
 #endif
 contains
 !###############################################
@@ -51,6 +51,18 @@ subroutine m_rho_fine(pst,ilevel,rtype)
      !-------------------------------------------------------
      ! Initialize rho to analytical and baryon density field
      !-------------------------------------------------------
+     ! The gas multipole deposit builds the HOST m%rho gas source.  The Metal Poisson
+     ! consumes the GPU B.rho (particles) and IGNORES host m%rho, so this whole CPU
+     ! gas deposit is UNUSED on the metal path -> skip it (it was the cosmo rho
+     ! bottleneck, ~68%).  NB: gas is therefore not yet in the Metal gravity source
+     ! (a separate correctness gap; a GPU gas deposit would add it).
+     block
+     logical :: l_skip_gasdep
+     l_skip_gasdep = .false.
+#ifdef _METAL
+     l_skip_gasdep = metal_enabled
+#endif
+     if(.not.l_skip_gasdep)then
      ! Loop over all finer levels from fine to coarse
      do i=r%nlevelmax,ilevel,-1
 
@@ -89,6 +101,8 @@ subroutine m_rho_fine(pst,ilevel,rtype)
         endif
 
      end do
+     endif   ! .not. l_skip_gasdep  (metal path skips the unused host gas deposit)
+     end block
   endif
   ! End loop over finer levels
 #endif
@@ -143,6 +157,10 @@ subroutine m_rho_fine(pst,ilevel,rtype)
 
      end do
 #ifdef _METAL
+     ! Add the GAS mass to the resident rho accumulators (monopole, leaf cells)
+     ! BEFORE finalize, so the gas self-gravitates on the GPU.  The CPU gas
+     ! multipole above is skipped on the metal path; this is its GPU replacement.
+     if(metal_enabled .and. r%hydro)call m_metal_gas_deposit(pst,ilevel)
      ! Recombine the resident accumulators into rho/nref, set the mean density.
      if(metal_enabled)call m_metal_rho_finish(pst,ilevel)
 #endif

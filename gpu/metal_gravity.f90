@@ -23,6 +23,7 @@ module metal_gravity_module
   logical :: metal_inited  = .false.     ! mtl_init succeeded -> GPU hydro usable even without particles
   integer :: g_hydro_prof = 0            ! one-shot per-phase timing of m_metal_hydro_level (first 3 calls)
   logical :: g_uold_resident = .false.   ! pure-hydro: B.uold uploaded once + kept GPU-resident
+  real(8) :: g_gas_mass_tot = 0.0d0      ! total leaf-cell gas mass (set by m_metal_gas_deposit, added to rho_tot)
   ! GPU refinement flagging (flag.metal + m_metal_flag), DEFAULT ON.  Connectivity
   ! is fast + verified correct (GPU parallel atomicCAS hash rebuild, cross-checked
   ! 0 lookup failures; per-level nbor/father).  m_metal_flag forces a full grid+
@@ -565,6 +566,37 @@ contains
             ' s  gravity(solve+marshal)=', g_tpois, ' s'
     end associate
   end subroutine m_metal_poisson
+
+  !====================================================================
+  ! Potential energy of level ilevel from the RESIDENT GPU force (B.f).  On the
+  ! metal path m_force_fine is skipped (force lives on the device), so the host
+  ! compute_epot would read a zero m%f and report epot=0 -> a spuriously huge
+  ! cosmo econs.  This mirrors compute_epot (force_fine.f90) but reads B.f
+  ! directly: epot = sum_{leaf cells, dims} (-dx^ndim/(4pi)/2) * f^2.  Accumulates
+  ! into g%epot_tot, exactly as m_force_fine does on the CPU path.
+  !====================================================================
+  subroutine m_metal_epot(pst, ilevel)
+    use ramses_commons, only: pst_t
+    use amr_parameters, only: ndim, dp
+    type(pst_t), target :: pst
+    integer, intent(in) :: ilevel
+    integer :: head, n
+    real(dp) :: dx, fourpi, fact, sumf2, fp_scale
+    associate(r=>pst%s%r, g=>pst%s%g, m=>pst%s%m)
+    head = m%head(ilevel); n = m%noct(ilevel)
+    if (n <= 0) return
+    dx = r%boxlen / 2.0_dp**ilevel
+    fourpi = 4.0_dp*acos(-1.0_dp)
+    if (r%cosmo) fourpi = 1.5_dp*g%omega_m*g%aexp
+    fact = -dx**ndim/fourpi/2.0_dp
+    fp_scale = 2.0_dp**44      ! fine enough that weak early-step f^2 isn't quantised away
+    ! GPU sums f^2 over this level's leaf cells (reads the resident B.f); the
+    ! negative fact is applied here -> epot, accumulated into g%epot_tot exactly
+    ! like the CPU m_force_fine/compute_epot.
+    sumf2 = mtl_epot(head, n, real(fp_scale,c_double))
+    g%epot_tot = g%epot_tot + fact*sumf2
+    end associate
+  end subroutine m_metal_epot
 
   !====================================================================
   ! GRADIENT-ONLY (no solve): apply just the GPU 4th-order force gradient to the
@@ -1530,6 +1562,70 @@ contains
     end associate
   end subroutine m_metal_deposit
 
+  ! Deposit the GAS density into the resident rho accumulators (monopole: each
+  ! leaf cell adds its own gas mass uold(rho)*vol_loc into rho_lo/hi at its own
+  ! IDX2(cell,oct), the SAME fixed-point accumulator + scale (2^FP_SHIFT_RHO) the
+  ! particle CIC uses).  Runs AFTER m_metal_deposit (particles) and BEFORE
+  ! m_metal_rho_finish (finalize), over the same level range [ilevel..nlevelmax].
+  ! Also accumulates the full-box leaf gas mass into g_gas_mass_tot for the
+  ! mean-density (rho_tot) offset.  Replaces the (skipped) CPU gas multipole.
+  subroutine m_metal_gas_deposit(pst, ilevel)
+    use ramses_commons, only: pst_t
+    use amr_parameters, only: ndim, twotondim, dp
+    type(pst_t), target :: pst
+    integer, intent(in) :: ilevel
+    integer :: num_octs, o, c, base, lev, hd, n
+    real(dp) :: dx, vol_loc, fp_scale, gmass
+    real(c_float), pointer :: d_uold(:)
+    integer(8) :: c0, c1, rate
+
+    associate(r=>pst%s%r, m=>pst%s%m)
+    call system_clock(c0, rate)
+    call metal_sync_mesh(pst)             ! grid/refined flags current for the leaf test
+    num_octs = m%ifree - 1
+    fp_scale = 2.0_dp**40                  ! == 1L<<FP_SHIFT_RHO (rho accumulator scale)
+
+    ! Upload host gas density (uold var 1) to B.uold for all real octs.  Same
+    ! flat layout as the godunov upload: var-1 lives at base + c (c=1..twotondim).
+    call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*5])
+    do o = 1, num_octs
+       base = (o-1)*5*twotondim
+       do c = 1, twotondim
+          d_uold(base + c) = real(m%uold(c, 1, o), c_float)
+       end do
+    end do
+    call mtl_drain()                       ! host writes land before the kernel
+
+    ! Deposit gas into [ilevel..nlevelmax] (the range zeroed by m_metal_rho_zero).
+    do lev = ilevel, r%nlevelmax
+       hd = m%head(lev); n = m%noct(lev)
+       if (n > 0) then
+          dx = r%boxlen / 2.0_dp**lev
+          vol_loc = dx**ndim
+          call mtl_gas_deposit(hd, n, real(vol_loc,c_double), real(fp_scale,c_double))
+       end if
+    end do
+    call mtl_drain()
+
+    ! Full-box leaf gas mass for the rho_tot mean-density offset (all levels).
+    g_gas_mass_tot = 0.0d0
+    do lev = 1, r%nlevelmax
+       hd = m%head(lev); n = m%noct(lev)
+       if (n <= 0) cycle
+       dx = r%boxlen / 2.0_dp**lev
+       vol_loc = dx**ndim
+       gmass = 0.0_dp
+       do o = hd, hd + n - 1
+          do c = 1, twotondim
+             if (.not. m%grid(o)%refined(c)) gmass = gmass + m%uold(c, 1, o)
+          end do
+       end do
+       g_gas_mass_tot = g_gas_mass_tot + gmass * vol_loc
+    end do
+    call system_clock(c1); gt_dep = gt_dep + dble(c1-c0)/rate
+    end associate
+  end subroutine m_metal_gas_deposit
+
   ! Finalize the resident rho/nref, set the mean density, and copy nref back to
   ! the host (the CPU refinement flag still reads m%nref).
   subroutine m_metal_rho_finish(pst, ilevel)
@@ -1551,7 +1647,9 @@ contains
     do ip = 1, p%npart
        tot = tot + p%mp(ip)
     end do
-    g%rho_tot = tot / boxlen**ndim                      ! mean density (Poisson offset)
+    ! Mean density (Poisson offset) = (total particle mass + total leaf gas mass)
+    ! / box volume.  g_gas_mass_tot is set by m_metal_gas_deposit (0 for DM-only).
+    g%rho_tot = (tot + g_gas_mass_tot) / boxlen**ndim
     call mtl_drain()                                    ! host reads B.nref (finalize is async)
     call c_f_pointer(mtl_ptr_nref(), m_nref, [g_ncell*twotondim])
     do lev = ilevel, r%nlevelmax

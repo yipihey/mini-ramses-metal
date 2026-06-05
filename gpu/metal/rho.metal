@@ -212,3 +212,48 @@ kernel void rho_finalize(
     rho[gid]  = fixed_to_float(rho_lo[gid],  rho_hi[gid],  inv_scale);
     nref[gid] = fixed_to_float(nref_lo[gid], nref_hi[gid], inv_scale);
 }
+
+//============================================================================
+// gas_deposit — add the GAS mass to the Poisson source rho for self-gravitating
+// DM+gas runs.  One thread per cell; only LEAF cells (not refined) deposit their
+// gas mass (uold[rho]*vol_loc) into the cell's own fixed-point rho accumulator
+// (rho_lo/hi at IDX2(cell,oct)), the SAME accumulator + scale the particle CIC
+// uses.  The gas is a grid quantity already, so a monopole (cell-local) deposit
+// is the natural, self-consistent source -> the gas now self-gravitates (the CPU
+// gas multipole was never uploaded to the GPU -> econs was badly broken).
+//============================================================================
+kernel void gas_deposit(device const float*       uold   [[buffer(0)]],
+                        device const Oct*         grid   [[buffer(1)]],
+                        device atomic_uint*       rho_lo [[buffer(2)]],
+                        device atomic_uint*       rho_hi [[buffer(3)]],
+                        constant     GasDepParams& P     [[buffer(4)]],
+                        uint gid [[thread_position_in_grid]]) {
+    if (gid >= (uint)(P.num_octs * TWOTONDIM)) return;
+    int oct  = P.head_idx + (int)gid / TWOTONDIM;
+    int cell = (int)gid % TWOTONDIM + 1;
+    if (grid[oct-1].refined[cell-1] != 0) return;          // leaf cells only
+    float gas_mass = uold[UH(cell,1,oct)] * P.vol_loc;
+    atomic_add_fixed(rho_lo, rho_hi, IDX2(cell, oct), gas_mass, P.fp_scale);
+}
+
+//============================================================================
+// epot_reduce — sum f^2 over leaf cells (all dims) into a single two-word
+// fixed-point accumulator (acc_lo/hi[0]).  The host multiplies the result by
+// fact = -dx^ndim/(4pi)/2 to get the level's potential energy (mirrors
+// force_fine.f90 compute_epot), but reads the RESIDENT GPU force B.f instead of
+// a host-downloaded m%f — avoiding a per-step host sweep over millions of cells.
+//============================================================================
+kernel void epot_reduce(device const float*       f      [[buffer(0)]],
+                        device const Oct*         grid   [[buffer(1)]],
+                        device atomic_uint*       acc_lo [[buffer(2)]],
+                        device atomic_uint*       acc_hi [[buffer(3)]],
+                        constant     EpotParams&  P      [[buffer(4)]],
+                        uint gid [[thread_position_in_grid]]) {
+    if (gid >= (uint)(P.num_octs * TWOTONDIM)) return;
+    int oct  = P.head_idx + (int)gid / TWOTONDIM;
+    int cell = (int)gid % TWOTONDIM + 1;
+    if (grid[oct-1].refined[cell-1] != 0) return;          // leaf cells only
+    float s = 0.0f;
+    for (int d = 1; d <= NDIM; ++d) { float fv = f[IDX3(cell, d, oct)]; s += fv*fv; }
+    if (s != 0.0f) atomic_add_fixed(acc_lo, acc_hi, 0, s, P.fp_scale);
+}

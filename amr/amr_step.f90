@@ -42,7 +42,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   use gpu_manager, only: r_transfer_grid_host
 #endif
 #ifdef _METAL
-  use metal_gravity_module, only: m_metal_poisson, metal_enabled, m_metal_grid_to_host, m_metal_part_to_host, metal_hydro_on, metal_inited, metal_hydro_resident
+  use metal_gravity_module, only: m_metal_poisson, m_metal_epot, metal_enabled, m_metal_grid_to_host, m_metal_part_to_host, metal_hydro_on, metal_inited, metal_hydro_resident
 #ifdef HYDRO
   use metal_gravity_module, only: m_metal_hydro_level, m_metal_hydro_setunew, &
        m_metal_hydro_resident, m_metal_hydro_setuold, m_metal_hydro_upload_dev, m_metal_uold_to_host
@@ -253,8 +253,14 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   if(r%poisson)then
      call m_timer('grav force','start')
 #ifdef _METAL
-     ! force already filled by m_metal_poisson above (GPU gradient)
-     if(.not.metal_enabled) call m_force_fine(pst,ilevel,icount)
+     ! force already filled by m_metal_poisson above (GPU gradient); m_force_fine
+     ! is skipped, so accumulate the potential energy from the resident B.f here
+     ! (else epot_tot stays 0 -> spurious cosmo econs).
+     if(metal_enabled)then
+        call m_metal_epot(pst,ilevel)
+     else
+        call m_force_fine(pst,ilevel,icount)
+     end if
 #else
      call m_force_fine(pst,ilevel,icount)
 #endif

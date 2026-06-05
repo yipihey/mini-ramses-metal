@@ -316,6 +316,22 @@ typedef struct {
     int   ngridmax;
 } HydroInterpolParams;
 
+// gas-density deposit into the Poisson source rho (self-gravitating DM+gas).
+typedef struct {
+    float vol_loc;         // cell volume at this level (boxlen/2^ilevel)^ndim
+    float fp_scale;        // 2^FP_SHIFT_RHO (same fixed-point scale as the particle CIC)
+    int   head_idx;        // 1-based first oct of this level
+    int   num_octs;
+} GasDepParams;
+
+// potential-energy reduction: sum f^2 over leaf cells (host multiplies by the
+// negative -dx^ndim/(4pi)/2 factor afterwards) for the gravity diagnostic.
+typedef struct {
+    float fp_scale;        // fixed-point scale for the two-word sum accumulator
+    int   head_idx;        // 1-based first oct of this level
+    int   num_octs;
+} EpotParams;
+
 // cmpdt reduction buffer (atomic_uint[9]): [0]=dt min (FLT_MAX-bits init),
 // [1,2]=mass lo/hi, [3,4]=ekin, [5,6]=eint, [7,8]=emag (all two-word fixed-point
 // at HydroParams.fp_scale).  Host inits red[0]=0x7F7FFFFF, rest 0.

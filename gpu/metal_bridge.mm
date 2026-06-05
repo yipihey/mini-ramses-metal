@@ -638,6 +638,41 @@ extern "C" void mtl_hydro_grav(int head, int num, double gamma, double dt) {
 void* mtl_ptr_reflux_lo() { return B.reflux_lo.contents; }
 void* mtl_ptr_reflux_hi() { return B.reflux_hi.contents; }
 
+// Add the gas mass (uold[rho]*vol_loc) of each leaf cell into the Poisson source
+// rho accumulator (so DM+gas self-gravitates).  B.uold must hold the current gas
+// density; rho_lo/hi must already be zeroed + particle-deposited (this adds before
+// rho_finalize).  Same fixed-point scale as the particle CIC.
+extern "C" void mtl_gas_deposit(int head, int num, double vol_loc, double fp_scale) {
+    if (num <= 0) return;
+    GasDepParams P{}; P.vol_loc=(float)vol_loc; P.fp_scale=(float)fp_scale; P.head_idx=head; P.num_octs=num;
+    id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:pso("gas_deposit")];
+    [e setBuffer:B.uold offset:0 atIndex:0]; [e setBuffer:B.grid offset:0 atIndex:1];
+    [e setBuffer:B.rho_lo offset:0 atIndex:2]; [e setBuffer:B.rho_hi offset:0 atIndex:3];
+    [e setBytes:&P length:sizeof(P) atIndex:4]; dispatch1d(e, pso("gas_deposit"), num*TWOTONDIM);
+    [e endEncoding]; submit_async(cb);
+}
+
+// Potential energy of a level: sum f^2 over leaf cells on the GPU and return it.
+// The caller multiplies by fact = -dx^ndim/(4pi)/2.  Reuses hydro_red[0,1] as the
+// two-word fixed-point accumulator (lo,hi).
+extern "C" double mtl_epot(int head, int num, double fp_scale) {
+    if (num <= 0) return 0.0;
+    unsigned* R = (unsigned*)B.hydro_red.contents;
+    R[0]=0; R[1]=0;
+    EpotParams P{}; P.fp_scale=(float)fp_scale; P.head_idx=head; P.num_octs=num;
+    id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:pso("epot_reduce")];
+    [e setBuffer:B.f offset:0 atIndex:0]; [e setBuffer:B.grid offset:0 atIndex:1];
+    [e setBuffer:B.hydro_red offset:0 atIndex:2]; [e setBuffer:B.hydro_red offset:sizeof(unsigned) atIndex:3];
+    [e setBytes:&P length:sizeof(P) atIndex:4]; dispatch1d(e, pso("epot_reduce"), num*TWOTONDIM);
+    [e endEncoding]; submit_async(cb); mtl_drain();
+    long q = ((long)((unsigned long)R[1]<<32)) | (unsigned long)R[0];
+    return (double)q / fp_scale;
+}
+
 // Zero the coarse-fine reflux fixed-point accumulators for a level's octs before a
 // finer level scatters into them.  head/num = the COARSE-level octs being protected.
 extern "C" void mtl_hydro_reflux_zero(int head, int num) {
