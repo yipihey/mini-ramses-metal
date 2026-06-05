@@ -293,6 +293,8 @@ cub_module_radix_sort_f.o: cub_module_radix_sort.cuf cub_module_radix_sort_c.o
 	$(C) $(CFLAGS) -c $^ -o $@
 FORCE:
 #############################################################################
+-include deps.mk
+#############################################################################
 clean :
 	rm -f *.o *.$(MOD)
 
