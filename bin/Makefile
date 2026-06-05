@@ -109,15 +109,6 @@ endif
 ifneq ($(NHILBERT),1)
    DEFINES += -DNHILBERT=$(NHILBERT)
 endif
-ifeq ($(PAPER),1)
-   DEFINES += -DPAPER
-endif
-ifneq ($(CUB_SORT_PART),0)
-   DEFINES += -DCUB_SORT_PART
-endif
-ifneq ($(CUB_SCAN_REFINE),0)
-   DEFINES += -DCUB_SCAN_REFINE
-endif
 #############################################################################
 # Set proper units and initial conditions
 ifneq ($(INIT),)
@@ -172,6 +163,15 @@ endif
 #############################################################################
 # NVHPC compiler (optional -gpu=$(CUDA_ARCH),fastmath in FFLAGS and LIBS)
 ifeq ($(COMPILER),NVHPC)
+   ifeq ($(PAPER),1)
+      DEFINES += -DPAPER
+   endif
+   ifneq ($(CUB_SORT_PART),0)
+      DEFINES += -DCUB_SORT_PART
+   endif
+   ifneq ($(CUB_SCAN_REFINE),0)
+      DEFINES += -DCUB_SCAN_REFINE
+   endif
    FFLAGS = -cpp -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx $(DEFINES)
    LIBS = -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx -lstdc++
    GPU_PATH = ../gpu
@@ -228,9 +228,9 @@ MODOBJ = amr_parameters.o hydro_parameters.o rt_parameters.o oct_commons.o \
 	 cosmic_ray_ionization_module.o photoionization_UVB_module.o dust_recombination_module.o \
 	 molecules_module.o charge_exchange_module.o rtz_module.o
 ifeq ($(RTZ),1)
-MODOBJ += rtz_coolrates_module.o rtz_cooling_module.o
+   MODOBJ += rtz_coolrates_module.o rtz_cooling_module.o
 else
-MODOBJ += neq_cooling_module.o 
+   MODOBJ += neq_cooling_module.o
 endif
 MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 	 cross_sections_module.o rt_spectra.o  \
@@ -238,10 +238,10 @@ MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 	 boundaries.o output_hydro.o output_poisson.o output_part.o output_rt.o output_amr.o movie.o \
 	 sort.o nbors_utils.o hydro_flag.o marshal.o
 ifeq ($(COMPILER),NVHPC)
-MODOBJ += cub_module_radix_sort_c.o cub_module_radix_sort_f.o \
-   cub_inclusive_scan_c.o cub_inclusive_scan_f.o gpu_utils.o gpu_hydro.o \
-   gpu_cooling.o gpu_rho.o gpu_mg.o gpu_refine.o gpu_flag.o gpu_runner.o \
-   gpu_part.o gpu_manager.o
+   MODOBJ += cub_module_radix_sort_c.o cub_module_radix_sort_f.o \
+      cub_inclusive_scan_c.o cub_inclusive_scan_f.o gpu_utils.o gpu_hydro.o \
+      gpu_cooling.o gpu_rho.o gpu_mg.o gpu_refine.o gpu_flag.o gpu_runner.o \
+      gpu_part.o gpu_manager.o
 endif
 MODOBJ +=  multigrid_fine_coarse.o rho_fine.o upload.o init_xion.o \
 	 rt_flux_module.o rt_godunov_fine.o rt_input_condinit.o rt_init_flow_fine.o rt_units.o  \
