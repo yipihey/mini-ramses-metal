@@ -28,6 +28,7 @@ kernel void refine_create(
     device float*      phi_old  [[buffer(4)]],
     device atomic_int* ifree    [[buffer(5)]],
     constant RefineParams& P    [[buffer(6)]],
+    device float*      uold     [[buffer(7)]],
     uint2 gid [[thread_position_in_grid]])
 {
     if ((int)gid.y >= P.num_octs) return;
@@ -65,6 +66,16 @@ kernel void refine_create(
         phi[IDX2(q,child)]     = phi[IDX2(cell,oct)];
         phi_old[IDX2(q,child)] = phi_old[IDX2(cell,oct)];
     }
+
+    // Straight injection of the parent cell's HYDRO conserved state into all
+    // children (interpol_hydro with interpol_type=0).  uold stores conserved
+    // DENSITIES, so copying to children that each have 1/2^ndim the volume
+    // conserves mass/momentum/energy; the host upload_fine restriction averages
+    // them back on derefine.  (minmod, interpol_type=1, would need the coarse
+    // neighbour stencil and is deferred.)
+    for (int q=1; q<=TWOTONDIM; ++q)
+        for (int v=1; v<=NHVAR; ++v)
+            uold[UH(q,v,child)] = uold[UH(cell,v,oct)];
 
     grid[oct-1].refined[cell-1] = 1;   // mark parent cell refined
 }

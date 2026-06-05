@@ -443,7 +443,7 @@ void mtl_alloc_buffers(int ncell, int npartmax, int hash_size, int nlevelmax) {
     B.ps0 = newbuf<int>(g0>0?g0:1); B.ps1 = newbuf<int>(g1>0?g1:1); B.total = newbuf<int>(1);
     // Refine compaction scratch: grid copy + a float field wide enough for f (twotondim*ndim).
     B.grid2     = newbuf<Oct>(nc);
-    B.fld2      = newbuf<float>(nc*TWOTONDIM*NF);
+    B.fld2      = newbuf<float>(nc*TWOTONDIM*(NF>NHVAR?NF:NHVAR));  // refine-gather scratch: widest field (f=NF, uold=NHVAR)
     B.swap      = newbuf<int>(nc);
     B.ifree_ctr = newbuf<int>(1);
     B.kill_ctr  = newbuf<int>(1);
@@ -1395,6 +1395,7 @@ void mtl_refine(int ilevel, int levelmin, int nlevelmax, int* head, int* noct,
             [e setBuffer:B.f offset:0 atIndex:2]; [e setBuffer:B.phi offset:0 atIndex:3];
             [e setBuffer:B.phi_old offset:0 atIndex:4];     // make_new_oct injects phi_old too
             [e setBuffer:B.ifree_ctr offset:0 atIndex:5]; [e setBytes:&P length:sizeof(P) atIndex:6];
+            [e setBuffer:B.uold offset:0 atIndex:7];        // straight-inject parent hydro state to children
             MTLSize tg = MTLSizeMake(TWOTONDIM, 64, 1);
             MTLSize grd = MTLSizeMake(TWOTONDIM, (NOC(L)+63)/64*64, 1);
             [e dispatchThreads:grd threadsPerThreadgroup:tg];
@@ -1556,6 +1557,25 @@ void mtl_refine(int ilevel, int levelmin, int nlevelmax, int* head, int* noct,
         mtl_drain();   // host reads the flag1 gather output (fld2)
         memcpy((int*)B.flag1.contents + (size_t)(base-1)*TWOTONDIM,
                (float*)B.fld2.contents + (size_t)(base-1)*TWOTONDIM, (size_t)nsurv*TWOTONDIM*sizeof(int));
+        // gather the HYDRO conserved state uold (width NHVAR*TWOTONDIM) through the
+        // same compaction so the gas survives the device oct reorder (else adaptive
+        // AMR with gas is impossible -> cosmo had to use static_mesh).  B.fld2 is
+        // sized for max(NF,NHVAR)*TWOTONDIM so it fits this wider field.
+        @autoreleasepool {
+            int bn[2] = {base, nsurv}; int wu = TWOTONDIM*NHVAR;
+            id<MTLCommandBuffer> cb=[g_queue commandBuffer];
+            id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];
+            [e setComputePipelineState:pso("refine_gather_field")];
+            [e setBuffer:B.fld2 offset:0 atIndex:0]; [e setBuffer:B.uold offset:0 atIndex:1];
+            [e setBuffer:B.swap offset:0 atIndex:2]; [e setBytes:&bn length:sizeof(bn) atIndex:3];
+            [e setBytes:&wu length:sizeof(int) atIndex:4];
+            [e dispatchThreads:MTLSizeMake(wu,nsurv,1) threadsPerThreadgroup:MTLSizeMake(wu,1,1)];
+            [e endEncoding]; submit_async(cb);
+        }
+        mtl_drain();   // host reads the uold gather output (fld2)
+        memcpy((float*)B.uold.contents + (size_t)(base-1)*TWOTONDIM*NHVAR,
+               (float*)B.fld2.contents + (size_t)(base-1)*TWOTONDIM*NHVAR,
+               (size_t)nsurv*TWOTONDIM*NHVAR*sizeof(float));
     }
 
     // ---- update level layout + free pointers ----

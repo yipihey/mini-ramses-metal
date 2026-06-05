@@ -1839,7 +1839,7 @@ contains
   ! consumers (newdt, I/O) stay consistent.  Replaces the CPU r_refine_fine.
   subroutine m_metal_refine(pst, ilevel)
     use ramses_commons, only: pst_t
-    use amr_parameters, only: ndim, twotondim
+    use amr_parameters, only: ndim, twotondim, dp
     use hash, only: reset_entire_hash, hash_setp
     type(pst_t), target :: pst
     integer, intent(in) :: ilevel
@@ -1896,6 +1896,28 @@ contains
       end if
     end block
 
+    ! HYDRO: upload the LIVE host uold into B.uold before the refine.  B.uold is
+    ! otherwise one step stale here -- m_metal_hydro_level updates B.unew (not
+    ! B.uold), and the host set_uold + upload_fine restriction never propagate back
+    ! to the device.  Without this, refine_create/compaction operate on stale gas
+    ! and the post-refine download clobbers the host's correct uold -> mass leak.
+    if (r%hydro) then
+       block
+         integer :: oo, cc, iv, bs
+         real(c_float), pointer :: du(:)
+         call c_f_pointer(mtl_ptr_uold(), du, [g_ncell*twotondim*5])
+         do oo = 1, m%ifree-1
+            bs = (oo-1)*5*twotondim
+            do iv = 1, 5
+               do cc = 1, twotondim
+                  du(bs + (iv-1)*twotondim + cc) = real(m%uold(cc, iv, oo), c_float)
+               end do
+            end do
+         end do
+         call mtl_drain()
+       end block
+    end if
+
     ! Create / derefine / compact on the GPU.  Returns the # created / killed.
     nu = m%noct_used; ifr = m%ifree
     call system_clock(tk0, tkr)
@@ -1910,6 +1932,30 @@ contains
        do L = r%levelmin, r%nlevelmax
           m%tail(L) = m%head(L) + m%noct(L) - 1
        end do
+       ! HYDRO adaptive AMR: the GPU reordered the octs, so bring the host mesh +
+       ! gas state into the new device order.  The host hydro path (gas deposit
+       ! reading host uold, m_metal_hydro_level upload, m_upload_fine restriction,
+       ! newdt) needs host m%grid + m%uold consistent with B.grid.  uold survives
+       ! the device refine via the refine_create straight-injection + the
+       ! compaction gather (B.uold) above, so we just download it here.  DM-only
+       ! keeps the fast device-resident-mesh path (host stays stale -> no sync).
+       if (r%hydro) then
+          call m_metal_grid_to_host(pst)         ! host m%grid + grid_dict, new device order
+          block
+            integer :: oo, cc, iv, bs
+            real(c_float), pointer :: du(:)
+            call mtl_drain()
+            call c_f_pointer(mtl_ptr_uold(), du, [g_ncell*twotondim*5])
+            do oo = 1, m%noct_used
+               bs = (oo-1)*5*twotondim
+               do iv = 1, 5
+                  do cc = 1, twotondim
+                     m%uold(cc, iv, oo) = real(du(bs + (iv-1)*twotondim + cc), dp)
+                  end do
+               end do
+            end do
+          end block
+       end if
        ! The GPU now owns B.grid; the host m%grid is left STALE and is synced back
        ! only at I/O (m_metal_grid_to_host).  The grid_dict rebuild needs the host
        ! mesh, so it ALSO syncs first — only done when RAMSES_REFINE_REHASH=1.
