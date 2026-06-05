@@ -42,7 +42,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   use gpu_manager, only: r_transfer_grid_host
 #endif
 #ifdef _METAL
-  use metal_gravity_module, only: m_metal_poisson, metal_enabled, m_metal_grid_to_host, m_metal_part_to_host, metal_hydro_on
+  use metal_gravity_module, only: m_metal_poisson, metal_enabled, m_metal_grid_to_host, m_metal_part_to_host, metal_hydro_on, metal_inited
 #ifdef HYDRO
   use metal_gravity_module, only: m_metal_hydro_level
 #endif
@@ -73,7 +73,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
 
   gpu_hydro = .false.
 #ifdef _METAL
-  gpu_hydro = metal_enabled .and. metal_hydro_on   ! route the godunov step to the GPU
+  gpu_hydro = metal_inited .and. metal_hydro_on   ! route the godunov step to the GPU (no pic needed)
 #endif
 
   if(m%noct_tot(ilevel)==0)return

@@ -19,7 +19,8 @@ module metal_gravity_module
   use iso_c_binding
   implicit none
 
-  logical :: metal_enabled = .false.     ! set true by adaptive_loop after mtl_init
+  logical :: metal_enabled = .false.     ! set true by adaptive_loop after mtl_init (needs pic; gravity path)
+  logical :: metal_inited  = .false.     ! mtl_init succeeded -> GPU hydro usable even without particles
   ! GPU refinement flagging (flag.metal + m_metal_flag), DEFAULT ON.  Connectivity
   ! is fast + verified correct (GPU parallel atomicCAS hash rebuild, cross-checked
   ! 0 lookup failures; per-level nbor/father).  m_metal_flag forces a full grid+
@@ -757,13 +758,20 @@ contains
     integer :: head, n, chead, cn, num_octs, o, c, ivar, base, ncache
     real(dp) :: dx, dt, fp_scale
     logical :: per0, per1, per2, hascoarse
-    real(c_float), pointer :: d_uold(:), d_unew(:)
+    real(c_float), pointer :: d_uold(:), d_unew(:), d_f(:)
     associate(r=>pst%s%r, m=>pst%s%m, g=>pst%s%g)
     if (metal_cache_on) then; g_synced_ifree = -1; g_nbor_synced = -1; end if
     call metal_sync_mesh(pst)
     head = m%head(ilevel); n = m%noct(ilevel)
     if (n > 0) then
        num_octs = m%ifree - 1
+       ! Force B.f: with metal gravity (metal_enabled) B.f holds the resident
+       ! m_metal_poisson force -> use it.  Without (pure-hydro blast etc.) B.f is
+       ! not maintained -> zero it (no gravity predictor/kick).
+       if (.not. metal_enabled) then
+          call c_f_pointer(mtl_ptr_f(), d_f, [g_ncell*twotondim*3])
+          d_f(1:g_ncell*twotondim*3) = 0.0_c_float
+       end if
        fp_scale = 2.0_dp**20
        dx = r%boxlen / 2.0_dp**ilevel
        dt = g%dtnew(ilevel)

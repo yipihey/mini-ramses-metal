@@ -26,7 +26,7 @@ subroutine adaptive_loop(pst)
 #endif
 #ifdef _METAL
   use metal_bridge_iface
-  use metal_gravity_module, only: metal_enabled, metal_flag_on, metal_hydro_on, refine_rehash, refine_hostflag1, refine_hostmed, m_metal_prof_report, g_ncyc_fine, g_ncyc_base, g_mg_check_every, g_sort_every, metal_mg_driver_on, metal_mg_all_levels, m_metal_part_to_host, m_metal_grid_to_host
+  use metal_gravity_module, only: metal_enabled, metal_inited, metal_flag_on, metal_hydro_on, refine_rehash, refine_hostflag1, refine_hostmed, m_metal_prof_report, g_ncyc_fine, g_ncyc_base, g_mg_check_every, g_sort_every, metal_mg_driver_on, metal_mg_all_levels, m_metal_part_to_host, m_metal_grid_to_host
   use iso_c_binding
   use amr_parameters, only: ndim
 #endif
@@ -168,6 +168,13 @@ subroutine adaptive_loop(pst)
   call get_environment_variable('RAMSES_METALLIB', m_mlib)
   if (len_trim(m_mlib) == 0) m_mlib = '../../bin/ramses_kernels.metallib'
   m_ierr = mtl_init(trim(m_mlib)//c_null_char)
+  if (m_ierr == 0) then
+     ! GPU hydro works with or WITHOUT particles/gravity (e.g. a pure-hydro blast),
+     ! so enable it on mtl_init success independent of pic.  OPT-IN (default CPU).
+     metal_inited = .true.
+     call get_environment_variable('RAMSES_GPU_HYDRO', m_mlib)
+     if (trim(m_mlib) == '1') metal_hydro_on = .true.
+  end if
   if (m_ierr == 0 .and. r%pic) then
      ! Hybrid: enable the in-loop Metal base-level gravity (deposit -> grouped
      ! multigrid Poisson -> force).  amr_step drives it each base step; the CPU
@@ -178,9 +185,6 @@ subroutine adaptive_loop(pst)
      ! (bit-reproducible vs the historical CPU runs).
      call get_environment_variable('RAMSES_GPU_FLAG', m_mlib)
      if (trim(m_mlib) == '0') metal_flag_on = .false.
-     ! Route the hydro godunov step to the GPU (OPT-IN; default CPU hydro).
-     call get_environment_variable('RAMSES_GPU_HYDRO', m_mlib)
-     if (trim(m_mlib) == '1') metal_hydro_on = .true.
      ! AMR refine ALWAYS runs on the GPU under metal (the RAMSES_GPU_REFINE=0
      ! "CPU refine in a GPU run" hybrid was removed -- known-wrong: hot high-v tail).
      ! grid_dict rebuild after GPU refine (only needed if a CPU consumer reads it).
