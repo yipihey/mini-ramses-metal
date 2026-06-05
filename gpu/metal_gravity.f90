@@ -34,6 +34,12 @@ module metal_gravity_module
   ! vs per-oct hash-dictionary + cache ops).  Set RAMSES_GPU_FLAG=0 for the CPU
   ! flag (bit-reproducible vs the historical CPU runs).
   logical :: metal_flag_on = .true.      ! route refinement flagging to the GPU
+  ! Route the HYDRO godunov step to the GPU (gpu_hydro.cuf port).  OPT-IN via
+  ! RAMSES_GPU_HYDRO=1 (default OFF -> CPU hydro).  Correct for a UNIFORM level
+  ! (levelmin==levelmax: no coarse-fine boundaries -> no cache octs / reflux); for
+  ! refined meshes the cross-level reflux + cache-oct ghost are not yet wired into
+  ! the subcycle, so AMR hydro-on-GPU is approximate.  See [[metal-hydro-port]].
+  logical :: metal_hydro_on = .false.
   ! GPU AMR refine (data_on_device): create/derefine/compact octs on the GPU
   ! (refine.metal: refine_create/refine_derefine + counting-sort compaction gather
   ! + GPU hash/nbor rebuild), then sync the mesh to the host.  DEFAULT ON.
@@ -600,11 +606,16 @@ contains
   ! HYDRO-only (references m%uold); the sole callers live in the HYDRO=1 C-API.
   !====================================================================
 #ifdef HYDRO
-  subroutine m_metal_godunov_fine(pst, ilevel)
+  ! zero_force=.true.  -> pure hydro: zero the device force (the C-API diff path).
+  ! zero_force=.false. -> self-gravitating: USE the resident B.f (the gravity force
+  !   m_metal_poisson just computed) for the godunov predictor + grav_hydro kick.
+  !   This is the production amr_step path.
+  subroutine m_metal_godunov_fine(pst, ilevel, zero_force)
     use ramses_commons, only: pst_t
     use amr_parameters, only: ndim, twotondim, dp
     type(pst_t), target :: pst
     integer, intent(in) :: ilevel
+    logical, intent(in) :: zero_force
     integer :: head, n, num_octs, o, c, ivar, base, nf
     real(dp) :: dx, dt, fp_scale
     real(c_float), pointer :: d_uold(:), d_f(:)
@@ -619,10 +630,12 @@ contains
        nf = 3                                  ! device f columns (ramses_metal.h NF)
 
        ! Upload the whole-grid conserved state (nvar==NHVAR==5 -> identical column-
-       ! major layout: flat=(o-1)*5*twotondim+(ivar-1)*twotondim+(c-1)) and zero f.
+       ! major layout: flat=(o-1)*5*twotondim+(ivar-1)*twotondim+(c-1)).
        call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*5])
-       call c_f_pointer(mtl_ptr_f(),    d_f,    [g_ncell*twotondim*nf])
-       d_f(1:g_ncell*twotondim*nf) = 0.0_c_float
+       if (zero_force) then                    ! pure hydro: zero the predictor force
+          call c_f_pointer(mtl_ptr_f(), d_f, [g_ncell*twotondim*nf])
+          d_f(1:g_ncell*twotondim*nf) = 0.0_c_float
+       end if                                  ! else B.f holds the m_metal_poisson force
        do o = 1, num_octs
           base = (o-1)*5*twotondim
           do ivar = 1, 5

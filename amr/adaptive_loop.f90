@@ -26,7 +26,7 @@ subroutine adaptive_loop(pst)
 #endif
 #ifdef _METAL
   use metal_bridge_iface
-  use metal_gravity_module, only: metal_enabled, metal_flag_on, refine_rehash, refine_hostflag1, refine_hostmed, m_metal_prof_report, g_ncyc_fine, g_ncyc_base, g_mg_check_every, g_sort_every, metal_mg_driver_on, metal_mg_all_levels, m_metal_part_to_host, m_metal_grid_to_host
+  use metal_gravity_module, only: metal_enabled, metal_flag_on, metal_hydro_on, refine_rehash, refine_hostflag1, refine_hostmed, m_metal_prof_report, g_ncyc_fine, g_ncyc_base, g_mg_check_every, g_sort_every, metal_mg_driver_on, metal_mg_all_levels, m_metal_part_to_host, m_metal_grid_to_host
   use iso_c_binding
   use amr_parameters, only: ndim
 #endif
@@ -178,6 +178,9 @@ subroutine adaptive_loop(pst)
      ! (bit-reproducible vs the historical CPU runs).
      call get_environment_variable('RAMSES_GPU_FLAG', m_mlib)
      if (trim(m_mlib) == '0') metal_flag_on = .false.
+     ! Route the hydro godunov step to the GPU (OPT-IN; default CPU hydro).
+     call get_environment_variable('RAMSES_GPU_HYDRO', m_mlib)
+     if (trim(m_mlib) == '1') metal_hydro_on = .true.
      ! AMR refine ALWAYS runs on the GPU under metal (the RAMSES_GPU_REFINE=0
      ! "CPU refine in a GPU run" hybrid was removed -- known-wrong: hot high-v tail).
      ! grid_dict rebuild after GPU refine (only needed if a CPU consumer reads it).

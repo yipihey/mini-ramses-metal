@@ -737,7 +737,7 @@ contains
     integer(c_int), value :: handle, ilevel
     type(pst_t) :: pst; logical :: ok
     call capi_pst(handle, pst, ok); if (.not. ok) return
-    call m_metal_godunov_fine(pst, ilevel)
+    call m_metal_godunov_fine(pst, ilevel, .true.)   ! pure-hydro diff: zero the force
   end subroutine ramses_metal_godunov_fine
 
   ! GPU coarse-fine reflux isolation: with unew=uold at both levels, run the FINE

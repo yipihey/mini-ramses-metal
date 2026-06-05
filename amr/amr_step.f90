@@ -42,7 +42,10 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   use gpu_manager, only: r_transfer_grid_host
 #endif
 #ifdef _METAL
-  use metal_gravity_module, only: m_metal_poisson, metal_enabled, m_metal_grid_to_host, m_metal_part_to_host
+  use metal_gravity_module, only: m_metal_poisson, metal_enabled, m_metal_grid_to_host, m_metal_part_to_host, metal_hydro_on
+#ifdef HYDRO
+  use metal_gravity_module, only: m_metal_godunov_fine
+#endif
 #endif
 
   implicit none
@@ -64,8 +67,14 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   real(kind=8), save :: tprev=0.
   real(kind=8), external :: wallclock
   logical, save :: bkp_last_done=.false.
+  logical :: gpu_hydro
 
   associate(r=>pst%s%r, g=>pst%s%g, m=>pst%s%m, mdl=>pst%s%mdl)
+
+  gpu_hydro = .false.
+#ifdef _METAL
+  gpu_hydro = metal_enabled .and. metal_hydro_on   ! route the godunov step to the GPU
+#endif
 
   if(m%noct_tot(ilevel)==0)return
   if(r%verbose)write(*,'(" Entering amr_step",i1," for level",i2)')icount,ilevel
@@ -273,9 +282,9 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   !-----------------------
   ! Set unew equal to uold
   !-----------------------
-  if(r%hydro.and..not.r%static_gas)then
+  if(r%hydro.and..not.r%static_gas.and..not.gpu_hydro)then
      call m_timer('hydro - set unew','start')
-     call r_set_unew(pst,ilevel,1)
+     call r_set_unew(pst,ilevel,1)   ! GPU path: m_metal_godunov_fine does set_unew itself
   endif
 
   !---------------------------
@@ -370,6 +379,16 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   if(r%hydro)then
 
      if(.not.r%static_gas)then
+#ifdef _METAL
+      if(gpu_hydro)then
+        ! GPU godunov bundle: set_unew -> hydro_godunov (+ gravity predictor from the
+        ! resident B.f) -> grav_hydro -> set_uold, all on the device.  Correct for a
+        ! UNIFORM level (no coarse-fine boundaries); source_hydro is a no-op here
+        ! (nvar=5, no entropy/nener/sgs).  See metal_gravity_module%metal_hydro_on.
+        call m_timer('hydro - godunov','start')
+        call m_metal_godunov_fine(pst,ilevel,.false.)
+      else
+#endif
         ! Hyperbolic solver
         call m_timer('hydro - godunov','start')
         call r_godunov_fine(pst,ilevel,1)
@@ -387,6 +406,9 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
         ! Set uold equal to unew
         call m_timer('hydro - set uold','start')
         call r_set_uold(pst,ilevel,1)
+#ifdef _METAL
+      endif
+#endif
 
         ! Add gravity source terms to uold with half time step
         ! to complete the time step with old force (will be removed later)
