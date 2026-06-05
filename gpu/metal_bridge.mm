@@ -1140,13 +1140,21 @@ void mtl_conn_build_range(int nbor_head, int nbor_num, int father_head, int fath
 // is "real" so there is nothing to materialise and the early return keeps the
 // pre-cache behaviour bit-identical.
 int mtl_make_cache(int ilevel, int head_idx, int num_octs, int nlevelmax,
-                   int per0, int per1, int per2, float tfrac) {
+                   int per0, int per1, int per2, float tfrac, int faces_edges_only) {
     if (num_octs <= 0 || B.ncell <= B.ngridmax) return 0;   // no cache region -> inert
     const int CENTER = THREETONDIM/2 + 1;                   // self direction (off=0)
     B.ifree_cache = 0;                                      // rebuild this level's cache from scratch
     int created = 0;
     for (int input_ind = 1; input_ind <= THREETONDIM; ++input_ind) {
         if (input_ind == CENTER) continue;
+        // Hydro only touches FACE+EDGE cube neighbours in the godunov gather (the
+        // reflux uses faces only); the CORNER ghosts (all NDIM offsets nonzero) are
+        // never read -> skip them.  Gravity passes faces_edges_only=0 (CIC needs all).
+        if (faces_edges_only) {
+            int rem = input_ind - 1, nz = 0;
+            for (int d = 0; d < NDIM; ++d) { if ((rem % 3) - 1 != 0) ++nz; rem /= 3; }
+            if (nz == NDIM) continue;                       // corner -> skip
+        }
         // (1) predicate -> B.cache_pre[oct-1]; (2) inclusive scan over [head,head+num)
         @autoreleasepool {
             ScanParams S{}; S.n=num_octs; S.head_idx=head_idx;

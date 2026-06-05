@@ -376,7 +376,7 @@ contains
        block
          integer :: ncache
          ncache = mtl_make_cache(ilevel, head, n, r%nlevelmax, &
-              merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), real(tfrac,c_float))
+              merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), real(tfrac,c_float), 0)
        end block
     end if
     ! Snapshot phi -> phi_old AFTER make_cache (the device octs are now in the
@@ -590,7 +590,7 @@ contains
        ! on identical, externally-controlled phi/phi_old.
        if (metal_cache_on) then
           ncache = mtl_make_cache(ilevel, head, n, r%nlevelmax, &
-               merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), real(tfrac,c_float))
+               merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), real(tfrac,c_float), 0)
        end if
        call mtl_gradient_phi(head, n, real(dx,c_float), real(tfrac,c_float))
     end if
@@ -716,7 +716,7 @@ contains
        if (metal_cache_on) then
           per0=r%periodic(1); per1=r%periodic(2); per2=r%periodic(3)
           ncache = mtl_make_cache(ilevel, head, n, r%nlevelmax, &
-               merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), 0.0_c_float)
+               merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), 0.0_c_float, 1)
           if (ncache > 0) call mtl_hydro_fill_cache(g_ngridmax+1, ncache, &
                r%interpol_var, r%interpol_type, real(r%smallr,c_double))
           call mtl_drain()
@@ -814,7 +814,7 @@ contains
        if (metal_cache_on .and. hascoarse) then
           per0=r%periodic(1); per1=r%periodic(2); per2=r%periodic(3)
           ncache = mtl_make_cache(ilevel, head, n, r%nlevelmax, &
-               merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), 0.0_c_float)
+               merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), 0.0_c_float, 1)
           if (ncache > 0) call mtl_hydro_fill_cache(g_ngridmax+1, ncache, &
                r%interpol_var, r%interpol_type, real(r%smallr,c_double))
           call mtl_drain()

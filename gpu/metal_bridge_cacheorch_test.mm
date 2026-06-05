@@ -22,7 +22,7 @@ extern "C" {
   void mtl_alloc_buffers(int,int,int,int);
   void mtl_set_cache_region(int);
   void mtl_build_connectivity(int,int,int,const int*,const int*,int,int,int);
-  int  mtl_make_cache(int,int,int,int,int,int,int);
+  int  mtl_make_cache(int,int,int,int,int,int,int,float,int);
   void* mtl_ptr_grid(); void* mtl_ptr_nbor(); void* mtl_ptr_father();
   void* mtl_ptr_ckey_max(); void* mtl_ptr_key_off();
   void mtl_finalize();
@@ -52,7 +52,7 @@ int main(int argc, char** argv){
     // block's outward nbrs hash-miss -> 0); stores box_min/box_max in B.
     mtl_build_connectivity(ngridmax, 2, nlevelmax, bmin, bmax, 1,1,1);
 
-    int created = mtl_make_cache(3, 3, 2, nlevelmax, 1, 0, 0);   // fine level 3, octs idx 3..4
+    int created = mtl_make_cache(3, 3, 2, nlevelmax, 1, 0, 0, 0.0f, 0); // fine level 3, octs idx 3..4 (full cache)
 
     Oct* g=(Oct*)mtl_ptr_grid(); int* father=(int*)mtl_ptr_father(); int* nbor=(int*)mtl_ptr_nbor();
     int c5_ck=g[4].ckey[0], c5_lv=g[4].lev, c5_fa=father[4];     // cache oct idx 5
