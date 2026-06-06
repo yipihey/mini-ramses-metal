@@ -41,6 +41,7 @@ CUB_SORT_PART = 1
 # Warp-cooperative fine-force gather in the GPU particle kick (default OFF).
 KICK_COOP_GATHER = 0
 CUB_SCAN_REFINE = 1
+FASTMATH = 0
 DEBUG = 0
 HDF5 = 0
 MPIF90 = mpif90
@@ -168,7 +169,7 @@ ifeq ($(COMPILER),INTEL)
    endif
 endif
 #############################################################################
-# NVHPC compiler (optional -gpu=$(CUDA_ARCH),fastmath in FFLAGS and LIBS)
+# NVHPC compiler (optional -gpu=$(CUDA_ARCH),fastmath via FASTMATH=1)
 ifeq ($(COMPILER),NVHPC)
    ifeq ($(PAPER),1)
       DEFINES += -DPAPER
@@ -182,8 +183,13 @@ ifeq ($(COMPILER),NVHPC)
    ifeq ($(KICK_COOP_GATHER),1)
       DEFINES += -DKICK_COOP_GATHER
    endif
-   FFLAGS = -cpp -gpu=$(CUDA_ARCH),fastmath -cuda -cudalib=nvtx $(DEFINES)
-   LIBS = -gpu=$(CUDA_ARCH),fastmath -cuda -cudalib=nvtx -lstdc++
+ifeq ($(FASTMATH),1)
+   GPU_ARCH_OPTS = $(CUDA_ARCH),fastmath
+else
+   GPU_ARCH_OPTS = $(CUDA_ARCH)
+endif
+   FFLAGS = -cpp -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx $(DEFINES)
+   LIBS = -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx -lstdc++
    GPU_PATH = ../gpu
    ifeq ($(CUDA_PROFILE),1)
       FFLAGS += -gpu=lineinfo,ptxinfo -Minstrument -traceback -gopt

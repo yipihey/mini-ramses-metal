@@ -2086,7 +2086,7 @@ contains
     kz = grid(neighbor_oct_idx)%ckey(3) - 2 * grid(father_oct_idx)%ckey(3)
     cell_idx = 1 + kx + 2*ky + 4*kz
     do ivar = 1, nvar
-       info = atomicadd(unew(cell_idx, ivar, father_oct_idx), -dU(ivar) / dble(twotondim))
+       info = atomicadd(unew(cell_idx, ivar, father_oct_idx), -dU(ivar) / real(twotondim, kind=dp))
     end do
   end subroutine add_conserved
 
