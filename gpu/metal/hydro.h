@@ -18,8 +18,10 @@
 #include "../ramses_metal.h"   // SOLVER_*, NHVAR, geometry
 using namespace metal;
 
-struct HConserved { float density, momentum_x, momentum_y, momentum_z, energy; };
-struct HPrimitive { float density, velocity_x, velocity_y, velocity_z, pressure; };
+// `scalar` carries the dual-energy entropy (ivar=NHVAR=6) when NHVAR>5; it is an
+// unused register field for NHVAR==5 (pure hydro) so the output is byte-identical.
+struct HConserved { float density, momentum_x, momentum_y, momentum_z, energy, scalar; };
+struct HPrimitive { float density, velocity_x, velocity_y, velocity_z, pressure, scalar; };
 
 // x^2 + (y^2 + z^2) — parenthesised for associativity (gpu_hydro.cuf:84).
 inline float magnitude_squared(float x, float y, float z) {
@@ -70,6 +72,45 @@ inline HPrimitive conserved_2_primitive(HConserved c, float gamma) {   // (:222)
     p.velocity_y = c.momentum_y / c.density;
     p.velocity_z = c.momentum_z / c.density;
     p.pressure   = compute_pressure(c, gamma);
+#if NHVAR > 5
+    p.scalar     = c.scalar / c.density;   // entropy density -> specific entropy (umuscl ctoprim)
+#endif
+    return p;
+}
+
+#if NHVAR > 5
+// Dual-energy pressure recovery — the DEVICE half of the entropy/dual-energy
+// formalism (the CPU half is source_hydro_fine.f90).  In a cold supersonic flow
+// E ~= ekin, so eint = E - 0.5|p|^2/rho is a CATASTROPHIC fp32 cancellation; the
+// CPU umuscl dodges it by computing the whole godunov in real(kind=8), which Metal
+// (fp32, no fp64) cannot.  RAMSES advects the entropy s = P/rho^gamma precisely so
+// the pressure can be recovered robustly: the CONSERVED slot carries s*rho =
+// P/rho^(gamma-1), hence P_s = scalar * rho^(gamma-1) (== source_hydro_fine.f90:185,
+// e_prim = unew(ientropy)*d^(gamma-1)/(gamma-1)).  Switch to P_s when the ROBUST
+// thermal fraction eint_s/E < dual_energy: the test uses ONLY robust quantities
+// (eint_s from the advected entropy, E the stored total) so the fp32-corrupted
+// eint_cons can never self-mask the cold detection (the failure mode that defeated
+// the host switch alone).  In shocks/hot gas eint_s/E is O(0.1) > dual_energy, so
+// E-ekin (reliable there) is used and the host source_hydro_fine (fp64) resyncs the
+// entropy each step — the device thus always reads a faithful s next step.
+inline float dual_energy_pressure(HConserved c, float gamma, float dual_energy) {
+    float p_cons = compute_pressure(c, gamma);                          // (gamma-1)(E-ekin), fp32
+    float p_s    = c.scalar * pow(max(c.density, 1e-30f), gamma - 1.0f);// robust advected pressure
+    float eint_s = p_s / (gamma - 1.0f);
+    return (eint_s < dual_energy * c.energy) ? p_s : p_cons;
+}
+#endif
+
+// conserved -> primitive with the dual-energy pressure switch (dual_energy>=0).
+// Used by every device path that needs a faithful pressure in cold flow: the
+// Godunov reconstruction (load_cell_prim), the gravity velocity-kick round-trips
+// (sync_hydro/grav_hydro — without it the c->p->c round-trip recomputes eint from
+// the corrupted E-ekin and re-corrupts E), and the dt/diagnostic (hydro_cmpdt).
+inline HPrimitive conserved_2_primitive_de(HConserved c, float gamma, float dual_energy) {
+    HPrimitive p = conserved_2_primitive(c, gamma);
+#if NHVAR > 5
+    if (dual_energy >= 0.0f) p.pressure = dual_energy_pressure(c, gamma, dual_energy);
+#endif
     return p;
 }
 
@@ -80,6 +121,9 @@ inline HConserved primitive_2_conserved(HPrimitive p, float gamma) {   // (:245)
     c.momentum_y = p.velocity_y * p.density;
     c.momentum_z = p.velocity_z * p.density;
     c.energy     = compute_energy(p, gamma);
+#if NHVAR > 5
+    c.scalar     = p.scalar * p.density;
+#endif
     return c;
 }
 
@@ -127,6 +171,10 @@ inline HConserved hll_fluxes(thread HPrimitive& L, thread HPrimitive& R,
     rf.momentum_y = R.velocity_x * Rc.momentum_y;
     rf.momentum_z = R.velocity_x * Rc.momentum_z;
     rf.energy     = R.velocity_x * (R.pressure + Rc.energy);
+#if NHVAR > 5
+    lf.scalar     = L.velocity_x * Lc.scalar;   // advective flux of the scalar density
+    rf.scalar     = R.velocity_x * Rc.scalar;
+#endif
 
     HConserved flux;
     flux.density    = hll_flux(speed_l, speed_r, lf.density,    rf.density,    Lc.density,    Rc.density);
@@ -134,6 +182,9 @@ inline HConserved hll_fluxes(thread HPrimitive& L, thread HPrimitive& R,
     flux.momentum_y = hll_flux(speed_l, speed_r, lf.momentum_y, rf.momentum_y, Lc.momentum_y, Rc.momentum_y);
     flux.momentum_z = hll_flux(speed_l, speed_r, lf.momentum_z, rf.momentum_z, Lc.momentum_z, Rc.momentum_z);
     flux.energy     = hll_flux(speed_l, speed_r, lf.energy,     rf.energy,     Lc.energy,     Rc.energy);
+#if NHVAR > 5
+    flux.scalar     = hll_flux(speed_l, speed_r, lf.scalar,     rf.scalar,     Lc.scalar,     Rc.scalar);
+#endif
     return flux;
 }
 
@@ -191,6 +242,11 @@ inline HConserved hllc_fluxes(thread HPrimitive& L, thread HPrimitive& R, float 
     flux.momentum_y = ro * uo * vo;
     flux.momentum_z = ro * uo * wo;
     flux.energy     = (etoto + po) * uo;
+#if NHVAR > 5
+    // passively advected scalar (entropy): mass flux * upwind primitive scalar
+    // (riemann_hllc: fgdnv = ro*uo*qleft/qright by sign of ustar).
+    flux.scalar     = flux.density * (ustar > 0.0f ? L.scalar : R.scalar);
+#endif
     return flux;
 }
 
@@ -226,6 +282,9 @@ inline void trace_cell_1d(HPrimitive l, HPrimitive m, HPrimitive r,
     s.velocity_y = 0.5f * slope_moncen(l.velocity_y, m.velocity_y, r.velocity_y, slope);
     s.velocity_z = 0.5f * slope_moncen(l.velocity_z, m.velocity_z, r.velocity_z, slope);
     s.pressure   = 0.5f * slope_moncen(l.pressure,   m.pressure,   r.pressure,   slope);
+#if NHVAR > 5
+    s.scalar     = 0.5f * slope_moncen(l.scalar,     m.scalar,     r.scalar,     slope);
+#endif
 
     HPrimitive src;   // x-direction source terms (trace_3d:460-479, y,z dropped)
     src.density    = -m.velocity_x * s.density    - s.velocity_x * m.density;
@@ -233,6 +292,9 @@ inline void trace_cell_1d(HPrimitive l, HPrimitive m, HPrimitive r,
     src.velocity_y = -m.velocity_x * s.velocity_y;
     src.velocity_z = -m.velocity_x * s.velocity_z;
     src.pressure   = -m.velocity_x * s.pressure   - s.velocity_x * gamma * m.pressure;
+#if NHVAR > 5
+    src.scalar     = -m.velocity_x * s.scalar;   // passive advection (umuscl trace1d:461 sr0=-u*drx)
+#endif
 
     HPrimitive p;   // half-step predicted cell-centered state
     p.density    = m.density    + dtdx * src.density;
@@ -240,12 +302,18 @@ inline void trace_cell_1d(HPrimitive l, HPrimitive m, HPrimitive r,
     p.velocity_y = m.velocity_y + dtdx * src.velocity_y;
     p.velocity_z = m.velocity_z + dtdx * src.velocity_z;
     p.pressure   = m.pressure   + dtdx * src.pressure;
+#if NHVAR > 5
+    p.scalar     = m.scalar     + dtdx * src.scalar;
+#endif
 
     qL.density    = p.density    + s.density;
     qL.velocity_x = p.velocity_x + s.velocity_x;
     qL.velocity_y = p.velocity_y + s.velocity_y;
     qL.velocity_z = p.velocity_z + s.velocity_z;
     qL.pressure   = p.pressure   + s.pressure;
+#if NHVAR > 5
+    qL.scalar     = p.scalar     + s.scalar;
+#endif
     if (qL.density  < smallr) qL.density  = m.density;    // 1st-order fallback (orig value)
     if (qL.pressure < smallp) qL.pressure = m.pressure;
 
@@ -254,6 +322,9 @@ inline void trace_cell_1d(HPrimitive l, HPrimitive m, HPrimitive r,
     qR.velocity_y = p.velocity_y - s.velocity_y;
     qR.velocity_z = p.velocity_z - s.velocity_z;
     qR.pressure   = p.pressure   - s.pressure;
+#if NHVAR > 5
+    qR.scalar     = p.scalar     - s.scalar;
+#endif
     if (qR.density  < smallr) qR.density  = m.density;
     if (qR.pressure < smallp) qR.pressure = m.pressure;
 }
@@ -300,7 +371,11 @@ inline HPrimitive hp_add(HPrimitive a, HPrimitive b, float s) {   // a + s*b
     HPrimitive r;
     r.density=a.density+s*b.density; r.velocity_x=a.velocity_x+s*b.velocity_x;
     r.velocity_y=a.velocity_y+s*b.velocity_y; r.velocity_z=a.velocity_z+s*b.velocity_z;
-    r.pressure=a.pressure+s*b.pressure; return r;
+    r.pressure=a.pressure+s*b.pressure;
+#if NHVAR > 5
+    r.scalar=a.scalar+s*b.scalar;
+#endif
+    return r;
 }
 
 // Trace one subgrid cell (i,j,k) (1<=i,j,k<=4): all 6 face interface states.
@@ -325,6 +400,11 @@ inline HTrace trace_cell_3d(thread const HPrimitive sg[216], int i, int j, int k
     sz.velocity_y=0.5f*slope_moncen(SG3(i,j,k-1).velocity_y,m.velocity_y,SG3(i,j,k+1).velocity_y,slope);
     sz.velocity_z=0.5f*slope_moncen(SG3(i,j,k-1).velocity_z,m.velocity_z,SG3(i,j,k+1).velocity_z,slope);
     sz.pressure  =0.5f*slope_moncen(SG3(i,j,k-1).pressure,  m.pressure,  SG3(i,j,k+1).pressure,  slope);
+#if NHVAR > 5
+    sx.scalar=0.5f*slope_moncen(SG3(i-1,j,k).scalar,m.scalar,SG3(i+1,j,k).scalar,slope);
+    sy.scalar=0.5f*slope_moncen(SG3(i,j-1,k).scalar,m.scalar,SG3(i,j+1,k).scalar,slope);
+    sz.scalar=0.5f*slope_moncen(SG3(i,j,k-1).scalar,m.scalar,SG3(i,j,k+1).scalar,slope);
+#endif
     #undef SG3
 
     float divu = sx.velocity_x + sy.velocity_y + sz.velocity_z;
@@ -334,6 +414,9 @@ inline HTrace trace_cell_3d(thread const HPrimitive sg[216], int i, int j, int k
     src.velocity_y = -m.velocity_x*sx.velocity_y-m.velocity_y*sy.velocity_y-m.velocity_z*sz.velocity_y- sy.pressure/m.density;
     src.velocity_z = -m.velocity_x*sx.velocity_z-m.velocity_y*sy.velocity_z-m.velocity_z*sz.velocity_z- sz.pressure/m.density;
     src.pressure   = -m.velocity_x*sx.pressure  -m.velocity_y*sy.pressure  -m.velocity_z*sz.pressure  - divu*gamma*m.pressure;
+#if NHVAR > 5
+    src.scalar     = -m.velocity_x*sx.scalar    -m.velocity_y*sy.scalar    -m.velocity_z*sz.scalar;   // passive (no divu)
+#endif
 
     HPrimitive p = hp_add(m, src, dtdx);   // half-step predicted state
 
@@ -353,26 +436,46 @@ inline HConserved flux_x(HPrimitive L, HPrimitive R, float g, int riem) {
 inline HConserved flux_y(HPrimitive L, HPrimitive R, float g, int riem) {   // rotate (u,v,w)->(v,w,u)
     HPrimitive Lr={L.density,L.velocity_y,L.velocity_z,L.velocity_x,L.pressure};
     HPrimitive Rr={R.density,R.velocity_y,R.velocity_z,R.velocity_x,R.pressure};
+#if NHVAR > 5
+    Lr.scalar=L.scalar; Rr.scalar=R.scalar;   // scalar is rotation-invariant
+#endif
     HConserved f=riemann_fluxes(Lr,Rr,g,riem);
     HConserved o={f.density,f.momentum_z,f.momentum_x,f.momentum_y,f.energy};
+#if NHVAR > 5
+    o.scalar=f.scalar;
+#endif
     return o;
 }
 inline HConserved flux_z(HPrimitive L, HPrimitive R, float g, int riem) {   // rotate (u,v,w)->(w,u,v)
     HPrimitive Lr={L.density,L.velocity_z,L.velocity_x,L.velocity_y,L.pressure};
     HPrimitive Rr={R.density,R.velocity_z,R.velocity_x,R.velocity_y,R.pressure};
+#if NHVAR > 5
+    Lr.scalar=L.scalar; Rr.scalar=R.scalar;
+#endif
     HConserved f=riemann_fluxes(Lr,Rr,g,riem);
     HConserved o={f.density,f.momentum_y,f.momentum_z,f.momentum_x,f.energy};
+#if NHVAR > 5
+    o.scalar=f.scalar;
+#endif
     return o;
 }
 
 inline HConserved cdiff(HConserved a, HConserved b, float s) {   // (a-b)*s
     HConserved r={ (a.density-b.density)*s, (a.momentum_x-b.momentum_x)*s,
                    (a.momentum_y-b.momentum_y)*s, (a.momentum_z-b.momentum_z)*s,
-                   (a.energy-b.energy)*s }; return r;
+                   (a.energy-b.energy)*s };
+#if NHVAR > 5
+    r.scalar=(a.scalar-b.scalar)*s;
+#endif
+    return r;
 }
 inline HConserved cadd(HConserved a, HConserved b) {
     HConserved r={a.density+b.density,a.momentum_x+b.momentum_x,a.momentum_y+b.momentum_y,
-                  a.momentum_z+b.momentum_z,a.energy+b.energy}; return r;
+                  a.momentum_z+b.momentum_z,a.energy+b.energy};
+#if NHVAR > 5
+    r.scalar=a.scalar+b.scalar;
+#endif
+    return r;
 }
 
 // du for the 8 central cells (cell index = 1 + ci + 2*cj + 4*ck, ci,cj,ck in {0,1}).
@@ -506,6 +609,9 @@ inline void interpol_hydro_oct(thread const HConserved u1[1 + 2*NDIM], int inter
                 v += il_slope(a0, s[2*idim+1].field, s[2*idim+2].field, interpol_type) * xc[idim]; \
             u2[b].field = v; }
         IL_COMP(density) IL_COMP(momentum_x) IL_COMP(momentum_y) IL_COMP(momentum_z) IL_COMP(energy)
+#if NHVAR > 5
+        IL_COMP(scalar)
+#endif
         #undef IL_COMP
     }
     if (interpol_var == 1)                               // internal -> total energy

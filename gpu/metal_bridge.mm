@@ -66,6 +66,7 @@ struct Buffers {
     int ncell, npartmax, hash_size, nlevelmax;
     int ngridmax;        // real-oct bound; cache (ghost) octs live at (ngridmax, ncell]
     int ifree_cache;     // next free cache slot offset (0-based, beyond ngridmax)
+    float dual_energy;   // entropy/dual-energy switch value (>=0 on, <0 off); set once via mtl_set_dual_energy
 } B;
 
 id<MTLComputePipelineState> pso(const char* name) {
@@ -479,6 +480,14 @@ void mtl_set_cache_region(int ngridmax) {
     B.ifree_cache = 0;
 }
 
+// Set the static dual-energy switch value (= r%dual_energy when r%entropy, else <0).
+// Threaded into every HydroParams/HydroFlagParams so the device godunov recovers the
+// pressure from the advected entropy in cold flow (dual_energy_pressure, hydro.h);
+// <0 (or a NHVAR==5 build) leaves the path off and the output byte-identical.
+extern "C" void mtl_set_dual_energy(double dual_energy) {
+    B.dual_energy = (float)dual_energy;
+}
+
 // Per-level particle CFL reduction on the GPU (replaces CPU newdt_part): returns
 // vmax = max|v| and ekin = sum 0.5 m v^2 over [head, head+num).  No host vp needed.
 void mtl_newdt_part(int ilevel, int head, int num, int npartmax,
@@ -527,6 +536,7 @@ static HydroParams hydro_params(int ilevel, int head, int num,
     P.smallr=1e-10f; P.smallc=1e-10f; P.courant_factor=(float)courant; P.fp_scale=(float)fp_scale;
     P.slope_type=slope; P.riemann=riemann; P.head_idx=head; P.num_octs=num;
     P.ngridmax=B.ngridmax; P.ilevel=ilevel; P.levelmin=levelmin; P.levelmax=levelmax;
+    P.dual_energy=B.dual_energy;   // static run param; <0 (or NHVAR==5) leaves the switch off
     return P;
 }
 
@@ -777,7 +787,7 @@ extern "C" void mtl_hydro_flag(int head, int num, double gamma,
         double err_grad_d, double err_grad_p, double floor_d, double floor_p) {
     if (num <= 0) return;
     HydroFlagParams P{}; P.gamma=(float)gamma; P.err_grad_d=(float)err_grad_d; P.err_grad_p=(float)err_grad_p;
-    P.floor_d=(float)floor_d; P.floor_p=(float)floor_p; P.head_idx=head; P.num_octs=num;
+    P.floor_d=(float)floor_d; P.floor_p=(float)floor_p; P.dual_energy=B.dual_energy; P.head_idx=head; P.num_octs=num;
     id<MTLCommandBuffer> cb = [g_queue commandBuffer];
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
     [e setComputePipelineState:pso("hydro_flag")];
@@ -1996,7 +2006,27 @@ void mtl_mg_make_mask(int ilevel) {
 void mtl_mg_make_initial_phi(int ilevel, float dx_fine, float tfrac, int has_coarse) {
     g_mgc.ilevel=ilevel; g_mgc.has_coarse=has_coarse; g_mgc.dx_fine=dx_fine; g_mgc.tfrac=tfrac;
     mtl_save_phi_old(MG.fine_head, MG.n_fine);
-    if (!has_coarse) return;
+    if (!has_coarse) {
+        // Periodic base (no coarse parent): COLD-START phi=0, matching the CPU
+        // make_initial_phi (phi_fine_cg.f90:633 "By default, initial phi is zero").
+        // The singular periodic operator only FLOORS in fp32 (never fully converges),
+        // so the floored phi is initial-guess-dependent; warm-starting from the resident
+        // phi (the old early-return) made the GPU base solve diverge from the CPU's
+        // cold-start floor -> inflated relative-residual metric (spurious "failed to
+        // converge" + 20-cycle grind + spurious safe-mode) AND a base phi that drifts
+        // from the CPU, seeding the force-sensitive gas over-energization.
+        if (MG.n_fine > 0) {
+            @autoreleasepool {
+                size_t off = (size_t)(MG.fine_head-1)*TWOTONDIM*sizeof(float);
+                size_t len = (size_t)MG.n_fine*TWOTONDIM*sizeof(float);
+                id<MTLCommandBuffer> cb=cb_get();
+                id<MTLBlitCommandEncoder> bl=[cb blitCommandEncoder];
+                [bl fillBuffer:B.phi range:NSMakeRange(off,len) value:0];
+                [bl endEncoding]; cb_done(cb);
+            }
+        }
+        return;
+    }
     @autoreleasepool {
         MgParams P{}; P.head_idx=MG.fine_head; P.num_octs=MG.n_fine; P.ngridmax=B.ngridmax;   // real-oct bound: nbr>ngridmax => cache (ghost) oct
         P.head_father=MG.fine_head; P.ilevel=ilevel; P.dx=dx_fine; P.tfrac=tfrac; P.use_ghost=1;

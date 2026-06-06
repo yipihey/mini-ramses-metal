@@ -322,6 +322,9 @@ module metal_bridge_iface
      function mtl_ptr_unew()      bind(C, name="mtl_ptr_unew")      result(p); import::c_ptr; type(c_ptr)::p; end function
 
      ! Hydro orchestration (gpu_hydro.cuf port).
+     subroutine mtl_set_dual_energy(dual_energy) bind(C, name="mtl_set_dual_energy")
+       import :: c_double; real(c_double), value :: dual_energy
+     end subroutine mtl_set_dual_energy
      subroutine mtl_godunov_fine(ilevel, head, num, levelmin, levelmax, &
           gamma, dt, dx, slope, riemann, courant, fp_scale) bind(C, name="mtl_godunov_fine")
        import :: c_int, c_double

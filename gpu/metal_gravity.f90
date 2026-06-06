@@ -44,6 +44,12 @@ module metal_gravity_module
   ! refined meshes the cross-level reflux + cache-oct ghost are not yet wired into
   ! the subcycle, so AMR hydro-on-GPU is approximate.  See [[metal-hydro-port]].
   logical :: metal_hydro_on = .false.
+  ! Device hydro conserved-state width = the build NVAR (== the device-side NHVAR
+  ! macro): 5 (rho,3 mom,E) + the passive scalars the device advects (the entropy
+  ! for dual-energy).  ALL host<->device uold/unew copies use this stride so the
+  ! Fortran layout matches the device UH() macro.  (Parenthesise NVAR: it expands
+  ! to "5+0+1+0+0".)
+  integer, parameter :: g_nhvar = (NVAR)
   ! uold/unew GPU-residency for the pure-hydro path (RAMSES_GPU_HYDRO_RESIDENT=1,
   ! default OFF).  Eliminates the per-call host<->device copies, BUT leaves host uold
   ! stale -> the CPU newdt/diagnostics/output must device-newdt + uold-sync (not yet
@@ -674,15 +680,15 @@ contains
        nf = 3                                  ! device f columns (ramses_metal.h NF)
 
        ! Upload the whole-grid conserved state (nvar==NHVAR==5 -> identical column-
-       ! major layout: flat=(o-1)*5*twotondim+(ivar-1)*twotondim+(c-1)).
-       call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*5])
+       ! major layout: flat=(o-1)*g_nhvar*twotondim+(ivar-1)*twotondim+(c-1)).
+       call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*g_nhvar])
        if (zero_force) then                    ! pure hydro: zero the predictor force
           call c_f_pointer(mtl_ptr_f(), d_f, [g_ncell*twotondim*nf])
           d_f(1:g_ncell*twotondim*nf) = 0.0_c_float
        end if                                  ! else B.f holds the m_metal_poisson force
        do o = 1, num_octs
-          base = (o-1)*5*twotondim
-          do ivar = 1, 5
+          base = (o-1)*g_nhvar*twotondim
+          do ivar = 1, g_nhvar
              do c = 1, twotondim
                 d_uold(base + (ivar-1)*twotondim + c) = real(m%uold(c, ivar, o), c_float)
              end do
@@ -698,8 +704,8 @@ contains
        ! Download ONLY this level's octs (others are unchanged on the device; a dp->
        ! fp32->dp round-trip would otherwise pollute their precision).
        do o = head, head + n - 1
-          base = (o-1)*5*twotondim
-          do ivar = 1, 5
+          base = (o-1)*g_nhvar*twotondim
+          do ivar = 1, g_nhvar
              do c = 1, twotondim
                 m%uold(c, ivar, o) = real(d_uold(base + (ivar-1)*twotondim + c), dp)
              end do
@@ -737,14 +743,14 @@ contains
        dx = r%boxlen / 2.0_dp**ilevel
        dt = g%dtnew(ilevel)
        nf = 3
-       call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*5])
-       call c_f_pointer(mtl_ptr_unew(), d_unew, [g_ncell*twotondim*5])
+       call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*g_nhvar])
+       call c_f_pointer(mtl_ptr_unew(), d_unew, [g_ncell*twotondim*g_nhvar])
        call c_f_pointer(mtl_ptr_f(),    d_f,    [g_ncell*twotondim*nf])
        d_f(1:g_ncell*twotondim*nf) = 0.0_c_float
        ! set_unew for ALL levels: unew = uold = host uold (dp->fp32)
        do o = 1, num_octs
-          base = (o-1)*5*twotondim
-          do ivar = 1, 5
+          base = (o-1)*g_nhvar*twotondim
+          do ivar = 1, g_nhvar
              do c = 1, twotondim
                 d_uold(base + (ivar-1)*twotondim + c) = real(m%uold(c, ivar, o), c_float)
                 d_unew(base + (ivar-1)*twotondim + c) = real(m%uold(c, ivar, o), c_float)
@@ -771,8 +777,8 @@ contains
        call mtl_drain()
        ! download the COARSE level's unew (the reflux target)
        do o = chead, chead + cn - 1
-          base = (o-1)*5*twotondim
-          do ivar = 1, 5
+          base = (o-1)*g_nhvar*twotondim
+          do ivar = 1, g_nhvar
              do c = 1, twotondim
                 m%unew(c, ivar, o) = real(d_unew(base + (ivar-1)*twotondim + c), dp)
              end do
@@ -827,21 +833,21 @@ contains
        dt = g%dtnew(ilevel)
        hascoarse = (ilevel > r%levelmin)
        chead = m%head(ilevel-1); cn = m%noct(ilevel-1)
-       call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*5])
-       call c_f_pointer(mtl_ptr_unew(), d_unew, [g_ncell*twotondim*5])
+       call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*g_nhvar])
+       call c_f_pointer(mtl_ptr_unew(), d_unew, [g_ncell*twotondim*g_nhvar])
        ! upload host uold (whole grid, for the gather) + host unew(ilevel)
        ! (carries the reflux already accumulated from finer levels).
        do o = 1, num_octs
-          base = (o-1)*5*twotondim
-          do ivar = 1, 5
+          base = (o-1)*g_nhvar*twotondim
+          do ivar = 1, g_nhvar
              do c = 1, twotondim
                 d_uold(base + (ivar-1)*twotondim + c) = real(m%uold(c, ivar, o), c_float)
              end do
           end do
        end do
        do o = head, head + n - 1
-          base = (o-1)*5*twotondim
-          do ivar = 1, 5
+          base = (o-1)*g_nhvar*twotondim
+          do ivar = 1, g_nhvar
              do c = 1, twotondim
                 d_unew(base + (ivar-1)*twotondim + c) = real(m%unew(c, ivar, o), c_float)
              end do
@@ -883,8 +889,8 @@ contains
        if (prof) call system_clock(tc4)
        ! download this level's unew -> host
        do o = head, head + n - 1
-          base = (o-1)*5*twotondim
-          do ivar = 1, 5
+          base = (o-1)*g_nhvar*twotondim
+          do ivar = 1, g_nhvar
              do c = 1, twotondim
                 m%unew(c, ivar, o) = real(d_unew(base + (ivar-1)*twotondim + c), dp)
              end do
@@ -895,8 +901,8 @@ contains
        ! across this level's subcycles; the coarse godunov uploads it later).
        if (hascoarse .and. cn > 0) then
           do o = chead, chead + cn - 1
-             base = (o-1)*5*twotondim
-             do ivar = 1, 5
+             base = (o-1)*g_nhvar*twotondim
+             do ivar = 1, g_nhvar
                 do c = 1, twotondim
                    d_unew(base + (ivar-1)*twotondim + c) = real(m%unew(c, ivar, o), c_float)
                 end do
@@ -906,8 +912,8 @@ contains
           call mtl_hydro_reflux_finalize(chead, cn, real(fp_scale,c_double))
           call mtl_drain()
           do o = chead, chead + cn - 1
-             base = (o-1)*5*twotondim
-             do ivar = 1, 5
+             base = (o-1)*g_nhvar*twotondim
+             do ivar = 1, g_nhvar
                 do c = 1, twotondim
                    m%unew(c, ivar, o) = real(d_unew(base + (ivar-1)*twotondim + c), dp)
                 end do
@@ -944,12 +950,12 @@ contains
     call metal_sync_mesh(pst)
     if (.not. g_uold_resident) then                ! one-time upload of the host state
        num_octs = m%ifree - 1; nf = 3
-       call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*5])
+       call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*g_nhvar])
        call c_f_pointer(mtl_ptr_f(),    d_f,    [g_ncell*twotondim*nf])
        d_f(1:g_ncell*twotondim*nf) = 0.0_c_float   ! pure hydro: no gravity force
        do o = 1, num_octs
-          base = (o-1)*5*twotondim
-          do ivar = 1, 5
+          base = (o-1)*g_nhvar*twotondim
+          do ivar = 1, g_nhvar
              do c = 1, twotondim
                 d_uold(base + (ivar-1)*twotondim + c) = real(m%uold(c, ivar, o), c_float)
              end do
@@ -1026,10 +1032,10 @@ contains
     if (.not. g_uold_resident) return
     call mtl_drain()
     num_octs = pst%s%m%ifree - 1
-    call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*5])
+    call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*g_nhvar])
     do o = 1, num_octs
-       base = (o-1)*5*twotondim
-       do ivar = 1, 5
+       base = (o-1)*g_nhvar*twotondim
+       do ivar = 1, g_nhvar
           do c = 1, twotondim
              pst%s%m%uold(c, ivar, o) = real(d_uold(base + (ivar-1)*twotondim + c), dp)
           end do
@@ -1191,6 +1197,9 @@ contains
           exit
        end if
     end do
+    mg_monitor = len_trim(get_mg_verbose()) > 0
+    if (mg_monitor) print '(A,I3,A,I3,A,I3,A,I2)', 'MGDBG L', ilevel, &
+         ' levelmin_mg', levelmin_mg, ' bnd', bnd, ' is_base', is_base
 
     ! --- iterate-to-epsilon V-cycle loop: EXACT CPU pattern ---
     ! Mirrors poisson/multigrid_fine_commons.f90 multigrid(): iterate full V-cycles
@@ -1243,6 +1252,8 @@ contains
 
        last_err = err
        err = sqrt(res / (i_res + 1.0d-20*rho_tot**2))
+       if (mg_monitor) print '(A,I3,A,I3,A,1pE11.3,A,1pE11.3,A,1pE11.3)', &
+            'MGCYC L', ilevel, ' it', iter, ' err', err, ' res', res, ' i_res', i_res
 
        ! Converged?
        if (err < eps .or. iter >= MAXITER) exit
@@ -1612,6 +1623,13 @@ contains
     integer :: ib, nb, per0, per1, per2
     real(c_float), allocatable :: bconst(:)
     associate(r=>pst%s%r, m=>pst%s%m)
+    ! Dual-energy switch for the device godunov: pass r%dual_energy when entropy is
+    ! enabled (the device recovers P from the advected entropy in cold flow), else <0.
+    if (r%entropy .and. r%dual_energy >= 0) then
+       call mtl_set_dual_energy(real(r%dual_energy, c_double))
+    else
+       call mtl_set_dual_energy(-1.0_c_double)
+    end if
     nb = r%nbound
     per0 = merge(1,0,r%periodic(1)); per1 = merge(1,0,r%periodic(2)); per2 = merge(1,0,r%periodic(3))
     if (nb <= 0) then
@@ -1659,9 +1677,9 @@ contains
 
     ! Upload host gas density (uold var 1) to B.uold for all real octs.  Same
     ! flat layout as the godunov upload: var-1 lives at base + c (c=1..twotondim).
-    call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*5])
+    call c_f_pointer(mtl_ptr_uold(), d_uold, [g_ncell*twotondim*g_nhvar])
     do o = 1, num_octs
-       base = (o-1)*5*twotondim
+       base = (o-1)*g_nhvar*twotondim
        do c = 1, twotondim
           d_uold(base + c) = real(m%uold(c, 1, o), c_float)
        end do
@@ -1937,10 +1955,10 @@ contains
        block
          integer :: oo, cc, iv, bs
          real(c_float), pointer :: du(:)
-         call c_f_pointer(mtl_ptr_uold(), du, [g_ncell*twotondim*5])
+         call c_f_pointer(mtl_ptr_uold(), du, [g_ncell*twotondim*g_nhvar])
          do oo = 1, m%ifree-1
-            bs = (oo-1)*5*twotondim
-            do iv = 1, 5
+            bs = (oo-1)*g_nhvar*twotondim
+            do iv = 1, g_nhvar
                do cc = 1, twotondim
                   du(bs + (iv-1)*twotondim + cc) = real(m%uold(cc, iv, oo), c_float)
                end do
@@ -1977,10 +1995,10 @@ contains
             integer :: oo, cc, iv, bs
             real(c_float), pointer :: du(:)
             call mtl_drain()
-            call c_f_pointer(mtl_ptr_uold(), du, [g_ncell*twotondim*5])
+            call c_f_pointer(mtl_ptr_uold(), du, [g_ncell*twotondim*g_nhvar])
             do oo = 1, m%noct_used
-               bs = (oo-1)*5*twotondim
-               do iv = 1, 5
+               bs = (oo-1)*g_nhvar*twotondim
+               do iv = 1, g_nhvar
                   do cc = 1, twotondim
                      m%uold(cc, iv, oo) = real(du(bs + (iv-1)*twotondim + cc), dp)
                   end do
@@ -2042,6 +2060,14 @@ contains
     associate(r=>pst%s%r, m=>pst%s%m)
     call mtl_drain()                 ! host reads B.grid below
     call mtl_copy_grid_out(c_loc(m%grid(1)), 1, m%noct_used)
+    ! The device Oct struct carries no valid `superoct` (SIMD-batch stride is a
+    ! CPU-only concept the GPU refine never sets), so the memcpy above leaves it 0.
+    ! godunov_fine's sweep does `igrid = igrid + m%grid(igrid)%superoct` -> a 0 stride
+    ! is an infinite loop (the CPU-hydro + GPU-refine hybrid hang).  superoct is read
+    ! ONLY in godunov_fine, so force every oct to the unbatched (=1) kernel here.
+    do o = 1, m%noct_used
+       m%grid(o)%superoct = 1
+    end do
     call reset_entire_hash(m%grid_dict, .false.)
     do L = r%levelmin, r%nlevelmax
        do o = m%head(L), m%tail(L)

@@ -285,6 +285,13 @@ typedef struct {
 #ifndef NHVAR
 #define NHVAR 5
 #endif
+// The device godunov advects ONE passive scalar (the entropy, ivar=NHVAR=6) for
+// the dual-energy formalism: at cold flows E-ekin catastrophically cancels in
+// fp32 (no fp64 on Metal), so the entropy s=P/rho^gamma is advected and the host
+// (source_hydro_fine) recovers eint from it.  >1 passive scalar is not yet ported.
+#if NHVAR > 6
+#error "Metal device godunov supports at most one passive scalar (NHVAR<=6)"
+#endif
 // uold/unew(1:twotondim, 1:nvar, oct) -> element (cell, ivar, oct), 0-based out.
 #define UH(cell, ivar, oct)  ((((oct)-1)*NHVAR + ((ivar)-1))*TWOTONDIM + ((cell)-1))
 
@@ -302,6 +309,7 @@ typedef struct {
     float smallr;          // density floor (1e-10)
     float smallc;          // sound-speed floor (1e-10)
     float courant_factor;  // CFL number (0.5)
+    float dual_energy;     // entropy/dual-energy switch (>=0 enables P_s recovery in cold flow; <0 off)
     float fp_scale;        // 2^FP_SHIFT for the reproducible coarse-fine reflux atomics
     int   slope_type;      // 0=1st order, 1=minmod, 2=moncen
     int   riemann;         // SOLVER_LLF / SOLVER_HLL / SOLVER_HLLC
@@ -320,6 +328,7 @@ typedef struct {
     float err_grad_p;      // pressure gradient threshold (<=0 disables)
     float floor_d;         // density/pressure denominator floor
     float floor_p;         // (unused by the criterion -- CUDA uses floor_d for both)
+    float dual_energy;     // entropy/dual-energy switch (>=0 enables P_s recovery in cold flow; <0 off)
     int   head_idx;
     int   num_octs;
 } HydroFlagParams;

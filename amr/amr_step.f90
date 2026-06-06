@@ -587,6 +587,13 @@ subroutine m_trace_dump(pst,ilevel,icount,tag)
   call get_environment_variable('RAMSES_TRACE_DUMP', te)
   if (len_trim(te) == 0) return
   if (ilevel < 8) return        ! trace L8 (near-floor) through L9+ (the 125x jump) + divergent levels
+  ! Optional step window RAMSES_TRACE_STEP0[..STEP1] to catch a LATE event (the
+  ! pancake L11 flicker at ~step 273) past the 200-file cap.
+  block
+    character(len=16) :: ts; integer :: s0
+    call get_environment_variable('RAMSES_TRACE_STEP0', ts)
+    if (len_trim(ts) > 0) then; read(ts,*) s0; if (pst%s%g%nstep_coarse < s0) return; end if
+  end block
   ndump = ndump + 1
   if (ndump > 200) return       ! cap total dump files (works on restart, where nstep_coarse is large)
 #ifdef _METAL

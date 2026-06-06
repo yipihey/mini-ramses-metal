@@ -199,10 +199,10 @@ ifeq ($(COMPILER),METAL)
    endif
    GPU_PATH    = ../gpu
    CXX         = clang++
-   CXXFLAGS    = -std=c++17 -ObjC++ -fobjc-arc -O2 -DNDIM=$(NDIM) -I../gpu
+   CXXFLAGS    = -std=c++17 -ObjC++ -fobjc-arc -O2 -DNDIM=$(NDIM) -DNHVAR='($(NVAR))' -I../gpu
    METAL       = xcrun -sdk macosx metal
    METALLIB    = xcrun -sdk macosx metallib
-   METALFLAGS  = -std=metal3.1 -DNDIM=$(NDIM) -I../gpu -I../gpu/metal
+   METALFLAGS  = -std=metal3.1 -DNDIM=$(NDIM) -DNHVAR='($(NVAR))' -I../gpu -I../gpu/metal
    METAL_KERNELS = scan primitives sort hash nbor reduce rho mg part flag refine hydro
    EXTRADEP    = ramses_kernels.metallib
    LIBS += -framework Metal -framework Foundation -framework QuartzCore -lc++ -lobjc

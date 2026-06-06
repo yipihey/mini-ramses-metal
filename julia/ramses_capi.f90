@@ -475,6 +475,36 @@ contains
     call m_force_fine(pst, ilevel, icount)
   end subroutine ramses_force_fine
 
+  ! Level potential energy = sum_{leaf cells, dims} (-dx^ndim/(4pi)/2)*f^2.  CPU:
+  ! compute_epot reads m%f (fp64).  Metal: m_metal_epot reads the device B.f.  Both
+  ! use the IDENTICAL fact + leaf-cell f^2 sum -> the diff point for "is the GPU
+  ! epot reduction faithful given the same force".  Returns the level epot (no
+  ! accumulation side effect: g%epot_tot is saved/restored).
+  function ramses_epot(handle, ilevel) result(epot) bind(C, name="ramses_epot")
+    use force_fine_module, only: compute_epot
+#ifdef _METAL
+    use metal_gravity_module, only: metal_enabled, m_metal_epot
+#endif
+    integer(c_int), value :: handle, ilevel
+    real(c_double) :: epot
+    type(pst_t) :: pst; logical :: ok
+    real(dp) :: ep, ep_save
+    epot = 0.0_c_double
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+#ifdef _METAL
+    if (metal_enabled) then
+       ep_save = pst%s%g%epot_tot
+       pst%s%g%epot_tot = 0.0_dp
+       call m_metal_epot(pst, ilevel)
+       epot = pst%s%g%epot_tot
+       pst%s%g%epot_tot = ep_save
+       return
+    end if
+#endif
+    call compute_epot(pst%s%r, pst%s%g, pst%s%m, ilevel, ep)
+    epot = ep
+  end function ramses_epot
+
   subroutine ramses_kick_drift(handle, ilevel, action) bind(C, name="ramses_kick_drift")
     use move_fine_module, only: m_kick_drift_part
     integer(c_int), value :: handle, ilevel, action

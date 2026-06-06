@@ -89,13 +89,25 @@ kernel void upload(device const Oct*         grid   [[buffer(0)]],
 
 // Load one cell's primitives with the gravity half-step predictor (gpu_hydro.cuf:355).
 inline HPrimitive load_cell_prim(device const float* uold, device const float* fgrav,
-                                 int cell, int oct, float gamma, float halfdt) {
+                                 int cell, int oct, float gamma, float halfdt, float dual_energy) {
     HConserved c = { uold[UH(cell,1,oct)], uold[UH(cell,2,oct)], uold[UH(cell,3,oct)],
                      uold[UH(cell,4,oct)], uold[UH(cell,5,oct)] };
-    HPrimitive p = conserved_2_primitive(c, gamma);
+#if NHVAR > 5
+    c.scalar = uold[UH(cell,6,oct)];
+#endif
+    HPrimitive p = conserved_2_primitive_de(c, gamma, dual_energy);
+    // Gravity half-step predictor, ONE component per dimension (umuscl ctoprim is
+    // #if NDIM>1 guarded).  In 1D/2D the force buffer's unused components (idim>NDIM)
+    // are NOT the force: the MG solve leaves the active-cell mask in f[.,3,.] and
+    // scratch in f[.,2,.] (mg.metal), since the gradient kernel only writes idim<=NDIM.
+    // Boosting v_y/v_z with that mask injects spurious transverse KE -> over-heating.
     p.velocity_x += fgrav[IDX3(cell,1,oct)] * halfdt;
+#if NDIM >= 2
     p.velocity_y += fgrav[IDX3(cell,2,oct)] * halfdt;
+#endif
+#if NDIM >= 3
     p.velocity_z += fgrav[IDX3(cell,3,oct)] * halfdt;
+#endif
     return p;
 }
 
@@ -118,6 +130,9 @@ inline void reflux_face(device atomic_uint* lo, device atomic_uint* hi,
     atomic_add_fixed(lo, hi, UH(cell,3,fa), b.momentum_y*signed_w, fp_scale);
     atomic_add_fixed(lo, hi, UH(cell,4,fa), b.momentum_z*signed_w, fp_scale);
     atomic_add_fixed(lo, hi, UH(cell,5,fa), b.energy    *signed_w, fp_scale);
+#if NHVAR > 5
+    atomic_add_fixed(lo, hi, UH(cell,6,fa), b.scalar    *signed_w, fp_scale);
+#endif
 }
 
 kernel void hydro_godunov(device const float*       uold     [[buffer(0)]],
@@ -143,7 +158,7 @@ kernel void hydro_godunov(device const float*       uold     [[buffer(0)]],
         int nb = nbor[(oct-1)*SUBGRIDSIZE + (sx/2)];
         if (nb <= 0) nb = oct;
         int cell = 1 + (sx&1);
-        sg[sx]  = load_cell_prim(uold, fgrav, cell, nb, gamma, halfdt);
+        sg[sx]  = load_cell_prim(uold, fgrav, cell, nb, gamma, halfdt, P.dual_energy);
         ref[sx] = grid[nb-1].refined[cell-1] != 0;
     }
     HConserved du[2], bnd[2];
@@ -157,7 +172,7 @@ kernel void hydro_godunov(device const float*       uold     [[buffer(0)]],
         if (nb <= 0) nb = oct;
         int cell = 1 + (sx&1) + 2*(sy&1) + 4*(sz&1);
         int idx = sx + 6*sy + 36*sz;
-        sg[idx]  = load_cell_prim(uold, fgrav, cell, nb, gamma, halfdt);
+        sg[idx]  = load_cell_prim(uold, fgrav, cell, nb, gamma, halfdt, P.dual_energy);
         ref[idx] = grid[nb-1].refined[cell-1] != 0;
     }
     HConserved du[8], bnd[6];
@@ -170,6 +185,9 @@ kernel void hydro_godunov(device const float*       uold     [[buffer(0)]],
         unew[UH(c,3,oct)] += du[c-1].momentum_y;
         unew[UH(c,4,oct)] += du[c-1].momentum_z;
         unew[UH(c,5,oct)] += du[c-1].energy;
+#if NHVAR > 5
+        unew[UH(c,6,oct)] += du[c-1].scalar;
+#endif
     }
 
     // Coarse-fine reflux: for each outer face whose neighbour is a coarser
@@ -226,10 +244,17 @@ kernel void sync_hydro(device       float*       uold  [[buffer(0)]],
     int cell = (int)gid % TWOTONDIM + 1;
     HConserved c = { uold[UH(cell,1,oct)], uold[UH(cell,2,oct)], uold[UH(cell,3,oct)],
                      uold[UH(cell,4,oct)], uold[UH(cell,5,oct)] };
-    HPrimitive p = conserved_2_primitive(c, P.gamma);
-    p.velocity_x += fgrav[IDX3(cell,1,oct)] * P.dt;
+#if NHVAR > 5
+    c.scalar = uold[UH(cell,6,oct)];
+#endif
+    HPrimitive p = conserved_2_primitive_de(c, P.gamma, P.dual_energy);
+    p.velocity_x += fgrav[IDX3(cell,1,oct)] * P.dt;   // one component per dim (see load_cell_prim)
+#if NDIM >= 2
     p.velocity_y += fgrav[IDX3(cell,2,oct)] * P.dt;
+#endif
+#if NDIM >= 3
     p.velocity_z += fgrav[IDX3(cell,3,oct)] * P.dt;
+#endif
     c = primitive_2_conserved(p, P.gamma);
     uold[UH(cell,1,oct)]=c.density; uold[UH(cell,2,oct)]=c.momentum_x; uold[UH(cell,3,oct)]=c.momentum_y;
     uold[UH(cell,4,oct)]=c.momentum_z; uold[UH(cell,5,oct)]=c.energy;
@@ -247,12 +272,19 @@ kernel void grav_hydro(device const float*       uold  [[buffer(0)]],
     int cell = (int)gid % TWOTONDIM + 1;
     HConserved c = { unew[UH(cell,1,oct)], unew[UH(cell,2,oct)], unew[UH(cell,3,oct)],
                      unew[UH(cell,4,oct)], unew[UH(cell,5,oct)] };
-    HPrimitive p = conserved_2_primitive(c, P.gamma);
+#if NHVAR > 5
+    c.scalar = unew[UH(cell,6,oct)];
+#endif
+    HPrimitive p = conserved_2_primitive_de(c, P.gamma, P.dual_energy);
     float rho_old = uold[UH(cell,1,oct)], rho_new = unew[UH(cell,1,oct)];
     float fac = P.dt * rho_old / rho_new;
-    p.velocity_x += fgrav[IDX3(cell,1,oct)] * fac;
+    p.velocity_x += fgrav[IDX3(cell,1,oct)] * fac;   // one component per dim (see load_cell_prim)
+#if NDIM >= 2
     p.velocity_y += fgrav[IDX3(cell,2,oct)] * fac;
+#endif
+#if NDIM >= 3
     p.velocity_z += fgrav[IDX3(cell,3,oct)] * fac;
+#endif
     c = primitive_2_conserved(p, P.gamma);
     unew[UH(cell,1,oct)]=c.density; unew[UH(cell,2,oct)]=c.momentum_x; unew[UH(cell,3,oct)]=c.momentum_y;
     unew[UH(cell,4,oct)]=c.momentum_z; unew[UH(cell,5,oct)]=c.energy;
@@ -277,7 +309,10 @@ kernel void hydro_cmpdt(device const Oct*         grid  [[buffer(0)]],
 
     HConserved c = { uold[UH(cell,1,oct)], uold[UH(cell,2,oct)], uold[UH(cell,3,oct)],
                      uold[UH(cell,4,oct)], uold[UH(cell,5,oct)] };
-    HPrimitive p = conserved_2_primitive(c, P.gamma);
+#if NHVAR > 5
+    c.scalar = uold[UH(cell,6,oct)];
+#endif
+    HPrimitive p = conserved_2_primitive_de(c, P.gamma, P.dual_energy);
 
     float dx = P.dx, gamma = P.gamma;
     float vol = dx*dx*dx;                              // CUDA uses dx^3 for all NDIM
@@ -287,7 +322,13 @@ kernel void hydro_cmpdt(device const Oct*         grid  [[buffer(0)]],
 
     float cs   = sqrt(gamma*p.pressure/p.density);
     float ctot = fabs(p.velocity_x)+fabs(p.velocity_y)+fabs(p.velocity_z)+3.0f*cs;
-    float grav = fabs(fgrav[IDX3(cell,1,oct)])+fabs(fgrav[IDX3(cell,2,oct)])+fabs(fgrav[IDX3(cell,3,oct)]);
+    float grav = fabs(fgrav[IDX3(cell,1,oct)]);   // one component per dim (see load_cell_prim)
+#if NDIM >= 2
+    grav += fabs(fgrav[IDX3(cell,2,oct)]);
+#endif
+#if NDIM >= 3
+    grav += fabs(fgrav[IDX3(cell,3,oct)]);
+#endif
     grav = grav*dx/(ctot*ctot);
     grav = max(grav, 1.0e-4f);
     float dt_loc = dx/ctot*(sqrt(1.0f+2.0f*P.courant_factor*grav)-1.0f)/grav;
@@ -333,10 +374,13 @@ inline bool hydro_crit(HPrimitive l, HPrimitive m, HPrimitive r,
     return ok;
 }
 
-inline HPrimitive load_prim(device const float* uold, int cell, int oct, float gamma) {
+inline HPrimitive load_prim(device const float* uold, int cell, int oct, float gamma, float dual_energy) {
     HConserved c = { uold[UH(cell,1,oct)], uold[UH(cell,2,oct)], uold[UH(cell,3,oct)],
                      uold[UH(cell,4,oct)], uold[UH(cell,5,oct)] };
-    return conserved_2_primitive(c, gamma);
+#if NHVAR > 5
+    c.scalar = uold[UH(cell,6,oct)];
+#endif
+    return conserved_2_primitive_de(c, gamma, dual_energy);
 }
 
 kernel void hydro_flag(device       int*             flag1 [[buffer(0)]],
@@ -348,7 +392,7 @@ kernel void hydro_flag(device       int*             flag1 [[buffer(0)]],
     if (gid >= (uint)(P.num_octs * TWOTONDIM)) return;
     int oct  = P.head_idx + (int)gid / TWOTONDIM;
     int cell = (int)gid % TWOTONDIM + 1;
-    HPrimitive mid = load_prim(uold, cell, oct, P.gamma);
+    HPrimitive mid = load_prim(uold, cell, oct, P.gamma, P.dual_energy);
 
     for (int idim = 1; idim <= NDIM; ++idim) {
         int dL = 2*(idim-1), dR = dL + 1;            // 0-based table rows
@@ -360,8 +404,8 @@ kernel void hydro_flag(device       int*             flag1 [[buffer(0)]],
         else              { knL=offL; knR=offR; }
         int nbL = mg_nbor(nbor, oct, inL, jnL, knL);
         int nbR = mg_nbor(nbor, oct, inR, jnR, knR);
-        HPrimitive lft = load_prim(uold, icL, nbL, P.gamma);
-        HPrimitive rgt = load_prim(uold, icR, nbR, P.gamma);
+        HPrimitive lft = load_prim(uold, icL, nbL, P.gamma, P.dual_energy);
+        HPrimitive rgt = load_prim(uold, icR, nbR, P.gamma, P.dual_energy);
         if (hydro_crit(lft, mid, rgt, P.err_grad_d, P.err_grad_p, P.floor_d))
             flag1[IDX2(cell, oct)] = 1;
     }
@@ -400,6 +444,9 @@ kernel void hydro_fill_cache(device       float*               uold  [[buffer(0)
     HConserved u1[1 + 2*NDIM];
     u1[0] = (HConserved){ uold[UH(cellp,1,fa)], uold[UH(cellp,2,fa)], uold[UH(cellp,3,fa)],
                           uold[UH(cellp,4,fa)], uold[UH(cellp,5,fa)] };
+#if NHVAR > 5
+    u1[0].scalar = uold[UH(cellp,6,fa)];
+#endif
     for (int dir = 1; dir <= 2*NDIM; ++dir) {
         int idim = (dir-1)/2;
         int off  = FLAG_iii[dir-1][cellp-1];
@@ -410,6 +457,9 @@ kernel void hydro_fill_cache(device       float*               uold  [[buffer(0)
         if (no <= 0) no = fa;                         // domain edge fallback (periodic resolves)
         u1[dir] = (HConserved){ uold[UH(nc,1,no)], uold[UH(nc,2,no)], uold[UH(nc,3,no)],
                                 uold[UH(nc,4,no)], uold[UH(nc,5,no)] };
+#if NHVAR > 5
+        u1[dir].scalar = uold[UH(nc,6,no)];
+#endif
     }
     HConserved u2[TWOTONDIM];
     interpol_hydro_oct(u1, P.interpol_var, P.interpol_type, P.smallr, u2);
@@ -417,6 +467,9 @@ kernel void hydro_fill_cache(device       float*               uold  [[buffer(0)
         uold[UH(c,1,cache)] = u2[c-1].density;    uold[UH(c,2,cache)] = u2[c-1].momentum_x;
         uold[UH(c,3,cache)] = u2[c-1].momentum_y; uold[UH(c,4,cache)] = u2[c-1].momentum_z;
         uold[UH(c,5,cache)] = u2[c-1].energy;
+#if NHVAR > 5
+        uold[UH(c,6,cache)] = u2[c-1].scalar;
+#endif
     }
 }
 

@@ -233,13 +233,24 @@ kernel void gas_deposit(device const float*       uold    [[buffer(0)]],
     if (gid >= (uint)(P.num_octs * TWOTONDIM)) return;
     int oct  = P.head_idx + (int)gid / TWOTONDIM;
     int cell = (int)gid % TWOTONDIM + 1;
-    if (grid[oct-1].refined[cell-1] != 0) return;          // leaf cells only
     float gas_mass = uold[UH(cell,1,oct)] * P.vol_loc;
+    // rho (Poisson source) AND nref: ALL cells, incl. refined.  A refined cell's
+    // uold(1) is the restricted (averaged-down) gas density, so each level's solve
+    // sees its own gas -- matching the CPU, which averages the gas multipole down
+    // to split cells (rho_fine r_multipole_split_cells) so the gas is in the source
+    // at every level.  No double-count: each level's Poisson solve reads only its
+    // own level's rho; the mean-density offset g_gas_mass_tot is leaf-only.  The
+    // old leaf-only rho left the gas OUT of the coarse-level source at refined
+    // cells -> shallow coarse phi -> weak refined force -> shallow epot.
     atomic_add_fixed(rho_lo, rho_hi, IDX2(cell, oct), gas_mass, P.fp_scale);
-    // Gas also counts toward the refinement criterion nref (poisson_flag uses
-    // nref >= m_refine for GRAV builds, and rho_fine adds gas as mmm/mass_sph).
-    // Monopole (cell-local) -> same per-cell total as the CPU CIC of the gas
-    // multipole; without this the GPU refines on particles only -> under-refines.
+    // nref (refinement counter): ALL cells, INCLUDING refined.  A refined coarse
+    // cell's uold(1) is the restricted (averaged-down) gas density, so counting it
+    // keeps the cell's gas contribution to nref.  Otherwise a refined cell loses
+    // its gas (~Omega_b/Omega_m of nref) -> drops below m_refine -> derefines, then
+    // re-refines next step (gas returns to the now-leaf cell): a period-2 L+1
+    // FLICKER -> over-refinement.  The CPU keeps refined cells via poisson_flag's
+    // uold(1)>=m_refine*d_scale on the SAME restricted density; the GPU folds gas
+    // into nref instead, so nref must see the refined-cell gas too.
     if (P.refine_on)
         atomic_add_fixed(nref_lo, nref_hi, IDX2(cell, oct), gas_mass*P.inv_mass_sph, P.fp_scale);
 }
