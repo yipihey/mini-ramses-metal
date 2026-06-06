@@ -46,6 +46,9 @@ module gpu_runner
   real(kind=dp),   device, allocatable, dimension(:) :: xp_swap
   integer(kind=8), device, allocatable, dimension(:) :: idp_swap
   integer(kind=4), device, allocatable, dimension(:) :: isp_swap
+#if defined(CUB_SORT_PART)
+  integer(kind=8), device, allocatable, dimension(:) :: hkeyp
+#endif
 
   !> Arrays to hold the hash table on the device
   integer(kind=8), device, allocatable, dimension(:) :: hash_key
