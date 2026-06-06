@@ -2030,6 +2030,9 @@ contains
 
     integer :: jx, jy, jz, kx, ky, kz, nbor_idx, cell_idx, oct_idx, father_oct_idx, ivar, info
     integer :: nx, ny, nz, neighbor_cell_idx, neighbor_oct_idx
+    real(kind=dp) :: oneovertwotondim
+
+    oneovertwotondim = 1_dp / dble(twotondim)
 
     jx = (ix - 1)/2 ! oct coordinates (zero based)
     jy = (iy - 1)/2
@@ -2086,7 +2089,7 @@ contains
     kz = grid(neighbor_oct_idx)%ckey(3) - 2 * grid(father_oct_idx)%ckey(3)
     cell_idx = 1 + kx + 2*ky + 4*kz
     do ivar = 1, nvar
-       info = atomicadd(unew(cell_idx, ivar, father_oct_idx), -dU(ivar) / dble(twotondim))
+       info = atomicadd(unew(cell_idx, ivar, father_oct_idx), -dU(ivar) * oneovertwotondim)
     end do
   end subroutine add_conserved
 
