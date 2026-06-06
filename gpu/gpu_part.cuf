@@ -525,17 +525,19 @@ subroutine gpu_split_part(sim, ilevel)
        & head_idx, num_parts)
 
   ! Particle ids
+  if (allocated(idp)) then
 #ifndef LONGINT
-  call sort_gather_part_i8_1d<<<num_blocks, num_threads>>>(isp_swap, idp, &
-       & sortp, head_idx, num_parts)
-  call sort_scatter_part_i8_1d<<<num_blocks, num_threads>>>(idp, isp_swap, &
-       & head_idx, num_parts)
+     call sort_gather_part_i8_1d<<<num_blocks, num_threads>>>(isp_swap, idp, &
+          & sortp, head_idx, num_parts)
+     call sort_scatter_part_i8_1d<<<num_blocks, num_threads>>>(idp, isp_swap, &
+          & head_idx, num_parts)
 #else
-  call sort_gather_part_i8_1d<<<num_blocks, num_threads>>>(idp_swap, idp, &
-       & sortp, head_idx, num_parts)
-  call sort_scatter_part_i8_1d<<<num_blocks, num_threads>>>(idp, idp_swap, &
-       & head_idx, num_parts)
+     call sort_gather_part_i8_1d<<<num_blocks, num_threads>>>(idp_swap, idp, &
+          & sortp, head_idx, num_parts)
+     call sort_scatter_part_i8_1d<<<num_blocks, num_threads>>>(idp, idp_swap, &
+          & head_idx, num_parts)
 #endif
+  end if
   call nvtxEndRange()
 
   ! Bookkeeping

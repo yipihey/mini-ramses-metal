@@ -101,7 +101,7 @@ subroutine init_part(r,g,m,p)
   allocate(mp(1:r%npartmax))
   allocate(levelp(1:r%npartmax))
   allocate(sortp(1:r%npartmax))
-  allocate(idp(1:r%npartmax))
+  if (r%nlevelmax > r%levelmin) allocate(idp(1:r%npartmax))
 #ifdef OUTPUT_PARTICLE_POTENTIAL
   allocate(phip(1:r%npartmax))
 #endif
