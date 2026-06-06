@@ -465,6 +465,7 @@ endif()
 if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
 
     # Regular CUDA Fortran sources – compiled with nvfortran + -cuda -gpu=...
+    # Order matches bin/Makefile MODOBJ: gpu_runner must precede gpu_part.
     set(gpu_cuf_files
         gpu/gpu_utils.cuf
         gpu/gpu_hydro.cuf
@@ -473,8 +474,8 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
         gpu/gpu_mg.cuf
         gpu/gpu_refine.cuf
         gpu/gpu_flag.cuf
-        gpu/gpu_part.cuf
         gpu/gpu_runner.cuf
+        gpu/gpu_part.cuf
     )
     list(APPEND fortran_files ${gpu_cuf_files} gpu/gpu_manager.f90)
 
@@ -560,6 +561,59 @@ if(MDL2)
     target_sources(${EXEC} PRIVATE amr/mdlcache.cxx)
     target_link_libraries(${EXEC} PRIVATE mdl2)
     target_compile_definitions(${EXEC} PRIVATE MDL2)
+endif()
+
+# =============================================================================
+# NVHPC: enforce GPU module compilation order via explicit OBJECT_DEPENDS.
+#
+# CMake's Fortran dependency scanner does not process .cuf files, so it
+# cannot infer that (e.g.) multigrid_fine_commons.f90 must wait for
+# gpu_runner.cuf to be compiled first.  We fix this in two steps:
+#
+#  1. Chain the GPU .cuf files sequentially (each waits for the previous
+#     object file), mirroring the MODOBJ order in bin/Makefile.
+#
+#  2. Scan every non-GPU source file at configure time for "USE gpu_*".
+#     Any file that USEs a GPU module is made to depend on the last GPU
+#     object in the chain, which transitively ensures all GPU modules exist.
+# =============================================================================
+if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
+    set(_gpu_obj_dir "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${EXEC}.dir/gpu")
+
+    # Step 1 – sequential chain across gpu_cuf_files
+    set(_prev_gpu_obj "")
+    foreach(_cuf IN LISTS gpu_cuf_files)
+        get_filename_component(_cuf_name "${_cuf}" NAME)
+        set(_cuf_obj "${_gpu_obj_dir}/${_cuf_name}.o")
+        if(_prev_gpu_obj)
+            set_source_files_properties("${_cuf}"
+                PROPERTIES OBJECT_DEPENDS "${_prev_gpu_obj}")
+        endif()
+        set(_prev_gpu_obj "${_cuf_obj}")
+    endforeach()
+    # gpu_manager.f90 also waits for the tail of the .cuf chain
+    set_source_files_properties(gpu/gpu_manager.f90
+        PROPERTIES OBJECT_DEPENDS "${_prev_gpu_obj}")
+    set(_last_gpu_obj "${_prev_gpu_obj}")
+
+    # Step 2 – scan non-GPU sources for GPU module USE statements
+    foreach(_src IN LISTS fortran_files)
+        if(IS_ABSOLUTE "${_src}")
+            continue()  # skip generated files (absolute paths)
+        endif()
+        if("${_src}" MATCHES "^gpu/")
+            continue()  # skip GPU sources themselves
+        endif()
+        set(_full "${CMAKE_SOURCE_DIR}/${_src}")
+        if(NOT EXISTS "${_full}")
+            continue()
+        endif()
+        file(STRINGS "${_full}" _use_lines REGEX "[Uu][Ss][Ee][ \t]+gpu_")
+        if(_use_lines)
+            set_source_files_properties("${_src}"
+                PROPERTIES OBJECT_DEPENDS "${_last_gpu_obj}")
+        endif()
+    endforeach()
 endif()
 
 # =============================================================================
