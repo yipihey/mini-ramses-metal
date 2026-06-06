@@ -21,6 +21,18 @@ if(NOT CMAKE_Fortran_COMPILER)
     endif()
 endif()
 
+# Register .cuf as a Fortran extension before project() so that CMake's
+# dependency scanner tracks MODULE / USE relationships inside .cuf files.
+# Without this, parallel builds (make -j / ninja) fail because gpu_runner.mod
+# is not yet present when poisson/*.f90 files that USE it start compiling.
+# Must come before project() / enable_language(Fortran); it replaces (not
+# augments) the built-in list, so all default extensions must be included.
+if(COMPILER STREQUAL "NVHPC")
+    set(CMAKE_Fortran_SOURCE_FILE_EXTENSIONS
+        f F fpp FPP f77 F77 f90 F90 for For FOR f95 F95 f03 F03 f08 F08
+        cuf CUF)
+endif()
+
 project(ramses LANGUAGES Fortran)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -464,8 +476,6 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
         gpu/gpu_part.cuf
         gpu/gpu_runner.cuf
     )
-    # Tell CMake to compile these with the Fortran compiler (nvfortran handles .cuf)
-    set_source_files_properties(${gpu_cuf_files} PROPERTIES LANGUAGE Fortran)
     list(APPEND fortran_files ${gpu_cuf_files} gpu/gpu_manager.f90)
 
     # -------------------------------------------------------------------------
