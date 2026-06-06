@@ -631,9 +631,11 @@ extern "C" void mtl_hydro_upload(int head, int num) {   // restriction: avg fine
 // Fill cache (coarse-fine ghost) octs' uold by interpol_hydro from their coarse
 // parents -- run after mtl_make_cache so the fine Godunov reads the SAME ghost the
 // CPU does (and the reflux matches).  head = ngridmax+1, num = #cache octs.
-extern "C" void mtl_hydro_fill_cache(int head, int num, int interpol_var, int interpol_type, double smallr) {
+extern "C" void mtl_hydro_fill_cache(int head, int num, int interpol_var, int interpol_type,
+                                     double smallr, double gamma) {
     if (num <= 0) return;
     HydroInterpolParams P{}; P.smallr=(float)smallr; P.interpol_var=interpol_var;
+    P.gamma=(float)gamma; P.dual_energy=B.dual_energy;
     P.interpol_type=interpol_type; P.head_idx=head; P.num_octs=num; P.ngridmax=B.ngridmax;
     id<MTLCommandBuffer> cb = [g_queue commandBuffer];
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];

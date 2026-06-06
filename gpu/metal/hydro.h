@@ -594,13 +594,28 @@ inline float il_slope(float center, float left, float right, int interpol_type) 
 }
 
 inline void interpol_hydro_oct(thread const HConserved u1[1 + 2*NDIM], int interpol_var,
-                               int interpol_type, float smallr, thread HConserved u2[TWOTONDIM]) {
+                               int interpol_type, float smallr, float gamma, float dual_energy,
+                               thread HConserved u2[TWOTONDIM]) {
     HConserved s[1 + 2*NDIM];
     for (int j = 0; j < 1 + 2*NDIM; ++j) s[j] = u1[j];
     if (interpol_var == 1)                               // total -> internal energy
-        for (int j = 0; j < 1 + 2*NDIM; ++j)
-            s[j].energy -= 0.5f * magnitude_squared(s[j].momentum_x, s[j].momentum_y, s[j].momentum_z)
-                           / max(s[j].density, smallr);
+        for (int j = 0; j < 1 + 2*NDIM; ++j) {
+            float eint = s[j].energy - 0.5f * magnitude_squared(s[j].momentum_x, s[j].momentum_y, s[j].momentum_z)
+                           / max(s[j].density, smallr);  // fp32 E-ekin (cancels in cold flow)
+#if NHVAR > 5
+            // Dual-energy: in cold flow recover eint robustly from the advected entropy
+            // instead of the catastrophic fp32 E-ekin -- the coarse-fine-ghost analogue of
+            // the godunov dual_energy_pressure fix (only interpol_var==1 hits the cancellation;
+            // interpol_var==0 interpolates conserved E directly).  Faithful to the conserved
+            // entropy slot s = P/rho^(gamma-1) -> eint_s = scalar*rho^(gamma-1)/(gamma-1).
+            if (dual_energy >= 0.0f) {
+                float p_s    = s[j].scalar * pow(max(s[j].density, 1e-30f), gamma - 1.0f);
+                float eint_s = p_s / (gamma - 1.0f);
+                if (eint_s < dual_energy * s[j].energy) eint = eint_s;
+            }
+#endif
+            s[j].energy = eint;
+        }
     for (int c = 1; c <= TWOTONDIM; ++c) {
         int b = c - 1;
         float xc[3] = { (float)(b & 1) - 0.5f, (float)((b >> 1) & 1) - 0.5f, (float)((b >> 2) & 1) - 0.5f };

@@ -462,7 +462,7 @@ kernel void hydro_fill_cache(device       float*               uold  [[buffer(0)
 #endif
     }
     HConserved u2[TWOTONDIM];
-    interpol_hydro_oct(u1, P.interpol_var, P.interpol_type, P.smallr, u2);
+    interpol_hydro_oct(u1, P.interpol_var, P.interpol_type, P.smallr, P.gamma, P.dual_energy, u2);
     for (int c = 1; c <= TWOTONDIM; ++c) {
         uold[UH(c,1,cache)] = u2[c-1].density;    uold[UH(c,2,cache)] = u2[c-1].momentum_x;
         uold[UH(c,3,cache)] = u2[c-1].momentum_y; uold[UH(c,4,cache)] = u2[c-1].momentum_z;

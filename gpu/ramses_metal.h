@@ -336,6 +336,8 @@ typedef struct {
 // hydro cache-oct uold fill (interpol_hydro coarse-fine ghost prolongation).
 typedef struct {
     float smallr;
+    float gamma;           // for the interpol_var=1 dual-energy E<->eint recovery
+    float dual_energy;     // >=0 enables entropy-based eint recovery in cold ghost cells; <0 off
     int   interpol_var;    // 0=conserved (rho,rhou,E), 1=internal-energy form
     int   interpol_type;   // 0=inject, 1=minmod
     int   head_idx;        // 1-based first CACHE oct (ngridmax+1)

@@ -766,7 +766,7 @@ contains
           ncache = mtl_make_cache(ilevel, head, n, r%nlevelmax, &
                merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), 0.0_c_float, 1)
           if (ncache > 0) call mtl_hydro_fill_cache(g_ngridmax+1, ncache, &
-               r%interpol_var, r%interpol_type, real(r%smallr,c_double))
+               r%interpol_var, r%interpol_type, real(r%smallr,c_double), real(r%gamma,c_double))
           call mtl_drain()
        end if
        call mtl_hydro_reflux_zero(chead, cn)
@@ -867,7 +867,7 @@ contains
                merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), 0.0_c_float, 1)
           if (ncache > 0) then
              call mtl_hydro_fill_cache(g_ngridmax+1, ncache, &
-                  r%interpol_var, r%interpol_type, real(r%smallr,c_double))
+                  r%interpol_var, r%interpol_type, real(r%smallr,c_double), real(r%gamma,c_double))
              ! fill non-periodic boundary octs from their interior reference (after the
              ! coarse-fine fill; no-op if nbound==0).
              call mtl_hydro_fill_boundary(g_ngridmax+1, ncache, real(r%gamma,c_double))
@@ -992,7 +992,7 @@ contains
           ncache = mtl_make_cache(ilevel, head, n, r%nlevelmax, &
                merge(1,0,per0), merge(1,0,per1), merge(1,0,per2), 0.0_c_float, 1)
           if (ncache > 0) call mtl_hydro_fill_cache(g_ngridmax+1, ncache, &
-               r%interpol_var, r%interpol_type, real(r%smallr,c_double))
+               r%interpol_var, r%interpol_type, real(r%smallr,c_double), real(r%gamma,c_double))
        end if
        call mtl_hydro_godunov_only(ilevel, head, n, r%levelmin, r%nlevelmax, &
             real(r%gamma,c_double), real(dt,c_double), real(dx,c_double), &
