@@ -96,11 +96,7 @@ set(EXEC ramses${NDIM}d)
 
 # Compute NION from per-species counts when RTZ is on
 if(RTZ)
-    math(EXPR NION
-        "${N_HYDROGEN_IONS} + ${N_H2} + ${N_HELIUM_IONS} + \
-         ${N_CARBON_IONS} + ${N_NITROGEN_IONS} + ${N_OXYGEN_IONS} + \
-         ${N_NEON_IONS} + ${N_MAGNESIUM_IONS} + ${N_SILICON_IONS} + \
-         ${N_SULFUR_IONS} + ${N_IRON_IONS}")
+    math(EXPR NION "${N_HYDROGEN_IONS} + ${N_H2} + ${N_HELIUM_IONS} + ${N_CARBON_IONS} + ${N_NITROGEN_IONS} + ${N_OXYGEN_IONS} + ${N_NEON_IONS} + ${N_MAGNESIUM_IONS} + ${N_SILICON_IONS} + ${N_SULFUR_IONS} + ${N_IRON_IONS}")
 endif()
 
 # NVAR = 5 (hydro) + NENER + NPSCAL + NMETAL + NION
