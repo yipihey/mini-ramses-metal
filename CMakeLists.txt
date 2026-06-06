@@ -514,6 +514,7 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
                 -o ${cub_f_radix}
         DEPENDS ${cub_c_radix}
                 ${CMAKE_SOURCE_DIR}/gpu/cub_module_radix_sort.cuf
+        BYPRODUCTS ${CMAKE_BINARY_DIR}/cub_module.mod
         COMMENT "Compiling cub_module_radix_sort.cuf (nvfortran)"
         VERBATIM
     )
@@ -525,6 +526,7 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
                 -o ${cub_f_scan}
         DEPENDS ${cub_c_scan}
                 ${CMAKE_SOURCE_DIR}/gpu/cub_inclusive_scan.cuf
+        BYPRODUCTS ${CMAKE_BINARY_DIR}/cub_inclusive_scan_mod.mod
         COMMENT "Compiling cub_inclusive_scan.cuf (nvfortran)"
         VERBATIM
     )
