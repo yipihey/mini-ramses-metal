@@ -195,8 +195,11 @@ subroutine multigrid(pst,ilevel,icount)
      ! Verbosity
      if(pst%s%r%verbose) print '(A,I5,A,1pE10.3)','   ==> Step=',iter,' Error=',err
 
-     ! Converged?
-     if(err<pst%s%r%epsilon .or. iter>=MAXITER) exit
+     ! Converged?  Periodic base (levelmin) uses epsilon_base = the fp32-achievable
+     ! floor; refined (Dirichlet) levels use epsilon.  The Metal GPU m_metal_multigrid
+     ! applies the IDENTICAL criterion, so both paths converge in the same few cycles
+     ! rather than the GPU grinding to MAXITER chasing a tolerance below its fp32 floor.
+     if(err < merge(pst%s%r%epsilon_base, pst%s%r%epsilon, ilevel==pst%s%r%levelmin) .or. iter>=MAXITER) exit
 
      ! Not converged, check error and possibly enable safe mode for the level
      if(err > last_err*SAFE_FACTOR .and. (.not. pst%s%g%safe_mode(ilevel))) then
@@ -844,6 +847,8 @@ subroutine make_bc_rhs(s,ilevel,icount)
   else
      tfrac=0.0
   end if
+  block; character(len=8)::ntf; call get_environment_variable("RAMSES_NO_TFRAC",ntf)
+     if(len_trim(ntf)>0) tfrac=0.0d0; end block   ! DIAG: disable time-extrap to match Metal test
 
   call open_cache(mdl, m, pack_size=storage_size(dummy_three_realdp)/32, &
        pack=pack_fetch_interpol, unpack=unpack_fetch_interpol, bound=init_bound_phi)

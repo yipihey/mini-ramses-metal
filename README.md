@@ -79,6 +79,15 @@ $ bin/ramses3d namelist/coeur.nml
 
 You get the picture now ;-)
 
+### GPU gravity (Apple Silicon / Metal)
+
+The DM particle-mesh gravity stack has a GPU port for Apple Silicon, built with
+`make COMPILER=METAL GRAV=1 NDIM=3`. It is validated against the CPU reference to
+the floating-point / AMR-chaos floor on the 3D cosmological DMO run. See
+[`gpu/metal/STATUS.md`](gpu/metal/STATUS.md) for build/run instructions, the test
+suite, and validation evidence (`gpu/metal/PORT_MAP.md` has the per-kernel
+parity history).
+
 To visualize the 2D and 3D results, compile the map making executable in the utils/f90 directory.
 
 ```

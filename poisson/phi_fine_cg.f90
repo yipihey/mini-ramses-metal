@@ -310,6 +310,8 @@ subroutine cmp_residual_cg(s,ilevel,icount)
   else
      tfrac=0.0
   end if
+  block; character(len=8)::ntf; call get_environment_variable("RAMSES_NO_TFRAC",ntf)
+     if(len_trim(ntf)>0) tfrac=0.0d0; end block   ! DIAG: disable time-extrap to match Metal test
 
   call open_cache(mdl, m, pack_size=storage_size(dummy_three_realdp)/32, &
        pack=pack_fetch_interpol, unpack=unpack_fetch_interpol)
@@ -609,6 +611,8 @@ subroutine make_initial_phi(s,ilevel,icount)
   else
      tfrac=0.0
   end if
+  block; character(len=8)::ntf; call get_environment_variable("RAMSES_NO_TFRAC",ntf)
+     if(len_trim(ntf)>0) tfrac=0.0d0; end block   ! DIAG: disable time-extrap to match Metal test
 
   call open_cache(mdl, m, pack_size=storage_size(dummy_three_realdp)/32, &
        pack=pack_fetch_interpol, unpack=unpack_fetch_interpol, &

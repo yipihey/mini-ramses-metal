@@ -88,6 +88,7 @@ module amr_commons
      ! Poisson solver parameters
      logical :: gravity_test=.false.  ! Use file rho_ana.f90 to test the Poisson solvers
      real(kind=8)::epsilon=1.0D-4     ! Convergence criterion for Poisson solvers
+     real(kind=8)::epsilon_base=2.0D-3 ! Periodic-base (levelmin) tolerance = fp32-achievable floor; IDENTICAL on CPU + Metal GPU (chasing epsilon=1e-4 on the singular base is below the fp32 residual floor -> the GPU grinds to MAXITER while the CPU's kind=8 locals reach it)
      real(kind=8),dimension(1:10)::gravity_params=0.0 ! Gravity parameters
      integer :: gravity_type=0     ! Type of force computation
      integer :: cic_levelmax=0     ! Maximum level for CIC dark matter interpolation
