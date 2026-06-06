@@ -64,7 +64,6 @@ subroutine init_part(r,g,m,p)
 #ifdef _CUDA
   integer::scan_size
 #endif
-  integer(kind=8)::nxp
   !---------------------------------
   ! Allocate PART particle variables
   !---------------------------------
@@ -101,21 +100,18 @@ subroutine init_part(r,g,m,p)
   allocate(mp(1:r%npartmax))
   allocate(levelp(1:r%npartmax))
   allocate(sortp(1:r%npartmax))
-  allocate(idp(1:r%npartmax))
+  if (r%nlevelmax > r%levelmin) allocate(idp(1:r%npartmax))
 #ifdef OUTPUT_PARTICLE_POTENTIAL
   allocate(phip(1:r%npartmax))
 #endif
   ! gpu_cic_part source map.
-#if (4 == NPRE) && defined(CUB_SORT_PART)
-  ! we're reusing this buffer in CUB radix sort, it always needs to have 8
-  ! bytes per element
-  nxp = 2_8 * int(r%npartmax, kind=8)
-  allocate(xp_swap (1_8:nxp))
-#else
-  allocate(xp_swap (1:r%npartmax))
-#endif
+  allocate(xp_swap(1:r%npartmax))
   allocate(isp_swap(1:r%npartmax))
   allocate(idp_swap(1:r%npartmax))
+! CUB workspace
+#if defined(CUB_SORT_PART)
+  allocate(hkeyp(1:r%npartmax))
+#endif
   ! Prefix sum arrays
   scan_size = max(r%npartmax, m%ngridmax + m%ncachemax)
   call ensure_scan_capacity_part(scan_size, r%part_dep_algo)
