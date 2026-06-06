@@ -106,11 +106,12 @@ subroutine init_part(r,g,m,p)
 #endif
   ! gpu_cic_part source map.
   allocate(xp_swap(1:r%npartmax))
+  allocate(isp_swap(1:r%npartmax))
+  allocate(idp_swap(1:r%npartmax))
+! CUB workspace
 #if defined(CUB_SORT_PART)
   allocate(hkeyp(1:r%npartmax))
 #endif
-  allocate(isp_swap(1:r%npartmax))
-  allocate(idp_swap(1:r%npartmax))
   ! Prefix sum arrays
   scan_size = max(r%npartmax, m%ngridmax + m%ncachemax)
   call ensure_scan_capacity_part(scan_size, r%part_dep_algo)
