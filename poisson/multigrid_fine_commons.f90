@@ -196,7 +196,7 @@ subroutine multigrid(pst,ilevel,icount)
      if(pst%s%r%verbose) print '(A,I0,A,1pE10.3)','   ==> Step ',iter,' Error=',err
 
      ! Converged?
-     if(err<pst%s%r%epsilon .or. iter>=MAXITER) exit
+     if(err<pst%s%r%epsilon .or. iter == pst%s%r%nvcycle .or. iter>=MAXITER) exit
 
      ! Not converged, check error and possibly enable safe mode for the level
      if(err > last_err*SAFE_FACTOR .and. (.not. pst%s%g%safe_mode(ilevel))) then

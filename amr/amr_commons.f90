@@ -88,6 +88,7 @@ module amr_commons
      ! Poisson solver parameters
      logical :: gravity_test=.false.  ! Use file rho_ana.f90 to test the Poisson solvers
      real(kind=8)::epsilon=1.0D-4     ! Convergence criterion for Poisson solvers
+     integer :: nvcycle = -1          ! Desired number of V-cycles
      real(kind=8),dimension(1:10)::gravity_params=0.0 ! Gravity parameters
      integer :: gravity_type=0     ! Type of force computation
      integer :: cic_levelmax=0     ! Maximum level for CIC dark matter interpolation
