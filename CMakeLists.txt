@@ -478,8 +478,6 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
     set(cub_f_radix ${CMAKE_BINARY_DIR}/cub_module_radix_sort_f.o)
     set(cub_f_scan  ${CMAKE_BINARY_DIR}/cub_inclusive_scan_f.o)
 
-    # Build the nvfortran flags string for the custom commands
-    string(JOIN " " cub_fflags ${fort_flags})
 
     add_custom_command(
         OUTPUT  ${cub_c_radix}
@@ -503,7 +501,7 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
     )
     add_custom_command(
         OUTPUT  ${cub_f_radix}
-        COMMAND nvfortran ${cub_fflags} -c
+        COMMAND nvfortran ${fort_flags} -c
                 ${cub_c_radix}
                 ${CMAKE_SOURCE_DIR}/gpu/cub_module_radix_sort.cuf
                 -o ${cub_f_radix}
@@ -514,7 +512,7 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
     )
     add_custom_command(
         OUTPUT  ${cub_f_scan}
-        COMMAND nvfortran ${cub_fflags} -c
+        COMMAND nvfortran ${fort_flags} -c
                 ${cub_c_scan}
                 ${CMAKE_SOURCE_DIR}/gpu/cub_inclusive_scan.cuf
                 -o ${cub_f_scan}
