@@ -576,36 +576,23 @@ endif()
 if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
     set(_gpu_obj_dir "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${EXEC}.dir/gpu")
 
-    # Actual inter-GPU module dependencies (from grep of USE statements):
-    #   gpu_utils  — no GPU deps → compiles first
-    #   gpu_cooling — no GPU deps → compiles freely (parallel with gpu_utils)
-    #   gpu_hydro, gpu_flag, gpu_mg, gpu_rho, gpu_refine, gpu_runner
-    #              → USE gpu_utils only → wait for gpu_utils.cuf.o
-    #   gpu_part   → USE gpu_utils + gpu_runner → wait for gpu_runner.cuf.o
-    #   gpu_manager.f90 → USE gpu_utils + gpu_runner → wait for gpu_runner.cuf.o
-    # This gives three effective phases with heavy parallelism in phase 2,
-    # replacing the previous fully-sequential chain.
-
-    set(_gpu_utils_obj  "${_gpu_obj_dir}/gpu_utils.cuf.o")
-    set(_gpu_runner_obj "${_gpu_obj_dir}/gpu_runner.cuf.o")
-    set(_gpu_manager_obj
-        "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${EXEC}.dir/gpu/gpu_manager.f90.o")
-
-    # Phase 2: files that USE gpu_utils (can all compile in parallel after gpu_utils)
-    foreach(_cuf IN ITEMS
-            gpu/gpu_hydro.cuf gpu/gpu_flag.cuf gpu/gpu_mg.cuf
-            gpu/gpu_rho.cuf   gpu/gpu_refine.cuf gpu/gpu_runner.cuf)
-        set_source_files_properties("${_cuf}"
-            PROPERTIES OBJECT_DEPENDS "${_gpu_utils_obj}")
+    # Step 1 – sequential chain across gpu_cuf_files
+    set(_prev_gpu_obj "")
+    foreach(_cuf IN LISTS gpu_cuf_files)
+        get_filename_component(_cuf_name "${_cuf}" NAME)
+        set(_cuf_obj "${_gpu_obj_dir}/${_cuf_name}.o")
+        if(_prev_gpu_obj)
+            set_source_files_properties("${_cuf}"
+                PROPERTIES OBJECT_DEPENDS "${_prev_gpu_obj}")
+        endif()
+        set(_prev_gpu_obj "${_cuf_obj}")
     endforeach()
-
-    # Phase 3: files that USE gpu_runner (wait for gpu_runner.cuf.o)
-    set_source_files_properties(gpu/gpu_part.cuf
-        PROPERTIES OBJECT_DEPENDS "${_gpu_runner_obj}")
+    # gpu_manager.f90 also waits for the tail of the .cuf chain
     set_source_files_properties(gpu/gpu_manager.f90
-        PROPERTIES OBJECT_DEPENDS "${_gpu_runner_obj}")
+        PROPERTIES OBJECT_DEPENDS "${_prev_gpu_obj}")
+    set(_last_gpu_obj "${_prev_gpu_obj}")
 
-    # Non-GPU sources: scan for USE gpu_* and assign to the appropriate phase
+    # Step 2 – scan non-GPU sources for GPU module USE statements
     foreach(_src IN LISTS fortran_files)
         if(IS_ABSOLUTE "${_src}")
             continue()  # skip generated files (absolute paths)
@@ -618,18 +605,9 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
             continue()
         endif()
         file(STRINGS "${_full}" _use_lines REGEX "[Uu][Ss][Ee][ \t]+gpu_")
-        if(NOT _use_lines)
-            continue()
-        endif()
-        file(STRINGS "${_full}" _mgr_lines REGEX "[Uu][Ss][Ee][ \t]+gpu_manager")
-        if(_mgr_lines)
-            # Needs gpu_manager module → wait for gpu_manager.f90.o
+        if(_use_lines)
             set_source_files_properties("${_src}"
-                PROPERTIES OBJECT_DEPENDS "${_gpu_manager_obj}")
-        else()
-            # Needs gpu_runner/gpu_utils only → wait for gpu_runner.cuf.o
-            set_source_files_properties("${_src}"
-                PROPERTIES OBJECT_DEPENDS "${_gpu_runner_obj}")
+                PROPERTIES OBJECT_DEPENDS "${_last_gpu_obj}")
         endif()
     endforeach()
 endif()
