@@ -1307,9 +1307,18 @@ int mtl_make_cache(int ilevel, int head_idx, int num_octs, int nlevelmax,
         int count = ((const int*)B.cache_pre.contents)[head_idx-1 + num_octs-1];  // scan total
         if (count <= 0) continue;
         if (B.ngridmax + B.ifree_cache + count > B.ncell) {     // cache region exhausted
-            fprintf(stderr, "mtl_make_cache: cache region overflow (need %d, cap %d)\n",
-                    B.ngridmax + B.ifree_cache + count, B.ncell);
-            break;
+            // CORRECTNESS-FATAL: without these coarse-fine ghost (cache) octs the
+            // hydro coarse-fine flux/reflux falls back to the coarse neighbour and
+            // LEAKS MASS at refinement boundaries (silent, grows through a deep
+            // collapse).  Print to STDOUT (stderr is block-buffered on Metal runs ->
+            // the warning was invisible) with the actionable fix, and flush.
+            printf("\n*** FATAL mtl_make_cache: cache region overflow (need %d, cap %d).\n"
+                   "    Coarse-fine ghosts cannot be created -> mass conservation is\n"
+                   "    COMPROMISED.  Increase RAMSES_METAL_CACHE_MULT (currently gives\n"
+                   "    cap=%d cells for ngridmax=%d) and rerun.\n\n",
+                   B.ngridmax + B.ifree_cache + count, B.ncell, B.ncell, B.ngridmax);
+            fflush(stdout);
+            abort();
         }
         // (3) compact -> B.swap; (4) materialise; (5) hash-insert the new cache octs
         @autoreleasepool {
