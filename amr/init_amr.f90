@@ -92,6 +92,7 @@ subroutine init_amr(r,g,m,type)
   ! Local variables
   integer::idim,ilevel,icpu,igrid,ibound,ilevelmin
   integer::nborarrsize
+  integer::max_mhd_integrator_blocks
   integer(kind=8)::max_key
   real(kind=8)::dx
   integer(kind=8)::ngrid_tot,ikey
@@ -220,6 +221,23 @@ subroutine init_amr(r,g,m,type)
      allocate(bnew(1:twotondim,1:6,1:m%ngridmax+m%ncachemax))
      bold=0d0
      bnew=0d0
+     if(r%mhd)then
+        ! Corner-state global scratch for the cube mhd_integrator_kernel (C7): the
+        ! 4 corner states are ~162 KB/block and cannot live in shared memory, so
+        ! they spill here (see the ~202 KB budget block in gpu_hydro.cuf).
+        ! WARNING / CAPACITY CEILING: sized by ngridmax (the only static bound known
+        ! this early, before the grid is built). At nsubgrid=1 that is ~4*41472 B *
+        ! ngridmax ~= 16.6 GB at ngridmax=1e5 and ~166 GB at 1e6 -- it exceeds the
+        ! A100 for any production grid, and there is no stat= guard, so enabling
+        ! r%mhd on a large grid will hard-abort here with a CUDA OOM. This is the
+        ! cube approach's GPU-memory ceiling (mhd_plan.md "open blockers").
+        ! TODO(C7): right-size to the actual per-level launch grid (max over levels
+        ! of noct(ilevel)/nsubgridtondim) and lazy-allocate at the first MHD launch
+        ! once the grid exists, with a stat= OOM guard -- not eagerly here. Until
+        ! then, only set r%mhd on small test grids.
+        max_mhd_integrator_blocks = (m%ngridmax + nsubgridtondim - 1) / nsubgridtondim
+        allocate(mhd_corner_scratch(1:4,1:max_mhd_integrator_blocks))
+     endif
 #endif
 #ifdef GRAV
      allocate(rho(1:twotondim,1:m%ngridmax+m%ncachemax))

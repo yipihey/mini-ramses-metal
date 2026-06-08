@@ -50,13 +50,17 @@ module hydro_device
   end type subgrid_2x2x3cell_primitive
 
   ! ==========================================================================
-  ! MHD shared-memory buffers (face-B, dbf, edge-E, EMF, corner states) are NOT
-  ! cube subgrid types. In the plane-sweep MHD kernel they are flat plane/ring
-  ! arrays declared inside the kernel (mirroring q_storage/qds/qL/qR in
-  ! hydro_integrator_paper_kernel). The cube subgrid_*_t MHD types and the cube
-  ! shared-memory budget block were removed in the plane-sweep cleanup; see
-  ! mhd_plan.md Stage B1. The named-field MHD cell types (conserved_mhd_t /
-  ! primitive_mhd_t) below are kept as device register/working types.
+  ! MHD shared-memory working buffers for the cube ("rock") integrator. The
+  ! face-B (subgrid_face_b_t), face-B transverse slopes (subgrid_face_db_t),
+  ! edge-E (subgrid_edge_e_t), output EMF (subgrid_emf_t) and the four edge
+  ! corner states (subgrid_corner_state_t) are full-subgrid derived types -- the
+  ! MHD analogs of subgrid_6x6x6cell_primitive and the interface arrays above.
+  ! They are defined just after the MHD cell types below and are consumed by the
+  ! (future) cube mhd_integrator_kernel. The corner states are large and SPILL to
+  ! the mhd_corner_scratch global array (see the ~202 KB budget block before
+  ! hydro_integrator_kernel and mhd_plan.md Stage B1). MHD is built on the cube
+  ! integrator only -- NOT the plane-sweep paper kernel. The named-field MHD cell
+  ! types (conserved_mhd_t / primitive_mhd_t) below are kept as device registers.
   ! ==========================================================================
 
   !> @brief
@@ -114,6 +118,84 @@ module hydro_device
      real(kind=dp) :: By
      real(kind=dp) :: Bz
   end type primitive_mhd_t
+
+  ! ==========================================================================
+  ! MHD cube subgrid working types (Stage B1), restored for the cube ("rock")
+  ! integrator. Naming map to the CPU work arrays (hydro_commons.f90
+  ! hydro_kernel_t):
+  !   subgrid_face_b_t       <-> h%bf   (face-centred B, +1 in the normal dir)
+  !   subgrid_face_db_t      <-> h%dbf  (2 transverse slopes per face-B)
+  !   subgrid_edge_e_t       <-> h%Ex / h%Ey / h%Ez       (edge-centred E)
+  !   subgrid_emf_t          <-> h%emfx / h%emfy / h%emfz (output EMFs, *dt/dx)
+  !   subgrid_corner_state_t <-> h%qRT / h%qRB / h%qLT / h%qLB (one type, four
+  !                             shared instances, like the hydro left/right
+  !                             interface arrays reuse one type)
+  ! Currently unused; the MHD integrator wires them in later stages (B2+).
+  ! ==========================================================================
+
+  !> @brief
+  !> Face-centred magnetic field subgrid (CPU h%bf). Component `bx` is centred on
+  !> the x-normal faces, so it carries one extra plane in x (0:2*nsubgrid+4);
+  !> likewise `by` in y and `bz` in z. Mirrors ctoprim's bf(i,j,k,1:3) layout
+  !> (umuscl.f90:1762-1802) where each component is +1 only along its normal.
+  type, public :: subgrid_face_b_t
+     real(kind=dp), dimension(0:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: bx
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+4, 0:2*nsubgrid+3) :: by
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+4) :: bz
+  end type subgrid_face_b_t
+
+  !> @brief
+  !> Transverse slopes of the face-centred B field (CPU h%dbf). Same anisotropic
+  !> shape as subgrid_face_b_t, with a trailing 1:2 index for the two transverse
+  !> slope directions of each face-B component (the dbf branch of CPU uslope,
+  !> umuscl.f90:1887+).
+  type, public :: subgrid_face_db_t
+     real(kind=dp), dimension(0:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:2) :: dbx
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+4, 0:2*nsubgrid+3, 1:2) :: dby
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+4, 1:2) :: dbz
+  end type subgrid_face_db_t
+
+  !> @brief
+  !> Edge-centred electric field subgrid (CPU h%Ex/h%Ey/h%Ez). Each component is
+  !> stored over the full cell-subgrid range, matching the CPU allocation over
+  !> (iu1:iu2,ju1:ju2,ku1:ku2) (hydro_commons.f90:95-97).
+  type, public :: subgrid_edge_e_t
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: Ex
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: Ey
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: Ez
+  end type subgrid_edge_e_t
+
+  !> @brief
+  !> Output EMF subgrid (CPU h%emfx/h%emfy/h%emfz). These edge EMFs feed the
+  !> constrained-transport update; they live on the flux ("if/jf/kf") range
+  !> 1:nn+1, i.e. 0:2*nsubgrid here, in all three directions (edge-centred).
+  !> NOTE: they must be stored *dt/dx-scaled in the CT stage (CPU `emfz=Ez*dt/dx`),
+  !> exactly like the hydro fluxes, or B drifts by a constant factor.
+  type, public :: subgrid_emf_t
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid) :: emfx
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid) :: emfy
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid) :: emfz
+  end type subgrid_emf_t
+
+  !> @brief
+  !> Edge corner-state subgrid (CPU h%qRT/h%qRB/h%qLT/h%qLB). One type is defined;
+  !> the integrator declares four shared instances (qRT, qRB, qLT, qLB), mirroring
+  !> how the hydro kernel reuses one interface type for its left/right states.
+  !> Each holds a full cell subgrid of primitive_mhd_t values for each of the 3
+  !> edge orientations (trailing 1:3), matching CPU
+  !> qRT(iu1:iu2,ju1:ju2,ku1:ku2,1:nprim,1:3). Only the 8 primitive_mhd_t
+  !> components are consumed by the 2D EMF solver (cmp_mag_flx, umuscl.f90:1639-1685).
+  !> Stored SoA (named fields) like the other subgrids.
+  type, public :: subgrid_corner_state_t
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: density
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: velocity_x
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: velocity_y
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: velocity_z
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: pressure
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: By
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: Bz
+  end type subgrid_corner_state_t
 
 contains
 
@@ -1798,6 +1880,76 @@ contains
   end subroutine coarse_cell_update
   ! =========================================================================
 
+  ! ##########################################################################
+  ! ## STAGE B1 PLACEHOLDER: mhd_integrator_kernel SHARED-MEMORY BUDGET      ##
+  ! ##########################################################################
+  !
+  ! The fused MHD Godunov+CT kernel (mhd_integrator_kernel) will be assembled in
+  ! Stage C7 and will live here (after Track 3's device functions and Track 2's
+  ! integrator subroutines are merged). Before any of that is written, B1 must
+  ! size its per-block shared-memory footprint, because that decision gates the
+  ! launch configuration for every later stage.
+  !
+  ! Geometry for nsubgrid = 1 (compile-time): the cell subgrid is 6^3 cells.
+  !   nc  = 2*nsubgrid+4 = 6   -> nc^3 = 216   (cell-subgrid plane count)
+  !   nf  = 2*nsubgrid+5 = 7                    (face-normal: one extra plane)
+  !   ne  = 2*nsubgrid+1 = 3   -> ne^3 = 27     (edge/flux EMF range, 1:nn+1)
+  !   interface block (hydro flux) = 3*2*2 = 12 (normal 3, transverse 2)
+  !   sizeof(real(dp)) = 8 B,  sizeof(logical) = 4 B
+  !
+  ! Per-block shared buffers the MHD integrator needs (one instance unless noted):
+  !
+  !   (A) subgrid_6x6x6cell_primitive_mhd   8 reals*216 + 216 logical(refined)
+  !                                         = 1728*8 + 216*4 = 13824 + 864
+  !                                         = 14688 B
+  !   (B) subgrid_face_b_t (bf)             bx 7*6*6 + by 6*7*6 + bz 6*6*7
+  !                                         = 756 reals*8                 =  6048 B
+  !   (C) subgrid_face_db_t (dbf)           (756 reals)*2 transverse      = 12096 B
+  !   (D) subgrid_edge_e_t (Ex,Ey,Ez)       3*216 reals*8                 =  5184 B
+  !   (E) subgrid_emf_t (emfx,emfy,emfz)    3*27  reals*8                 =   648 B
+  !   (F) subgrid_corner_state_t * 4        each 8 reals*216*3 = 5184 reals
+  !       (qRT,qRB,qLT,qLB)                 4*5184*8                      = 165888 B
+  !   (G) reused hydro interface arrays * 6 6 * 5 reals * 12 (already in the
+  !       (subgrid_3x2x2 / 2x3x2 / 2x2x3)   hydro kernel)                 =  2880 B
+  !       ------------------------------------------------------------------------
+  !       TOTAL per block                                                 = 207432 B
+  !                                                                       = 202.6 KB
+  !
+  ! VERDICT (sm_80 / A100):
+  !   * Default STATIC shared/block limit = 48 KB (49152 B): 207432 B is 4.2x over.
+  !   * Opt-in MAX shared/block          = 163 KB (166912 B usable, 164 KB SM total
+  !     minus ~1 KB reserved): 207432 B is ~40 KB over even the opt-in.
+  !   => The footprint as specified does NOT fit, even with the opt-in. The four
+  !      corner states (F) alone are 165888 B = 162 KB = 80% of the total.
+  !
+  !   NOTE: reducing threads/block does NOT shrink per-block shared memory here --
+  !   the subgrids are sized by nsubgrid (compile-time), not by thread count. A
+  !   single block must hold the whole footprint, so a 203 KB block cannot launch
+  !   at ANY thread count (it exceeds the 164 KB hardware max). Thread/block count
+  !   only affects occupancy once the block already fits. So spilling is mandatory.
+  !
+  ! RECOMMENDATION (in priority order):
+  !   1. SPILL the 4 corner-state buffers (F, 162 KB) to a device global scratch
+  !      array, indexed per block like the CPU h%qRT/h%qRB/h%qLT/h%qLB workspace
+  !      (declare alongside uold/unew in gpu_runner.cuf, shape ~ (num_blocks,...)).
+  !      They are large and consumed once (by cmp_mag_flx), so they are the
+  !      least-reused-per-byte candidate. Resident shared then drops to
+  !      207432 - 165888 = 41544 B = 40.6 KB, which fits the 48 KB DEFAULT static
+  !      shared limit at the current 64 threads/block -- no opt-in, no kernel
+  !      restructuring beyond the spill.
+  !   2. (Optional, more headroom) also spill dbf (C, 11.8 KB) -> 29448 B = 28.8 KB
+  !      resident, leaving room for the MHD interface-flux widening in C2.
+  !   3. ALTERNATIVE to spilling, if corner states must stay on-chip: compute one
+  !      edge direction at a time (drop the trailing 1:3) so (F) becomes
+  !      4*8*216*8 = 55296 B = 54 KB; total resident = 40.6 + 54 = 94.6 KB. That
+  !      needs DYNAMIC shared memory plus the sm_80 96-164 KB opt-in (static shared
+  !      is hard-capped at 48 KB), so it is strictly more work than (1). Prefer (1).
+  !
+  ! Reference: the current hydro_integrator_kernel resident shared is
+  !   subgrid_6x6x6cell_primitive (5*216*8 + 864 = 9504 B) + 6 interface arrays
+  !   (2880 B) = 12384 B = 12.1 KB. Option (1) keeps MHD at ~3.4x that, under 48 KB.
+  ! ##########################################################################
+
 #ifndef PAPER
   attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
@@ -2760,681 +2912,6 @@ contains
     end select
   end subroutine compute_slopes
 
-  ! ===========================================================================
-  ! Plane-sweep MHD integrator spine (Stages B1 build-half / B2 / B3 / C1).
-  !
-  ! These attributes(device) routines are the MHD analogs of the hydro paper
-  ! kernel's inline phases (ctoprim ~:2836, slopes ~:2853/compute_slopes,
-  ! trace/qL-qR ~:2882-3095). They are written with explicit-shape ring dummy
-  ! args (mirroring compute_slopes' signature style) so they compile standalone;
-  ! the matching `shared ::` declarations + the iz-loop slot rotation land in the
-  ! C7 fused kernel (mhd_integrator_paper_kernel). They are "compile-shaped but
-  ! not yet called" until C7 — exactly like B4/B5. No `#ifdef MHD`: MHD is gated
-  ! at runtime (sim%r%mhd host-side; `logical,value::induction` /
-  ! `integer,value::slope_mag_type` device-side).
-  !
-  ! ------------------------- RING / PLANE BUFFER SET (B1 build half) ----------
-  ! Widths: nprim = NVAR+3 = 11 (rho, vx,vy,vz, P@5, Bx,By,Bz@6-8, s1,s2,s3@9-11);
-  !         ie = 8 (corner states need only the 8 MHD vars, NOT the scalars).
-  ! With nsubgrid=1: m = 2*nsubgrid = 2, mf = m+4 = 6, interior (m+2) = 4.
-  !
-  !   buffer        shape (slot dim last)            z-depth  role
-  !   q_storage     (1:mf,1:mf, nprim, 3)            3        primitive ring (im/ic/ip)
-  !   qds           (2:mf-1,2:mf-1, nprim, 3)        1        cell slopes /dx (3 = X/Y/Z dirs)
-  !   bf_storage    (1:mf,1:mf, 3, 3)                3        face-continuous B ring (CPU h%bf)
-  !   dbf_storage   (1:mf,1:mf, 3, 2, 2)             2        face-B transverse slopes (CPU h%dbf)
-  !   edge_e        (1:mf,1:mf, 3, 2)                2        raw edge-E Ex/Ey/Ez (CPU h%Ex/Ey/Ez)
-  !   qRT/qRB/qLT/qLB (2:mf-1,2:mf-1, ie, 3, 2)      2        corner states (CPU h%qRT..),3 orient
-  !   qm_out/qp_out (2:mf-1,2:mf-1, nprim, 3)        1        face states -> 1D Riemann (C2)
-  !   emf           (2:mf-1,2:mf-1, 3, 2)            2        2D-Riemann EMF *dt/dx (C3/C5)
-  ! The active-cell (m+2)^2 buffers (qds/corners/qm-qp/emf) use interior bounds
-  ! 2:mf-1, exactly like the hydro kernel's qds/qL/qR (:2787-2790); the mf^2
-  ! buffers (q_storage/bf/dbf/edge_e) carry the ghost ring the +1 stencil reads.
-  !
-  ! ------------------------- Z-RING DEPTH DERIVATION --------------------------
-  ! The CT/EMF stencil reaches +/-1 plane in z (edge EMFs couple two transverse
-  ! directions). Tracing the data dependence of the CT face-B update at plane k
-  ! (godunov_fine.f90:825 dflux_x = (emfy(k)-emfy(k+1)) - (emfz(k)-emfz(k+1?)))
-  ! back through the pipeline:
-  !   * primitive ring q_storage : 3 (k-1,k,k+1) — z cell-slope dq(*,3) needs
-  !     k-1,k,k+1; same as the hydro paper kernel.
-  !   * bf_storage : 3 (k-1,k,k+1) — needed for (a) dbf z-slopes of Bx/By at
-  !     plane k (uslope umuscl.f90:2273-2280/2298-2305 read bf at k-1,k,k+1),
-  !     (b) the face values AL..CR with CR=bf(k+1) (trace umuscl.f90:966), and
-  !     (c) edge-E Ex/Ey which average bf over k-1,k (Ex,Ey) and k,k+1.
-  !   * dbf_storage : 2 (k,k+1) — the trace reads dbf at plane k for all comps and
-  !     additionally dCRx/dCRy = dbf(k+1, comp 3) (umuscl.f90:980/982); dbf(...,3,*)
-  !     at k+1 needs only in-plane bf(k+1), so bf depth stays 3 (not 4).
-  !   * edge_e : 2 (k,k+1) — the trace reads Ex/Ey at k and k+1 (ELR/FLR,
-  !     umuscl.f90:986/992); Ez at k only.
-  !   * corner states : 2 (k,k+1) — cmp_mag_flx (C3) for emfx/emfy passes the
-  !     RT/LT corners over (ku1+1:ku2+1) and RB/LB over (ku1:ku2) (umuscl.f90:238-256),
-  !     i.e. they couple planes k and k+1; emfz (orientation 3) is in-plane (k only).
-  !   A single plane is insufficient; a full cube is forbidden (it is the cube
-  !   corner-state global spill that the z-ring eliminates). Corner orientation 3
-  !   (emfz, z-edges) is in-plane, so only orientations 1,2 truly need depth 2 —
-  !   this is the fold (i) below.
-  !
-  ! ------------------------- O(plane) SHARED-MEMORY BUDGET (replaces 202 KB cube)
-  ! FP64, nsubgrid=1 (mf**2=36, (m+2)**2=16, nprim=11, ie=8). NAIVE all-resident
-  ! footprint, every buffer at the shapes/depths declared in the routine dummies:
-  !   q_storage   36*11*3   *8 =  9504 B   (reused for fluxes via associate, like hydro)
-  !   qds         16*11*3   *8 =  4224 B
-  !   bf_storage  36* 3*3   *8 =  2592 B
-  !   dbf_storage 36* 3*2*2 *8 =  3456 B
-  !   edge_e      36* 3*2   *8 =  1728 B
-  !   qm_out+qp_out 2*16*11*3*8 =  8448 B
-  !   corners x4  4*16*8*3*2 *8 = 24576 B   (3 orientations, depth 2)
-  !   emf         16* 3*2   *8 =   768 B
-  !   ------------------------------------------------------------------
-  !   NAIVE TOTAL              = 55296 B ~= 54.0 KB  -> OVER the 48 KB sm_80 limit.
-  ! The corner states dominate (the hydro paper kernel is only ~8.6 KB). Two folds,
-  ! both belonging to the C7 `shared::` choreography (NOT a global spill), bring the
-  ! PEAK resident footprint back under 48 KB; the device routines below are agnostic
-  ! to the chosen layout (each touches only the (ix,iy)/slot/orientation it is given):
-  !   (i)  corner orientation 3 (in-plane emfz) at depth 1, not 2:
-  !          corners = 4*16*8*(2+2+1)*8 = 20480 B   (saves 4096 B)  -> 50.0 KB
-  !   (ii) the qm/qp face states (live trace->1D-Riemann) and the corner states
-  !        (live trace->cmp_mag_flx) are consumed in different micro-phases of the
-  !        iz step, so C7 overlaps qm/qp with scratch / the q_storage flux slot via
-  !        `associate` (the hydro `associate(flux=>q_storage(:,:,:,im))` trick,
-  !        ~:2833): peak ~ NAIVE - qm/qp - 4096 = 46784 B ~= 45.7 KB  < 48 KB.
-  ! If nsubgrid grows toward the ceiling, tile the x-y plane (existing FIXME ~:2815)
-  ! or shrink a ring further -- do NOT reintroduce a global-scratch spill.
-  ! ===========================================================================
-
-  ! ===========================================================================
-  !> @brief (Stage B2) Load the 6 raw face-B values bold(cell,1:6) for cell
-  !> (ix,iy,iz) of a subgrid. Byte-for-byte the same nbor/oct-wrap index
-  !> arithmetic as load_conserved (:2503) — periodic neighbours come for free via
-  !> the nbor wrap, so there is no boundary special case (periodic-only port).
-  attributes(device) function load_bfield(ix, iy, iz, bold, nbor, subgrid_idx) result(Bin)
-    real(kind=dp) :: Bin(1:6)
-    integer(kind=4), intent(in) :: ix, iy, iz
-    real(kind=dp), device :: bold(1:twotondim,1:6,*)
-    integer(kind=4), device :: nbor(1:subgridsize,*)
-    integer(kind=4), value :: subgrid_idx
-    integer :: jx, jy, jz, nbor_idx, cell_idx, oct_idx, ib
-
-    jx = (ix - 1)/2 ! oct coordinates (zero based)
-    jy = (iy - 1)/2
-    jz = (iz - 1)/2
-    nbor_idx = 1 + jx + nsubgridp2 * jy + nsubgridp2sq * jz
-    cell_idx = ix - 2*jx + 2*((iy-1) - 2*jy) + 4*((iz-1) - 2*jz)
-    oct_idx = nbor(nbor_idx, subgrid_idx) ! Get idx of oct to load
-
-    do ib = 1, 6
-       Bin(ib) = bold(cell_idx, ib, oct_idx)
-    end do
-  end function load_bfield
-  ! ===========================================================================
-
-  ! ===========================================================================
-  !> @brief (Stage B2) Per-plane MHD ctoprim + face-continuous B fill. Mirrors
-  !> step 2 of the hydro paper kernel (:2836-2847) for the hydro conversion, and
-  !> CPU ctoprim (umuscl.f90:1762-1845) for the MHD additions, restructured
-  !> cube -> one (ix,iy) plane into ring slot `slot`:
-  !>   * face-continuous B into bf_storage (CPU bf, umuscl.f90:1768/1781/1794):
-  !>     a cell's low face on an axis = 0.5*(self_low + low-neighbour_high). The
-  !>     low neighbour is fetched straight from global `bold` via load_bfield with
-  !>     the periodic nbor wrap (no ring coupling needed for the bf build), so the
-  !>     stored value is single-valued at each face (face-B redundancy / divB).
-  !>   * cell-centred B = 0.5*(B_low+B_high) per axis into q_storage(6:8)
-  !>     (umuscl.f90:1826-1828).
-  !>   * pressure formed AFTER subtracting emag = 0.5*(Bx^2+By^2+Bz^2) from the
-  !>     total energy (umuscl.f90:1830-1845): q(5)=(gamma-1)*(E - Ekin - emag).
-  !>   * passive scalars q(ie+n)=uold(5+n)/rho into 9..11 (umuscl.f90:1870-1879).
-  !> Floors (smallr/smalle) and the gravity predictor are intentionally omitted to
-  !> stay byte-identical to the hydro paper kernel's floor-free ctoprim (the
-  !> trace applies smallr/smallp on the reconstructed states; gravity is a shared
-  !> FIXME ~:2883). The ix-iy plane fill is embarrassingly parallel (one thread per
-  !> column); C7 places a syncthreads() before the slope/trace stages.
-  attributes(device) subroutine mhd_ctoprim_fill(ix, iy, iz, slot, uold, bold, &
-       & nbor, subgrid_idx, q_storage, bf_storage, gamma, mf)
-    integer(kind=4), value :: ix, iy, iz, slot, subgrid_idx, mf
-    real(kind=dp), value :: gamma
-    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
-    real(kind=dp), device :: bold(1:twotondim,1:6,*)
-    integer(kind=4), device :: nbor(1:subgridsize,*)
-    real(kind=dp) :: q_storage(1:mf,1:mf,1:nprim,1:3)
-    real(kind=dp) :: bf_storage(1:mf,1:mf,1:3,1:3)
-
-    real(kind=dp) :: Uin(1:nvar), b0(1:6), bxm(1:6), bym(1:6), bzm(1:6)
-    real(kind=dp) :: invD, Ekin, emag, Bxc, Byc, Bzc
-    integer :: n
-
-    Uin = load_conserved(ix,   iy,   iz,   uold, nbor, subgrid_idx)
-    b0  = load_bfield   (ix,   iy,   iz,   bold, nbor, subgrid_idx) ! this cell
-    bxm = load_bfield   (ix-1, iy,   iz,   bold, nbor, subgrid_idx) ! low-x neighbour
-    bym = load_bfield   (ix,   iy-1, iz,   bold, nbor, subgrid_idx) ! low-y neighbour
-    bzm = load_bfield   (ix,   iy,   iz-1, bold, nbor, subgrid_idx) ! low-z neighbour
-
-    ! Face-continuous B at the low faces of this cell (CPU ctoprim:1768/1781/1794).
-    ! bf_storage(ix,iy,d,slot) is the low-d face of cell ix; the high-d face is
-    ! bf_storage(ix+1,..)/(ix,iy+1,..)/(next-slot) i.e. the next cell's low face,
-    ! keeping the field single-valued at every face.
-    bf_storage(ix,iy,1,slot) = 0.5_dp*(b0(1) + bxm(4))
-    bf_storage(ix,iy,2,slot) = 0.5_dp*(b0(2) + bym(5))
-    bf_storage(ix,iy,3,slot) = 0.5_dp*(b0(3) + bzm(6))
-
-    ! Cell-centred B = average of the two opposing faces of THIS cell.
-    Bxc = 0.5_dp*(b0(1) + b0(4))
-    Byc = 0.5_dp*(b0(2) + b0(5))
-    Bzc = 0.5_dp*(b0(3) + b0(6))
-
-    ! Hydro conversion (paper kernel step 2), then MHD energy correction.
-    invD = 1.0_dp / Uin(1)
-    q_storage(ix,iy,1,slot) = Uin(1)
-    q_storage(ix,iy,2,slot) = Uin(2)*invD
-    q_storage(ix,iy,3,slot) = Uin(3)*invD
-    q_storage(ix,iy,4,slot) = Uin(4)*invD
-    Ekin = 0.5_dp*( Uin(2)*q_storage(ix,iy,2,slot) + &
-         &          Uin(3)*q_storage(ix,iy,3,slot) + &
-         &          Uin(4)*q_storage(ix,iy,4,slot) )
-    emag = 0.5_dp*( Bxc*Bxc + (Byc*Byc + Bzc*Bzc) )
-    q_storage(ix,iy,5,slot) = (gamma - 1.0_dp)*(Uin(5) - Ekin - emag)
-    q_storage(ix,iy,6,slot) = Bxc
-    q_storage(ix,iy,7,slot) = Byc
-    q_storage(ix,iy,8,slot) = Bzc
-
-    ! Passive scalars: q(ie+n) = uold(5+n)/rho (ie=8 under MHD, nener=0).
-    do n = 1, nvar-5
-       q_storage(ix,iy,ie+n,slot) = Uin(5+n)*invD
-    end do
-  end subroutine mhd_ctoprim_fill
-  ! ===========================================================================
-
-  ! ===========================================================================
-  !> @brief (Stage B3, part 1 — cell-centred slopes incl. B.) No new routine is
-  !> needed: the existing compute_slopes (:2599) is generic over its `nvar` dummy
-  !> and loops `do ivar = 1, nvar`. The C7 kernel computes the MHD cell slopes by
-  !> calling it with the primitive ring widened to nprim:
-  !>     call compute_slopes(q_storage, qds, ix, iy, ic, im, ip, idx, slope, mf, nprim)
-  !> so Bx,By,Bz (idx 6-8) and the passive scalars (9-11) fall out automatically
-  !> into qds(...,1:nprim,1:3). qds carries the 1/dx factor (slope-per-length),
-  !> exactly as for hydro; the trace's hdx*qds recovers CPU's half*dq (umuscl.f90
-  !> trace3d:1034). slope_type selects the limiter at runtime.
-  ! ===========================================================================
-
-  ! ===========================================================================
-  !> @brief (Stage B3, part 2) Face-B transverse slopes dbf for one (ix,iy) plane
-  !> into ring slot `dslot`. Direct transliteration of the INLINE dbf branch of
-  !> CPU uslope (umuscl.f90:2255-2333, the 3D `#ifdef MHD` block) — NOT the
-  !> compute_2d_tvd/compute_1d_tvd interpolation limiters (those are Stage D4).
-  !> Two transverse slopes per face-B component, with the moncen/minmod family
-  !> selected at runtime by slope_mag_type (CPU uses fac = MIN(slope_mag_type,2)):
-  !>   dbf(:,1,1)=Bx slope along Y, dbf(:,1,2)=Bx slope along Z  (umuscl.f90:2264/2273)
-  !>   dbf(:,2,1)=By slope along X, dbf(:,2,2)=By slope along Z  (umuscl.f90:2289/2298)
-  !>   dbf(:,3,1)=Bz slope along X, dbf(:,3,2)=Bz slope along Y  (umuscl.f90:2314/2323)
-  !> The Z-slopes of Bx and By read bf at planes k-1 (bm1), k (bc), k+1 (bp1); all
-  !> in-plane slopes read bc only. dbf is a RAW value-slope (no 1/dx): the trace
-  !> uses 0.5*dbf as a half-cell face-value extrapolation, so unlike the cell
-  !> slopes qds it is NOT divided by dx.
-  attributes(device) subroutine mhd_face_b_slopes(ix, iy, bf_storage, dbf_storage, &
-       & bm1, bc, bp1, dslot, slope_mag_type, mf)
-    integer, value :: ix, iy, bm1, bc, bp1, dslot, slope_mag_type, mf
-    real(kind=dp) :: bf_storage(1:mf,1:mf,1:3,1:3)
-    real(kind=dp) :: dbf_storage(1:mf,1:mf,1:3,1:2,1:2)
-
-    real(kind=dp) :: dlft, drgt, dcen, dsgn, slop, dlim, fac
-    real(kind=dp), parameter :: half = 0.5_dp, zero = 0.0_dp, one = 1.0_dp
-
-    if (slope_mag_type == 0) then   ! mirror CPU uslope guard (umuscl.f90:2256)
-       dbf_storage(ix,iy,1,1,dslot) = zero
-       dbf_storage(ix,iy,1,2,dslot) = zero
-       dbf_storage(ix,iy,2,1,dslot) = zero
-       dbf_storage(ix,iy,2,2,dslot) = zero
-       dbf_storage(ix,iy,3,1,dslot) = zero
-       dbf_storage(ix,iy,3,2,dslot) = zero
-       return
-    end if
-    fac = real(min(slope_mag_type,2), kind=dp)
-
-    ! Bx (comp 1) slope along Y (transverse index 1) -- umuscl.f90:2264-2271
-    dlft = fac*(bf_storage(ix,iy  ,1,bc) - bf_storage(ix,iy-1,1,bc))
-    drgt = fac*(bf_storage(ix,iy+1,1,bc) - bf_storage(ix,iy  ,1,bc))
-    dcen = half*(dlft+drgt)/fac
-    dsgn = sign(one, dcen)
-    slop = min(abs(dlft),abs(drgt))
-    dlim = merge(zero, slop, (dlft*drgt) <= zero)
-    dbf_storage(ix,iy,1,1,dslot) = dsgn*min(dlim,abs(dcen))
-    ! Bx (comp 1) slope along Z (transverse index 2) -- umuscl.f90:2273-2280
-    dlft = fac*(bf_storage(ix,iy,1,bc ) - bf_storage(ix,iy,1,bm1))
-    drgt = fac*(bf_storage(ix,iy,1,bp1) - bf_storage(ix,iy,1,bc ))
-    dcen = half*(dlft+drgt)/fac
-    dsgn = sign(one, dcen)
-    slop = min(abs(dlft),abs(drgt))
-    dlim = merge(zero, slop, (dlft*drgt) <= zero)
-    dbf_storage(ix,iy,1,2,dslot) = dsgn*min(dlim,abs(dcen))
-
-    ! By (comp 2) slope along X (transverse index 1) -- umuscl.f90:2289-2296
-    dlft = fac*(bf_storage(ix  ,iy,2,bc) - bf_storage(ix-1,iy,2,bc))
-    drgt = fac*(bf_storage(ix+1,iy,2,bc) - bf_storage(ix  ,iy,2,bc))
-    dcen = half*(dlft+drgt)/fac
-    dsgn = sign(one, dcen)
-    slop = min(abs(dlft),abs(drgt))
-    dlim = merge(zero, slop, (dlft*drgt) <= zero)
-    dbf_storage(ix,iy,2,1,dslot) = dsgn*min(dlim,abs(dcen))
-    ! By (comp 2) slope along Z (transverse index 2) -- umuscl.f90:2298-2305
-    dlft = fac*(bf_storage(ix,iy,2,bc ) - bf_storage(ix,iy,2,bm1))
-    drgt = fac*(bf_storage(ix,iy,2,bp1) - bf_storage(ix,iy,2,bc ))
-    dcen = half*(dlft+drgt)/fac
-    dsgn = sign(one, dcen)
-    slop = min(abs(dlft),abs(drgt))
-    dlim = merge(zero, slop, (dlft*drgt) <= zero)
-    dbf_storage(ix,iy,2,2,dslot) = dsgn*min(dlim,abs(dcen))
-
-    ! Bz (comp 3) slope along X (transverse index 1) -- umuscl.f90:2314-2321
-    dlft = fac*(bf_storage(ix  ,iy,3,bc) - bf_storage(ix-1,iy,3,bc))
-    drgt = fac*(bf_storage(ix+1,iy,3,bc) - bf_storage(ix  ,iy,3,bc))
-    dcen = half*(dlft+drgt)/fac
-    dsgn = sign(one, dcen)
-    slop = min(abs(dlft),abs(drgt))
-    dlim = merge(zero, slop, (dlft*drgt) <= zero)
-    dbf_storage(ix,iy,3,1,dslot) = dsgn*min(dlim,abs(dcen))
-    ! Bz (comp 3) slope along Y (transverse index 2) -- umuscl.f90:2323-2330
-    dlft = fac*(bf_storage(ix,iy  ,3,bc) - bf_storage(ix,iy-1,3,bc))
-    drgt = fac*(bf_storage(ix,iy+1,3,bc) - bf_storage(ix,iy  ,3,bc))
-    dcen = half*(dlft+drgt)/fac
-    dsgn = sign(one, dcen)
-    slop = min(abs(dlft),abs(drgt))
-    dlim = merge(zero, slop, (dlft*drgt) <= zero)
-    dbf_storage(ix,iy,3,2,dslot) = dsgn*min(dlim,abs(dcen))
-  end subroutine mhd_face_b_slopes
-  ! ===========================================================================
-
-  ! ===========================================================================
-  !> @brief (Stage C1, part 1) Raw edge-centred electric field Ex,Ey,Ez for one
-  !> (ix,iy) edge column at target plane k, into edge_e ring slot `se`. Direct
-  !> transliteration of the edge-E loop of CPU trace3d (umuscl.f90:935-951):
-  !>   Ex = v*C - w*B,   Ey = w*A - u*C,   Ez = u*B - v*A
-  !> with v,w,u 4-cell velocity averages and A,B,C 2-face B averages. Ex and Ey
-  !> average over the z-faces, so they COUPLE planes k-1 (q slot qm1, bf slot bm1)
-  !> and k (q slot qc, bf slot bc); Ez is fully in-plane (k only). The edge-E is
-  !> RAW (no dt/dx) — the trace scales the curl-of-E by dt/dx*half itself, and the
-  !> 2D-Riemann EMF (C3) applies its own dt/dx at write-back (umuscl.f90:231/248/263),
-  !> so do NOT pre-scale here.
-  attributes(device) subroutine mhd_edge_emf(ix, iy, q_storage, bf_storage, edge_e, &
-       & qm1, qc, bm1, bc, se, mf)
-    integer, value :: ix, iy, qm1, qc, bm1, bc, se, mf
-    real(kind=dp) :: q_storage(1:mf,1:mf,1:nprim,1:3)
-    real(kind=dp) :: bf_storage(1:mf,1:mf,1:3,1:3)
-    real(kind=dp) :: edge_e(1:mf,1:mf,1:3,1:2)
-
-    real(kind=dp) :: uu, vv, ww, Aa, Bb, Cc
-    integer, parameter :: iu = 2, iv = 3, iw = 4
-
-    ! Ex(i,j,k) = v*C - w*B  (x-edge at (i,j-1/2,k-1/2))
-    vv = 0.25_dp*( q_storage(ix,iy-1,iv,qm1) + q_storage(ix,iy-1,iv,qc) + &
-         &         q_storage(ix,iy  ,iv,qm1) + q_storage(ix,iy  ,iv,qc) )
-    ww = 0.25_dp*( q_storage(ix,iy-1,iw,qm1) + q_storage(ix,iy-1,iw,qc) + &
-         &         q_storage(ix,iy  ,iw,qm1) + q_storage(ix,iy  ,iw,qc) )
-    Bb = 0.5_dp*( bf_storage(ix,iy  ,2,bm1) + bf_storage(ix,iy  ,2,bc) )
-    Cc = 0.5_dp*( bf_storage(ix,iy-1,3,bc ) + bf_storage(ix,iy  ,3,bc) )
-    edge_e(ix,iy,1,se) = vv*Cc - ww*Bb
-
-    ! Ey(i,j,k) = w*A - u*C  (y-edge at (i-1/2,j,k-1/2))
-    uu = 0.25_dp*( q_storage(ix-1,iy,iu,qm1) + q_storage(ix-1,iy,iu,qc) + &
-         &         q_storage(ix  ,iy,iu,qm1) + q_storage(ix  ,iy,iu,qc) )
-    ww = 0.25_dp*( q_storage(ix-1,iy,iw,qm1) + q_storage(ix-1,iy,iw,qc) + &
-         &         q_storage(ix  ,iy,iw,qm1) + q_storage(ix  ,iy,iw,qc) )
-    Aa = 0.5_dp*( bf_storage(ix  ,iy,1,bm1) + bf_storage(ix,iy,1,bc) )
-    Cc = 0.5_dp*( bf_storage(ix-1,iy,3,bc ) + bf_storage(ix,iy,3,bc) )
-    edge_e(ix,iy,2,se) = ww*Aa - uu*Cc
-
-    ! Ez(i,j,k) = u*B - v*A  (z-edge at (i-1/2,j-1/2,k), in-plane)
-    uu = 0.25_dp*( q_storage(ix-1,iy-1,iu,qc) + q_storage(ix-1,iy,iu,qc) + &
-         &         q_storage(ix  ,iy-1,iu,qc) + q_storage(ix  ,iy,iu,qc) )
-    vv = 0.25_dp*( q_storage(ix-1,iy-1,iv,qc) + q_storage(ix-1,iy,iv,qc) + &
-         &         q_storage(ix  ,iy-1,iv,qc) + q_storage(ix  ,iy,iv,qc) )
-    Aa = 0.5_dp*( bf_storage(ix,iy-1,1,bc) + bf_storage(ix,iy,1,bc) )
-    Bb = 0.5_dp*( bf_storage(ix-1,iy,2,bc) + bf_storage(ix,iy,2,bc) )
-    edge_e(ix,iy,3,se) = uu*Bb - vv*Aa
-  end subroutine mhd_edge_emf
-  ! ===========================================================================
-
-  ! ===========================================================================
-  !> @brief (Stage C1, part 2) Per-plane MHD MUSCL predictor + corner states for
-  !> one cell (ix,iy) at plane k. Line-for-line transliteration of the main cell
-  !> loop of CPU trace3d (umuscl.f90:956-1448); only the cube iteration becomes a
-  !> z-sweep. Reads: primitive ring slot qc (cell values), cell slopes qds (plane
-  !> k, carries 1/dx), face-B ring slots bc(k)/bp1(k+1), dbf ring slots dc(k)/
-  !> dp1(k+1), edge-E ring slots ec(k)/ep1(k+1). Writes: qp_out/qm_out (the right/
-  !> left interface states for the 6 faces) and the four edge corner states
-  !> qRT/qRB/qLT/qLB (8-wide, 3 orientations) into z-ring slot cs.
-  !>
-  !> Slope conventions: cell slopes use hdx*qds == CPU half*dq (hdx=0.5*dx, qds is
-  !> slope/dx). Face-B transverse slopes use 0.5*dbf (dbf is a raw value-slope).
-  !> Phases mirror CPU exactly:
-  !>   (a) face-B predicted states AL..CR via the discrete curl of edge-E
-  !>       (umuscl.f90:1003-1015) — the NORMAL B at each face is a single
-  !>       face-predicted value (AL for x-, AR for x+, etc.), which is what keeps
-  !>       B single-valued at faces and divB clean.
-  !>   (b) cell-centred predictor with full MHD source terms incl. the Lorentz
-  !>       force (umuscl.f90:1077-1090); when `induction` is .true. the velocity
-  !>       source terms su0/sv0/sw0 are zeroed (kinematic-dynamo mode).
-  !>   (c) qm/qp for the 6 faces: NORMAL B = face-predicted (AL/AR/BL/BR/CL/CR),
-  !>       TRANSVERSE B = cell-predicted +/- hdx*qds (umuscl.f90:1118-1218).
-  !>   (d) the four corner states for the 3 edge orientations (umuscl.f90:1226-1417)
-  !>       feeding the 2D EMF solver (C3) — normal-B uses the bf+dbf face slopes,
-  !>       transverse fields use the cell predictor + cell slopes.
-  !>   (e) passive-scalar advection predictor (umuscl.f90:1423-1448).
-  !> Floors smallr/smallp (smallp=smallr*smallc**2) match CPU; the one CPU typo at
-  !> umuscl.f90:1284 (qLB X-edge density floor writes ir from p) is reproduced
-  !> verbatim and flagged, so E2 matches CPU to round-off.
-  attributes(device) subroutine mhd_trace_predict(ix, iy, q_storage, qds, &
-       & bf_storage, dbf_storage, edge_e, qm_out, qp_out, qRT, qRB, qLT, qLB, &
-       & qc, bc, bp1, dc, dp1, ec, ep1, cs, dx, dt, gamma, smallr, smallc, &
-       & induction, mf)
-    integer, value :: ix, iy, qc, bc, bp1, dc, dp1, ec, ep1, cs, mf
-    real(kind=dp), value :: dx, dt, gamma, smallr, smallc
-    logical, value :: induction
-    real(kind=dp) :: q_storage(1:mf,1:mf,1:nprim,1:3)
-    real(kind=dp) :: qds(2:mf-1,2:mf-1,1:nprim,1:3)
-    real(kind=dp) :: bf_storage(1:mf,1:mf,1:3,1:3)
-    real(kind=dp) :: dbf_storage(1:mf,1:mf,1:3,1:2,1:2)
-    real(kind=dp) :: edge_e(1:mf,1:mf,1:3,1:2)
-    ! Active-cell (interior) buffers, like the hydro kernel's qL/qR (:2789-2790).
-    real(kind=dp) :: qm_out(2:mf-1,2:mf-1,1:nprim,1:3)
-    real(kind=dp) :: qp_out(2:mf-1,2:mf-1,1:nprim,1:3)
-    real(kind=dp) :: qRT(2:mf-1,2:mf-1,1:ie,1:3,1:2)
-    real(kind=dp) :: qRB(2:mf-1,2:mf-1,1:ie,1:3,1:2)
-    real(kind=dp) :: qLT(2:mf-1,2:mf-1,1:ie,1:3,1:2)
-    real(kind=dp) :: qLB(2:mf-1,2:mf-1,1:ie,1:3,1:2)
-
-    real(kind=dp) :: dtdx, hdx, smallp, r0, p0
-    real(kind=dp) :: r, u, v, w, p, A, B, C
-    real(kind=dp) :: drx, dux, dvx, dwx, dpx
-    real(kind=dp) :: dry, duy, dvy, dwy, dpy
-    real(kind=dp) :: drz, duz, dvz, dwz, dpz
-    real(kind=dp) :: dBx, dCx, dAy, dCy, dAz, dBz
-    real(kind=dp) :: AL, AR, BL, BR, CL, CR
-    real(kind=dp) :: dALy, dARy, dALz, dARz, dBLx, dBRx, dBLz, dBRz, dCLx, dCRx, dCLy, dCRy
-    real(kind=dp) :: sAL0, sAR0, sBL0, sBR0, sCL0, sCR0
-    real(kind=dp) :: ELL, ELR, ERL, ERR, FLL, FLR, FRL, FRR, GLL, GLR, GRL, GRR
-    real(kind=dp) :: sr0, su0, sv0, sw0, sp0
-    integer, parameter :: ir = 1, iu = 2, iv = 3, iw = 4, ip = 5, iA = 6, iB = 7, iC = 8
-    real(kind=dp), parameter :: half = 0.5_dp
-    integer :: n
-
-    dtdx   = dt/dx
-    hdx    = half*dx
-    smallp = smallr*smallc*smallc
-
-    ! ---- Face-centred values (umuscl.f90:961-966); CR is at plane k+1 ----------
-    AL = bf_storage(ix  ,iy  ,1,bc )
-    AR = bf_storage(ix+1,iy  ,1,bc )
-    BL = bf_storage(ix  ,iy  ,2,bc )
-    BR = bf_storage(ix  ,iy+1,2,bc )
-    CL = bf_storage(ix  ,iy  ,3,bc )
-    CR = bf_storage(ix  ,iy  ,3,bp1)
-
-    ! ---- Face-centred transverse slopes (umuscl.f90:969-982); dCRx/dCRy at k+1 -
-    dALy = half*dbf_storage(ix  ,iy  ,1,1,dc )
-    dARy = half*dbf_storage(ix+1,iy  ,1,1,dc )
-    dALz = half*dbf_storage(ix  ,iy  ,1,2,dc )
-    dARz = half*dbf_storage(ix+1,iy  ,1,2,dc )
-    dBLx = half*dbf_storage(ix  ,iy  ,2,1,dc )
-    dBRx = half*dbf_storage(ix  ,iy+1,2,1,dc )
-    dBLz = half*dbf_storage(ix  ,iy  ,2,2,dc )
-    dBRz = half*dbf_storage(ix  ,iy+1,2,2,dc )
-    dCLx = half*dbf_storage(ix  ,iy  ,3,1,dc )
-    dCRx = half*dbf_storage(ix  ,iy  ,3,1,dp1)
-    dCLy = half*dbf_storage(ix  ,iy  ,3,2,dc )
-    dCRy = half*dbf_storage(ix  ,iy  ,3,2,dp1)
-
-    ! ---- Edge-centred E gathered (umuscl.f90:985-1000); Ex/Ey couple k,k+1 -----
-    ELL = edge_e(ix  ,iy  ,1,ec )
-    ELR = edge_e(ix  ,iy  ,1,ep1)
-    ERL = edge_e(ix  ,iy+1,1,ec )
-    ERR = edge_e(ix  ,iy+1,1,ep1)
-    FLL = edge_e(ix  ,iy  ,2,ec )
-    FLR = edge_e(ix  ,iy  ,2,ep1)
-    FRL = edge_e(ix+1,iy  ,2,ec )
-    FRR = edge_e(ix+1,iy  ,2,ep1)
-    GLL = edge_e(ix  ,iy  ,3,ec )
-    GLR = edge_e(ix  ,iy+1,3,ec )
-    GRL = edge_e(ix+1,iy  ,3,ec )
-    GRR = edge_e(ix+1,iy+1,3,ec )
-
-    ! ---- Face-centred predicted states: discrete curl of edge-E (umuscl.f90:1003)
-    sAL0 = + (GLR-GLL) - (FLR-FLL)
-    sAR0 = + (GRR-GRL) - (FRR-FRL)
-    sBL0 = - (GRL-GLL) + (ELR-ELL)
-    sBR0 = - (GRR-GLR) + (ERR-ERL)
-    sCL0 = + (FRL-FLL) - (ERL-ELL)
-    sCR0 = + (FRR-FLR) - (ERR-ELR)
-    AL = AL + sAL0*dtdx*half
-    AR = AR + sAR0*dtdx*half
-    BL = BL + sBL0*dtdx*half
-    BR = BR + sBR0*dtdx*half
-    CL = CL + sCL0*dtdx*half
-    CR = CR + sCR0*dtdx*half
-
-    ! ---- Cell-centred values + slopes (umuscl.f90:1018-1075) -------------------
-    r = q_storage(ix,iy,ir,qc); r0 = r
-    u = q_storage(ix,iy,iu,qc)
-    v = q_storage(ix,iy,iv,qc)
-    w = q_storage(ix,iy,iw,qc)
-    p = q_storage(ix,iy,ip,qc); p0 = p
-    A = q_storage(ix,iy,iA,qc)
-    B = q_storage(ix,iy,iB,qc)
-    C = q_storage(ix,iy,iC,qc)
-    ! hdx*qds == CPU half*dq (qds carries 1/dx)
-    drx = hdx*qds(ix,iy,ir,1); dux = hdx*qds(ix,iy,iu,1); dvx = hdx*qds(ix,iy,iv,1)
-    dwx = hdx*qds(ix,iy,iw,1); dpx = hdx*qds(ix,iy,ip,1)
-    dBx = hdx*qds(ix,iy,iB,1); dCx = hdx*qds(ix,iy,iC,1)
-    dry = hdx*qds(ix,iy,ir,2); duy = hdx*qds(ix,iy,iu,2); dvy = hdx*qds(ix,iy,iv,2)
-    dwy = hdx*qds(ix,iy,iw,2); dpy = hdx*qds(ix,iy,ip,2)
-    dAy = hdx*qds(ix,iy,iA,2); dCy = hdx*qds(ix,iy,iC,2)
-    drz = hdx*qds(ix,iy,ir,3); duz = hdx*qds(ix,iy,iu,3); dvz = hdx*qds(ix,iy,iv,3)
-    dwz = hdx*qds(ix,iy,iw,3); dpz = hdx*qds(ix,iy,ip,3)
-    dAz = hdx*qds(ix,iy,iA,3); dBz = hdx*qds(ix,iy,iB,3)
-
-    ! ---- Source terms incl. Lorentz force (umuscl.f90:1077-1090) ---------------
-    sr0 = -u*drx-v*dry-w*drz - (dux+dvy+dwz)*r
-    su0 = -u*dux-v*duy-w*duz - (dpx)/r
-    sv0 = -u*dvx-v*dvy-w*dvz - (dpy)/r
-    sw0 = -u*dwx-v*dwy-w*dwz - (dpz)/r
-    sp0 = -u*dpx-v*dpy-w*dpz - (dux+dvy+dwz)*gamma*p
-    su0 = su0 + (-(B*dBx+C*dCx)/r) + (B*dAy/r) + (C*dAz/r)
-    sv0 = sv0 + (A*dBx/r) + (-(A*dAy+C*dCy)/r) + (C*dBz/r)
-    sw0 = sw0 + (A*dCx/r) + (B*dCy/r) + (-(A*dAz+B*dBz)/r)
-    if (induction) then
-       su0 = 0.0_dp
-       sv0 = 0.0_dp
-       sw0 = 0.0_dp
-    end if
-
-    ! ---- Cell-centred predicted states (umuscl.f90:1102-1110) ------------------
-    r = r + sr0*dtdx
-    u = u + su0*dtdx
-    v = v + sv0*dtdx
-    w = w + sw0*dtdx
-    p = p + sp0*dtdx
-    A = half*(AL+AR)
-    B = half*(BL+BR)
-    C = half*(CL+CR)
-
-    ! ---- X faces: qp = low-x face, qm = high-x face (umuscl.f90:1118-1146) -----
-    qp_out(ix,iy,ir,1) = r - drx
-    qp_out(ix,iy,iu,1) = u - dux
-    qp_out(ix,iy,iv,1) = v - dvx
-    qp_out(ix,iy,iw,1) = w - dwx
-    qp_out(ix,iy,ip,1) = p - dpx
-    if (qp_out(ix,iy,ir,1) < smallr) qp_out(ix,iy,ir,1) = r0
-    if (qp_out(ix,iy,ip,1) < smallp) qp_out(ix,iy,ip,1) = p0
-    qp_out(ix,iy,iA,1) = AL
-    qp_out(ix,iy,iB,1) = B - dBx
-    qp_out(ix,iy,iC,1) = C - dCx
-    qm_out(ix,iy,ir,1) = r + drx
-    qm_out(ix,iy,iu,1) = u + dux
-    qm_out(ix,iy,iv,1) = v + dvx
-    qm_out(ix,iy,iw,1) = w + dwx
-    qm_out(ix,iy,ip,1) = p + dpx
-    if (qm_out(ix,iy,ir,1) < smallr) qm_out(ix,iy,ir,1) = r0
-    if (qm_out(ix,iy,ip,1) < smallp) qm_out(ix,iy,ip,1) = p0
-    qm_out(ix,iy,iA,1) = AR
-    qm_out(ix,iy,iB,1) = B + dBx
-    qm_out(ix,iy,iC,1) = C + dCx
-
-    ! ---- Y faces (umuscl.f90:1154-1182) ----------------------------------------
-    qp_out(ix,iy,ir,2) = r - dry
-    qp_out(ix,iy,iu,2) = u - duy
-    qp_out(ix,iy,iv,2) = v - dvy
-    qp_out(ix,iy,iw,2) = w - dwy
-    qp_out(ix,iy,ip,2) = p - dpy
-    if (qp_out(ix,iy,ir,2) < smallr) qp_out(ix,iy,ir,2) = r0
-    if (qp_out(ix,iy,ip,2) < smallp) qp_out(ix,iy,ip,2) = p0
-    qp_out(ix,iy,iA,2) = A - dAy
-    qp_out(ix,iy,iB,2) = BL
-    qp_out(ix,iy,iC,2) = C - dCy
-    qm_out(ix,iy,ir,2) = r + dry
-    qm_out(ix,iy,iu,2) = u + duy
-    qm_out(ix,iy,iv,2) = v + dvy
-    qm_out(ix,iy,iw,2) = w + dwy
-    qm_out(ix,iy,ip,2) = p + dpy
-    if (qm_out(ix,iy,ir,2) < smallr) qm_out(ix,iy,ir,2) = r0
-    if (qm_out(ix,iy,ip,2) < smallp) qm_out(ix,iy,ip,2) = p0
-    qm_out(ix,iy,iA,2) = A + dAy
-    qm_out(ix,iy,iB,2) = BR
-    qm_out(ix,iy,iC,2) = C + dCy
-
-    ! ---- Z faces (umuscl.f90:1190-1218) ----------------------------------------
-    qp_out(ix,iy,ir,3) = r - drz
-    qp_out(ix,iy,iu,3) = u - duz
-    qp_out(ix,iy,iv,3) = v - dvz
-    qp_out(ix,iy,iw,3) = w - dwz
-    qp_out(ix,iy,ip,3) = p - dpz
-    if (qp_out(ix,iy,ir,3) < smallr) qp_out(ix,iy,ir,3) = r0
-    if (qp_out(ix,iy,ip,3) < smallp) qp_out(ix,iy,ip,3) = p0
-    qp_out(ix,iy,iA,3) = A - dAz
-    qp_out(ix,iy,iB,3) = B - dBz
-    qp_out(ix,iy,iC,3) = CL
-    qm_out(ix,iy,ir,3) = r + drz
-    qm_out(ix,iy,iu,3) = u + duz
-    qm_out(ix,iy,iv,3) = v + dvz
-    qm_out(ix,iy,iw,3) = w + dwz
-    qm_out(ix,iy,ip,3) = p + dpz
-    if (qm_out(ix,iy,ir,3) < smallr) qm_out(ix,iy,ir,3) = r0
-    if (qm_out(ix,iy,ip,3) < smallp) qm_out(ix,iy,ip,3) = p0
-    qm_out(ix,iy,iA,3) = A + dAz
-    qm_out(ix,iy,iB,3) = B + dBz
-    qm_out(ix,iy,iC,3) = CR
-
-    ! ---- X-edge corner states (orientation 1) (umuscl.f90:1226-1289) -----------
-    qRT(ix,iy,ir,1,cs) = r + (+dry+drz); qRT(ix,iy,iu,1,cs) = u + (+duy+duz)
-    qRT(ix,iy,iv,1,cs) = v + (+dvy+dvz); qRT(ix,iy,iw,1,cs) = w + (+dwy+dwz)
-    qRT(ix,iy,ip,1,cs) = p + (+dpy+dpz)
-    qRT(ix,iy,iA,1,cs) = A + (+dAy+dAz); qRT(ix,iy,iB,1,cs) = BR + (   +dBRz)
-    qRT(ix,iy,iC,1,cs) = CR + (+dCRy   )
-    if (qRT(ix,iy,ir,1,cs) < smallr) qRT(ix,iy,ir,1,cs) = r
-    if (qRT(ix,iy,ip,1,cs) < smallp) qRT(ix,iy,ip,1,cs) = p
-    qRB(ix,iy,ir,1,cs) = r + (+dry-drz); qRB(ix,iy,iu,1,cs) = u + (+duy-duz)
-    qRB(ix,iy,iv,1,cs) = v + (+dvy-dvz); qRB(ix,iy,iw,1,cs) = w + (+dwy-dwz)
-    qRB(ix,iy,ip,1,cs) = p + (+dpy-dpz)
-    qRB(ix,iy,iA,1,cs) = A + (+dAy-dAz); qRB(ix,iy,iB,1,cs) = BR + (   -dBRz)
-    qRB(ix,iy,iC,1,cs) = CL + (+dCLy   )
-    if (qRB(ix,iy,ir,1,cs) < smallr) qRB(ix,iy,ir,1,cs) = r
-    if (qRB(ix,iy,ip,1,cs) < smallp) qRB(ix,iy,ip,1,cs) = p
-    qLT(ix,iy,ir,1,cs) = r + (-dry+drz); qLT(ix,iy,iu,1,cs) = u + (-duy+duz)
-    qLT(ix,iy,iv,1,cs) = v + (-dvy+dvz); qLT(ix,iy,iw,1,cs) = w + (-dwy+dwz)
-    qLT(ix,iy,ip,1,cs) = p + (-dpy+dpz)
-    qLT(ix,iy,iA,1,cs) = A + (-dAy+dAz); qLT(ix,iy,iB,1,cs) = BL + (   +dBLz)
-    qLT(ix,iy,iC,1,cs) = CR + (-dCRy   )
-    if (qLT(ix,iy,ir,1,cs) < smallr) qLT(ix,iy,ir,1,cs) = r
-    if (qLT(ix,iy,ip,1,cs) < smallp) qLT(ix,iy,ip,1,cs) = p
-    qLB(ix,iy,ir,1,cs) = r + (-dry-drz); qLB(ix,iy,iu,1,cs) = u + (-duy-duz)
-    qLB(ix,iy,iv,1,cs) = v + (-dvy-dvz); qLB(ix,iy,iw,1,cs) = w + (-dwy-dwz)
-    qLB(ix,iy,ip,1,cs) = p + (-dpy-dpz)
-    qLB(ix,iy,iA,1,cs) = A + (-dAy-dAz); qLB(ix,iy,iB,1,cs) = BL + (   -dBLz)
-    qLB(ix,iy,iC,1,cs) = CL + (-dCLy   )
-    if (qLB(ix,iy,ir,1,cs) < smallr) qLB(ix,iy,ir,1,cs) = r
-    ! NOTE: reproduces the CPU typo at umuscl.f90:1284 (pressure-floor branch
-    ! writes the density slot ir, not ip) verbatim for bit-level CPU agreement.
-    if (qLB(ix,iy,ip,1,cs) < smallp) qLB(ix,iy,ir,1,cs) = p
-
-    ! ---- Y-edge corner states (orientation 2) (umuscl.f90:1290-1353) -----------
-    qRT(ix,iy,ir,2,cs) = r + (+drx+drz); qRT(ix,iy,iu,2,cs) = u + (+dux+duz)
-    qRT(ix,iy,iv,2,cs) = v + (+dvx+dvz); qRT(ix,iy,iw,2,cs) = w + (+dwx+dwz)
-    qRT(ix,iy,ip,2,cs) = p + (+dpx+dpz)
-    qRT(ix,iy,iA,2,cs) = AR + (   +dARz); qRT(ix,iy,iB,2,cs) = B + (+dBx+dBz)
-    qRT(ix,iy,iC,2,cs) = CR + (+dCRx   )
-    if (qRT(ix,iy,ir,2,cs) < smallr) qRT(ix,iy,ir,2,cs) = r
-    if (qRT(ix,iy,ip,2,cs) < smallp) qRT(ix,iy,ip,2,cs) = p
-    qRB(ix,iy,ir,2,cs) = r + (+drx-drz); qRB(ix,iy,iu,2,cs) = u + (+dux-duz)
-    qRB(ix,iy,iv,2,cs) = v + (+dvx-dvz); qRB(ix,iy,iw,2,cs) = w + (+dwx-dwz)
-    qRB(ix,iy,ip,2,cs) = p + (+dpx-dpz)
-    qRB(ix,iy,iA,2,cs) = AR + (   -dARz); qRB(ix,iy,iB,2,cs) = B + (+dBx-dBz)
-    qRB(ix,iy,iC,2,cs) = CL + (+dCLx   )
-    if (qRB(ix,iy,ir,2,cs) < smallr) qRB(ix,iy,ir,2,cs) = r
-    if (qRB(ix,iy,ip,2,cs) < smallp) qRB(ix,iy,ip,2,cs) = p
-    qLT(ix,iy,ir,2,cs) = r + (-drx+drz); qLT(ix,iy,iu,2,cs) = u + (-dux+duz)
-    qLT(ix,iy,iv,2,cs) = v + (-dvx+dvz); qLT(ix,iy,iw,2,cs) = w + (-dwx+dwz)
-    qLT(ix,iy,ip,2,cs) = p + (-dpx+dpz)
-    qLT(ix,iy,iA,2,cs) = AL + (   +dALz); qLT(ix,iy,iB,2,cs) = B + (-dBx+dBz)
-    qLT(ix,iy,iC,2,cs) = CR + (-dCRx   )
-    if (qLT(ix,iy,ir,2,cs) < smallr) qLT(ix,iy,ir,2,cs) = r
-    if (qLT(ix,iy,ip,2,cs) < smallp) qLT(ix,iy,ip,2,cs) = p
-    qLB(ix,iy,ir,2,cs) = r + (-drx-drz); qLB(ix,iy,iu,2,cs) = u + (-dux-duz)
-    qLB(ix,iy,iv,2,cs) = v + (-dvx-dvz); qLB(ix,iy,iw,2,cs) = w + (-dwx-dwz)
-    qLB(ix,iy,ip,2,cs) = p + (-dpx-dpz)
-    qLB(ix,iy,iA,2,cs) = AL + (   -dALz); qLB(ix,iy,iB,2,cs) = B + (-dBx-dBz)
-    qLB(ix,iy,iC,2,cs) = CL + (-dCLx   )
-    if (qLB(ix,iy,ir,2,cs) < smallr) qLB(ix,iy,ir,2,cs) = r
-    if (qLB(ix,iy,ip,2,cs) < smallp) qLB(ix,iy,ip,2,cs) = p
-
-    ! ---- Z-edge corner states (orientation 3) (umuscl.f90:1354-1417) -----------
-    qRT(ix,iy,ir,3,cs) = r + (+drx+dry); qRT(ix,iy,iu,3,cs) = u + (+dux+duy)
-    qRT(ix,iy,iv,3,cs) = v + (+dvx+dvy); qRT(ix,iy,iw,3,cs) = w + (+dwx+dwy)
-    qRT(ix,iy,ip,3,cs) = p + (+dpx+dpy)
-    qRT(ix,iy,iA,3,cs) = AR + (   +dARy); qRT(ix,iy,iB,3,cs) = BR + (+dBRx   )
-    qRT(ix,iy,iC,3,cs) = C + (+dCx+dCy)
-    if (qRT(ix,iy,ir,3,cs) < smallr) qRT(ix,iy,ir,3,cs) = r
-    if (qRT(ix,iy,ip,3,cs) < smallp) qRT(ix,iy,ip,3,cs) = p
-    qRB(ix,iy,ir,3,cs) = r + (+drx-dry); qRB(ix,iy,iu,3,cs) = u + (+dux-duy)
-    qRB(ix,iy,iv,3,cs) = v + (+dvx-dvy); qRB(ix,iy,iw,3,cs) = w + (+dwx-dwy)
-    qRB(ix,iy,ip,3,cs) = p + (+dpx-dpy)
-    qRB(ix,iy,iA,3,cs) = AR + (   -dARy); qRB(ix,iy,iB,3,cs) = BL + (+dBLx   )
-    qRB(ix,iy,iC,3,cs) = C + (+dCx-dCy)
-    if (qRB(ix,iy,ir,3,cs) < smallr) qRB(ix,iy,ir,3,cs) = r
-    if (qRB(ix,iy,ip,3,cs) < smallp) qRB(ix,iy,ip,3,cs) = p
-    qLT(ix,iy,ir,3,cs) = r + (-drx+dry); qLT(ix,iy,iu,3,cs) = u + (-dux+duy)
-    qLT(ix,iy,iv,3,cs) = v + (-dvx+dvy); qLT(ix,iy,iw,3,cs) = w + (-dwx+dwy)
-    qLT(ix,iy,ip,3,cs) = p + (-dpx+dpy)
-    qLT(ix,iy,iA,3,cs) = AL + (   +dALy); qLT(ix,iy,iB,3,cs) = BR + (-dBRx   )
-    qLT(ix,iy,iC,3,cs) = C + (-dCx+dCy)
-    if (qLT(ix,iy,ir,3,cs) < smallr) qLT(ix,iy,ir,3,cs) = r
-    if (qLT(ix,iy,ip,3,cs) < smallp) qLT(ix,iy,ip,3,cs) = p
-    qLB(ix,iy,ir,3,cs) = r + (-drx-dry); qLB(ix,iy,iu,3,cs) = u + (-dux-duy)
-    qLB(ix,iy,iv,3,cs) = v + (-dvx-dvy); qLB(ix,iy,iw,3,cs) = w + (-dwx-dwy)
-    qLB(ix,iy,ip,3,cs) = p + (-dpx-dpy)
-    qLB(ix,iy,iA,3,cs) = AL + (   -dALy); qLB(ix,iy,iB,3,cs) = BL + (-dBLx   )
-    qLB(ix,iy,iC,3,cs) = C + (-dCx-dCy)
-    if (qLB(ix,iy,ir,3,cs) < smallr) qLB(ix,iy,ir,3,cs) = r
-    if (qLB(ix,iy,ip,3,cs) < smallp) qLB(ix,iy,ip,3,cs) = p
-
-    ! ---- Passive scalars (umuscl.f90:1423-1448): advection predictor -----------
-    ! Uses the ORIGINAL cell velocities (q at slot qc), not the predicted u,v,w.
-    do n = ie+1, nprim
-       r   = q_storage(ix,iy,n ,qc)
-       u   = q_storage(ix,iy,iu,qc)
-       v   = q_storage(ix,iy,iv,qc)
-       w   = q_storage(ix,iy,iw,qc)
-       drx = hdx*qds(ix,iy,n,1)
-       dry = hdx*qds(ix,iy,n,2)
-       drz = hdx*qds(ix,iy,n,3)
-       sr0 = -u*drx - v*dry - w*drz
-       r   = r + sr0*dtdx
-       qp_out(ix,iy,n,1) = r - drx
-       qm_out(ix,iy,n,1) = r + drx
-       qp_out(ix,iy,n,2) = r - dry
-       qm_out(ix,iy,n,2) = r + dry
-       qp_out(ix,iy,n,3) = r - drz
-       qm_out(ix,iy,n,3) = r + drz
-    end do
-  end subroutine mhd_trace_predict
-  ! ===========================================================================
 
    ! =========================================================================
 #ifdef PAPER
