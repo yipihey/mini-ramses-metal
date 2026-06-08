@@ -197,6 +197,58 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:3) :: Bz
   end type subgrid_corner_state_t
 
+  ! ==========================================================================
+  ! MHD interface state / flux subgrid types (Stage C2). These are the
+  ! MHD-widened analogs of the hydro subgrid_3x2x2cell_primitive /
+  ! subgrid_2x3x2cell_primitive / subgrid_2x2x3cell_primitive interface arrays.
+  ! As in the hydro kernel one array holds the qm/qp reconstructed *interface
+  ! states* on input to the Riemann driver and is then overwritten with the
+  ! conserved *fluxes* on output. The MHD version carries, in addition to the
+  ! five hydro fields, the three cell-centred magnetic field components (needed
+  ! as Riemann input -- the normal B is single-valued / face-predicted, the two
+  ! transverse B are cell +/- half*dbf) and the passive scalars (1:nvar-5). The
+  ! 3D constrained-transport scheme advances the face-B entirely via the EMF curl
+  ! (Stage C5 / godunov_fine.f90:820-862), so the transverse-B advection fluxes
+  ! fgdnv(7:8) that cmpflxm returns are NOT consumed at NDIM=3 (the cell-update of
+  ! B from face fluxes is guarded #if NDIM<3 in the CPU, godunov_fine.f90:771-787);
+  ! the Bx/By/Bz slots therefore hold the (discarded) magnetic fluxes after the
+  ! Riemann step while the consumed flux slots are density/momentum/energy and the
+  ! passive scalars at ie+1..nprim. Same anisotropic shapes as the hydro types.
+  ! ==========================================================================
+  type, public :: subgrid_3x2x2cell_primitive_mhd
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: density
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_x
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_y
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_z
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: pressure
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: By
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: Bz
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1, 1:nvar-5) :: scalar
+  end type subgrid_3x2x2cell_primitive_mhd
+  type, public :: subgrid_2x3x2cell_primitive_mhd
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: density
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_x
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_y
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_z
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: pressure
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: By
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bz
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:nvar-5) :: scalar
+  end type subgrid_2x3x2cell_primitive_mhd
+  type, public :: subgrid_2x2x3cell_primitive_mhd
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: density
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_x
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_y
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_z
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: pressure
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: By
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: Bz
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:nvar-5) :: scalar
+  end type subgrid_2x2x3cell_primitive_mhd
+
 contains
 
   include 'gpu_reduce.cuf'
@@ -1880,6 +1932,1565 @@ contains
   end subroutine coarse_cell_update
   ! =========================================================================
 
+  ! #########################################################################
+  ! ##  CUBE ("rock") MHD INTEGRATOR DEVICE ROUTINES (Stages B2-C6)        ##
+  ! ##                                                                     ##
+  ! ##  These are the MHD analogs of the hydro pipeline helpers above. Each##
+  ! ##  loops over the whole 6^3 shared subgrid (NOT a z-plane ring); they ##
+  ! ##  re-host the adversarially-verified plane-sweep physics from history##
+  ! ##  (git show 6e6a715b:gpu/gpu_hydro.cuf -- mhd_ctoprim_fill/load_bfield##
+  ! ##  /mhd_face_b_slopes/mhd_edge_emf/mhd_trace_predict) and the CPU      ##
+  ! ##  originals in hydro/umuscl.f90 + hydro/godunov_fine.f90. Only the    ##
+  ! ##  iteration structure changed: z-ring slot (slot,ic/im/ip) -> whole- ##
+  ! ##  subgrid index k-1/k/k+1; the math/signs/floors are unchanged.       ##
+  ! ##  The four edge corner states and the face-B transverse slopes (dbf)  ##
+  ! ##  do not fit in shared (B1 budget) and SPILL to the global scratch    ##
+  ! ##  arrays mhd_corner_scratch / mhd_dbf_scratch, indexed per block.     ##
+  ! #########################################################################
+
+  ! =========================================================================
+  !> @brief (Stage B2) Whole-subgrid MHD conserved->primitive + face-B fill.
+  !> The MHD analog of subgrid_conserved_2_primitive: fills the 6^3 shared MHD
+  !> primitive subgrid (local_mhd: rho,vx,vy,vz,P,Bx,By,Bz + refined), the passive
+  !> scalar subgrid (scalar_sub, 1:nvar-5) and the face-centred B buffer (bf).
+  !> Re-hosts mhd_ctoprim_fill + load_bfield (6e6a715b) / CPU ctoprim
+  !> (umuscl.f90:1762-1879). The cube fill loop is copied verbatim from
+  !> subgrid_conserved_2_primitive; the per-cell MHD body is the re-host.
+  !>   * bf: the low-d face of cell (i,j,k) on axis d = 0.5*(bold(self,d) +
+  !>     bold(low-d-neighbour, d+3)) -> single-valued at every face (divB).
+  !>   * cell-centred B = 0.5*(bold(self,d)+bold(self,d+3)) per axis.
+  !>   * pressure formed AFTER subtracting emag = 0.5*(Bx^2+By^2+Bz^2).
+  !>   * passive scalars q(ie+n)=uold(5+n)/rho.
+  attributes(device) subroutine subgrid_conserved_2_primitive_mhd(grid, uold, bold, f, &
+       & constant_gravity, nbor, head_idx, block_idx, thread_idx, gamma, dt, local_mhd, scalar_sub, bf)
+    type(oct), device :: grid(*)
+    real(kind=8), device :: constant_gravity(3)
+    real(kind=dp), device :: f(1:twotondim,1:ndim,*)
+    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
+    integer(kind=4), device :: nbor(1:subgridsize,*)
+    integer(kind=4), value :: head_idx, block_idx, thread_idx
+    real(kind=dp), value :: gamma, dt
+    type(subgrid_6x6x6cell_primitive_mhd), intent(inout) :: local_mhd
+    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nvar-5)
+    type(subgrid_face_b_t), intent(inout) :: bf
+
+    integer :: work_idx, ind_nbor, ind_nbor_xm, ind_nbor_ym, ind_nbor_zm
+    integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
+    integer :: cell_idx, source_idx, subgrid_idx, work_size, n
+    real(kind=dp) :: invD, Ekin, emag, Bxc, Byc, Bzc, rho
+    real(kind=dp) :: b0(1:6)
+
+    work_size = 2*nsubgrid+4
+
+    do work_idx = thread_idx, work_size**3 - 1, blockDim%x
+
+       ! Same subgrid traversal as subgrid_conserved_2_primitive: (i_subgrid_idx,
+       ! j_subgrid_idx, k_subgrid_idx) is the oct, cell_idx the cell within it,
+       ! (i,j,k) the destination cell in the 6^3 subgrid.
+       call index_1Dto3D(work_idx/8, work_size/2, work_size/2, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx)
+       subgrid_idx = head_idx + block_idx
+       ind_nbor = work_idx/8 + 1
+       source_idx = nbor(ind_nbor, subgrid_idx)
+       cell_idx = mod(work_idx, 8) + 1
+       call index_1Dto3D(cell_idx - 1, 2, 2, i, j, k)
+       i = i + 2*i_subgrid_idx
+       j = j + 2*j_subgrid_idx
+       k = k + 2*k_subgrid_idx
+
+       ! This cell's six raw face-B (bold comps 1-3 = low x/y/z, 4-6 = high x/y/z).
+       b0(1) = bold(cell_idx, 1, source_idx)
+       b0(2) = bold(cell_idx, 2, source_idx)
+       b0(3) = bold(cell_idx, 3, source_idx)
+       b0(4) = bold(cell_idx, 4, source_idx)
+       b0(5) = bold(cell_idx, 5, source_idx)
+       b0(6) = bold(cell_idx, 6, source_idx)
+
+       ! Face-continuous low faces (CPU ctoprim:1768/1781/1794): a cell's low-d face
+       ! = 0.5*(self_low_d + low-d-neighbour_high_d), keeping B single-valued at each
+       ! face (divB). The low-d neighbour cell index = hhh(cell_idx,dir) and its oct
+       ! offset = iii(cell_idx,dir) (dir 1=-x, 3=-y, 5=-z): offset 0 -> same oct,
+       ! -1 -> the low-d neighbouring oct (fetched via the periodic nbor stencil,
+       ! like load_bfield in 6e6a715b). The OUTERMOST low faces bx(0,*,*)/by(*,0,*)/
+       ! bz(*,*,0) would need an oct outside the 3x3x3 nbor stencil; they are never
+       ! read (edge_e reads bx at i>=1, by at j>=1, bz at k>=1; the trace reads
+       ! bx/by/bz at index>=1), so we fill them with the cell's own low face -- a
+       ! harmless unread value -- and skip the out-of-stencil oct fetch.
+       ! Low-x face of this cell:
+       if (i == 0) then
+          bf%bx(i,j,k) = b0(1)
+       else if (iii(cell_idx,1) == 0) then
+          bf%bx(i,j,k) = 0.5_dp*(b0(1) + bold(hhh(cell_idx,1), 4, source_idx))
+       else
+          ind_nbor_xm = (i_subgrid_idx-1) + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx + 1
+          bf%bx(i,j,k) = 0.5_dp*(b0(1) + bold(hhh(cell_idx,1), 4, nbor(ind_nbor_xm, subgrid_idx)))
+       endif
+       ! Low-y face of this cell:
+       if (j == 0) then
+          bf%by(i,j,k) = b0(2)
+       else if (iii(cell_idx,3) == 0) then
+          bf%by(i,j,k) = 0.5_dp*(b0(2) + bold(hhh(cell_idx,3), 5, source_idx))
+       else
+          ind_nbor_ym = i_subgrid_idx + nsubgridp2*(j_subgrid_idx-1) + nsubgridp2sq*k_subgrid_idx + 1
+          bf%by(i,j,k) = 0.5_dp*(b0(2) + bold(hhh(cell_idx,3), 5, nbor(ind_nbor_ym, subgrid_idx)))
+       endif
+       ! Low-z face of this cell:
+       if (k == 0) then
+          bf%bz(i,j,k) = b0(3)
+       else if (iii(cell_idx,5) == 0) then
+          bf%bz(i,j,k) = 0.5_dp*(b0(3) + bold(hhh(cell_idx,5), 6, source_idx))
+       else
+          ind_nbor_zm = i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*(k_subgrid_idx-1) + 1
+          bf%bz(i,j,k) = 0.5_dp*(b0(3) + bold(hhh(cell_idx,5), 6, nbor(ind_nbor_zm, subgrid_idx)))
+       endif
+
+       ! Cell-centred B = average of the two opposing faces of THIS cell.
+       Bxc = 0.5_dp*(b0(1) + b0(4))
+       Byc = 0.5_dp*(b0(2) + b0(5))
+       Bzc = 0.5_dp*(b0(3) + b0(6))
+
+       ! Hydro conversion + MHD energy correction (CPU ctoprim:1804-1845). No floors
+       ! here (the trace applies smallr/smallp); gravity predictor as in hydro.
+       rho  = uold(cell_idx, 1, source_idx)
+       invD = 1.0_dp / rho
+       local_mhd%density   (i, j, k) = rho
+       local_mhd%velocity_x(i, j, k) = uold(cell_idx, 2, source_idx) * invD
+       local_mhd%velocity_y(i, j, k) = uold(cell_idx, 3, source_idx) * invD
+       local_mhd%velocity_z(i, j, k) = uold(cell_idx, 4, source_idx) * invD
+       Ekin = 0.5_dp*( uold(cell_idx,2,source_idx)*local_mhd%velocity_x(i,j,k) + &
+            &          uold(cell_idx,3,source_idx)*local_mhd%velocity_y(i,j,k) + &
+            &          uold(cell_idx,4,source_idx)*local_mhd%velocity_z(i,j,k) )
+       emag = 0.5_dp*( Bxc*Bxc + (Byc*Byc + Bzc*Bzc) )
+       local_mhd%pressure(i, j, k) = (gamma - 1.0_dp)*(uold(cell_idx,5,source_idx) - Ekin - emag)
+       local_mhd%Bx(i, j, k) = Bxc
+       local_mhd%By(i, j, k) = Byc
+       local_mhd%Bz(i, j, k) = Bzc
+
+       ! Gravity predictor (mirrors subgrid_conserved_2_primitive).
+#ifdef GRAV
+       local_mhd%velocity_x(i,j,k) = local_mhd%velocity_x(i,j,k) + f(cell_idx,1,source_idx)*0.5_dp*dt
+       local_mhd%velocity_y(i,j,k) = local_mhd%velocity_y(i,j,k) + f(cell_idx,2,source_idx)*0.5_dp*dt
+       local_mhd%velocity_z(i,j,k) = local_mhd%velocity_z(i,j,k) + f(cell_idx,3,source_idx)*0.5_dp*dt
+#else
+       local_mhd%velocity_x(i,j,k) = local_mhd%velocity_x(i,j,k) + constant_gravity(1)*0.5_dp*dt
+       local_mhd%velocity_y(i,j,k) = local_mhd%velocity_y(i,j,k) + constant_gravity(2)*0.5_dp*dt
+       local_mhd%velocity_z(i,j,k) = local_mhd%velocity_z(i,j,k) + constant_gravity(3)*0.5_dp*dt
+#endif
+
+       ! Passive scalars q(ie+n) = uold(5+n)/rho (CPU ctoprim:1870-1879).
+       do n = 1, nvar-5
+          scalar_sub(i, j, k, n) = uold(cell_idx, 5+n, source_idx) * invD
+       end do
+
+       local_mhd%refined(i, j, k) = grid(source_idx)%refined(cell_idx)
+
+    end do
+
+    call syncthreads()
+
+  end subroutine subgrid_conserved_2_primitive_mhd
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief (Stage B3) Whole-subgrid face-B transverse slopes dbf. The MHD-only
+  !> quantity with no hydro analog. Re-hosts mhd_face_b_slopes (6e6a715b) / the
+  !> inline dbf branch of CPU uslope (umuscl.f90:2255-2333), selected at runtime by
+  !> slope_mag. The plane-sweep slot (bm1,bc,bp1) becomes the explicit z index
+  !> (k-1,k,k+1). dbf is a RAW value-slope (no 1/dx). Spilled to global scratch
+  !> mhd_dbf_scratch(bslot) (B1 budget: dbf does not fit in shared once the C2
+  !> interface arrays widen for MHD). Two transverse slopes per face-B component:
+  !>   dbx(:,:,:,1)=Bx slope along Y, dbx(:,:,:,2)=Bx slope along Z
+  !>   dby(:,:,:,1)=By slope along X, dby(:,:,:,2)=By slope along Z
+  !>   dbz(:,:,:,1)=Bz slope along X, dbz(:,:,:,2)=Bz slope along Y
+  attributes(device) subroutine mhd_face_b_slopes_subgrid(bf, mhd_dbf_scratch, bslot, thread_idx, slope_mag)
+    type(subgrid_face_b_t), intent(in) :: bf
+    type(subgrid_face_db_t), device :: mhd_dbf_scratch(*)
+    integer, value :: bslot, thread_idx, slope_mag
+
+    integer :: work_idx, work_size, i, j, k
+    real(kind=dp) :: dlft, drgt, dcen, dsgn, slop, dlim, fac
+    real(kind=dp), parameter :: half = 0.5_dp, zero = 0.0_dp, one = 1.0_dp
+
+    ! Fill range: the trace (C1) reads each db* at its OWN +1 normal plane
+    ! (dbx at i in [1,2ns+3] via dARy=dbx(ix+1,..); dby at j in [1,2ns+3] via
+    ! dBRx=dby(.,iy+1,.); dbz at k in [1,2ns+3] via dCRx=dbz(.,.,k+1)), and at
+    ! [1,2ns+2] in its two transverse axes. So loop the union [1,2ns+3]^3 and
+    ! compute each component only over its valid (transverse <= 2ns+2) box -- the
+    ! anisotropic +4 extent of subgrid_face_db_t holds the extra normal plane, and
+    ! the guards keep the bf reads in-bounds. (3-point stencils use the full 6^3
+    ! bf buffer B2 filled.)
+    work_size = 2*nsubgrid+3
+    fac = real(min(slope_mag,2), kind=dp)
+
+    do work_idx = thread_idx, work_size**3 - 1, blockDim%x
+       call index_1Dto3D(work_idx, work_size, work_size, i, j, k)
+       i = i + 1; j = j + 1; k = k + 1
+
+       ! ---- Bx transverse slopes (need j,k <= 2ns+2; i free to 2ns+3) ----------
+       if (j <= 2*nsubgrid+2 .and. k <= 2*nsubgrid+2) then
+          if (slope_mag == 0) then
+             mhd_dbf_scratch(bslot)%dbx(i,j,k,1) = zero
+             mhd_dbf_scratch(bslot)%dbx(i,j,k,2) = zero
+          else
+             ! Bx slope along Y (umuscl.f90:2264-2271)
+             dlft = fac*(bf%bx(i,j  ,k) - bf%bx(i,j-1,k))
+             drgt = fac*(bf%bx(i,j+1,k) - bf%bx(i,j  ,k))
+             dcen = half*(dlft+drgt)/fac; dsgn = sign(one, dcen)
+             slop = min(abs(dlft),abs(drgt)); dlim = merge(zero, slop, (dlft*drgt) <= zero)
+             mhd_dbf_scratch(bslot)%dbx(i,j,k,1) = dsgn*min(dlim,abs(dcen))
+             ! Bx slope along Z (umuscl.f90:2273-2280)
+             dlft = fac*(bf%bx(i,j,k  ) - bf%bx(i,j,k-1))
+             drgt = fac*(bf%bx(i,j,k+1) - bf%bx(i,j,k  ))
+             dcen = half*(dlft+drgt)/fac; dsgn = sign(one, dcen)
+             slop = min(abs(dlft),abs(drgt)); dlim = merge(zero, slop, (dlft*drgt) <= zero)
+             mhd_dbf_scratch(bslot)%dbx(i,j,k,2) = dsgn*min(dlim,abs(dcen))
+          end if
+       end if
+
+       ! ---- By transverse slopes (need i,k <= 2ns+2; j free to 2ns+3) ----------
+       if (i <= 2*nsubgrid+2 .and. k <= 2*nsubgrid+2) then
+          if (slope_mag == 0) then
+             mhd_dbf_scratch(bslot)%dby(i,j,k,1) = zero
+             mhd_dbf_scratch(bslot)%dby(i,j,k,2) = zero
+          else
+             ! By slope along X (umuscl.f90:2289-2296)
+             dlft = fac*(bf%by(i  ,j,k) - bf%by(i-1,j,k))
+             drgt = fac*(bf%by(i+1,j,k) - bf%by(i  ,j,k))
+             dcen = half*(dlft+drgt)/fac; dsgn = sign(one, dcen)
+             slop = min(abs(dlft),abs(drgt)); dlim = merge(zero, slop, (dlft*drgt) <= zero)
+             mhd_dbf_scratch(bslot)%dby(i,j,k,1) = dsgn*min(dlim,abs(dcen))
+             ! By slope along Z (umuscl.f90:2298-2305)
+             dlft = fac*(bf%by(i,j,k  ) - bf%by(i,j,k-1))
+             drgt = fac*(bf%by(i,j,k+1) - bf%by(i,j,k  ))
+             dcen = half*(dlft+drgt)/fac; dsgn = sign(one, dcen)
+             slop = min(abs(dlft),abs(drgt)); dlim = merge(zero, slop, (dlft*drgt) <= zero)
+             mhd_dbf_scratch(bslot)%dby(i,j,k,2) = dsgn*min(dlim,abs(dcen))
+          end if
+       end if
+
+       ! ---- Bz transverse slopes (need i,j <= 2ns+2; k free to 2ns+3) ----------
+       if (i <= 2*nsubgrid+2 .and. j <= 2*nsubgrid+2) then
+          if (slope_mag == 0) then
+             mhd_dbf_scratch(bslot)%dbz(i,j,k,1) = zero
+             mhd_dbf_scratch(bslot)%dbz(i,j,k,2) = zero
+          else
+             ! Bz slope along X (umuscl.f90:2314-2321)
+             dlft = fac*(bf%bz(i  ,j,k) - bf%bz(i-1,j,k))
+             drgt = fac*(bf%bz(i+1,j,k) - bf%bz(i  ,j,k))
+             dcen = half*(dlft+drgt)/fac; dsgn = sign(one, dcen)
+             slop = min(abs(dlft),abs(drgt)); dlim = merge(zero, slop, (dlft*drgt) <= zero)
+             mhd_dbf_scratch(bslot)%dbz(i,j,k,1) = dsgn*min(dlim,abs(dcen))
+             ! Bz slope along Y (umuscl.f90:2323-2330)
+             dlft = fac*(bf%bz(i,j  ,k) - bf%bz(i,j-1,k))
+             drgt = fac*(bf%bz(i,j+1,k) - bf%bz(i,j  ,k))
+             dcen = half*(dlft+drgt)/fac; dsgn = sign(one, dcen)
+             slop = min(abs(dlft),abs(drgt)); dlim = merge(zero, slop, (dlft*drgt) <= zero)
+             mhd_dbf_scratch(bslot)%dbz(i,j,k,2) = dsgn*min(dlim,abs(dcen))
+          end if
+       end if
+    end do
+
+    call syncthreads()
+
+  end subroutine mhd_face_b_slopes_subgrid
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief (Stage C1) Whole-subgrid MHD trace: edge-E, MUSCL predictor, face-B
+  !> prediction, 6-face qm/qp interface states, and the four edge corner states.
+  !> The MHD analog of trace_3d. Two phases over the shared subgrid with a sync
+  !> between (the predictor needs edge-E at planes k and k+1):
+  !>   Phase 1 -- raw edge-centred E (Ex,Ey,Ez) over [1,2*nsubgrid+3] (re-host of
+  !>     mhd_edge_emf / CPU trace3d:935-951): Ex=v*C-w*B, Ey=w*A-u*C, Ez=u*B-v*A,
+  !>     with 4-cell velocity averages and 2-face B averages. RAW (no dt/dx).
+  !>   Phase 2 -- predictor + corners over [1,2*nsubgrid+2] (re-host of
+  !>     mhd_trace_predict / CPU trace3d:956-1448). Cell slopes are inline via
+  !>     0.5*slope_moncen over the wider MHD set (== CPU half*dq, like trace_3d).
+  !>     Face-B predicted by the discrete curl of edge-E (single-valued normal B
+  !>     keeps divB clean); qm/qp written to the widened interface arrays with the
+  !>     same guards as trace_3d; the four corner states (x 3 orientations) written
+  !>     to the global mhd_corner_scratch spill (they do not fit in shared, B1).
+  !> induction=.true. zeroes the velocity source terms (kinematic-dynamo mode).
+  !> The CPU floor typo at umuscl.f90:1284 (qLB X-edge pressure-floor writes the
+  !> density slot) is reproduced verbatim (flagged below) for bit-level CPU match.
+  attributes(device) subroutine trace_3d_mhd(local_mhd, scalar_sub, bf, mhd_dbf_scratch, edge_e, &
+       & mhd_corner_scratch, bslot, thread_idx, &
+       & left_x, right_x, left_y, right_y, left_z, right_z, gamma, dx, dt, slope, induction)
+    type(subgrid_6x6x6cell_primitive_mhd), intent(in) :: local_mhd
+    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nvar-5)
+    type(subgrid_face_b_t), intent(in) :: bf
+    type(subgrid_face_db_t), device :: mhd_dbf_scratch(*)
+    type(subgrid_edge_e_t), intent(inout) :: edge_e
+    type(subgrid_corner_state_t), device :: mhd_corner_scratch(1:4,*)
+    integer, value :: bslot, thread_idx, slope
+    real(kind=dp), value :: gamma, dx, dt
+    logical, value :: induction
+    type(subgrid_3x2x2cell_primitive_mhd), intent(inout) :: left_x, right_x
+    type(subgrid_2x3x2cell_primitive_mhd), intent(inout) :: left_y, right_y
+    type(subgrid_2x2x3cell_primitive_mhd), intent(inout) :: left_z, right_z
+
+    real(kind=dp), parameter :: smallr = 1d-10
+    real(kind=dp), parameter :: smallc = 1d-10
+    real(kind=dp), parameter :: smallp = smallr*smallc*smallc
+    real(kind=dp), parameter :: half = 0.5_dp
+    integer, parameter :: iqRT = 1, iqRB = 2, iqLT = 3, iqLB = 4
+    real(kind=dp) :: r, u, v, w, p, A, B, C, r0, p0, dtdx, rscal
+    real(kind=dp) :: drx,dux,dvx,dwx,dpx, dry,duy,dvy,dwy,dpy, drz,duz,dvz,dwz,dpz
+    real(kind=dp) :: dBx,dCx, dAy,dCy, dAz,dBz
+    real(kind=dp) :: AL,AR,BL,BR,CL,CR
+    real(kind=dp) :: dALy,dARy,dALz,dARz,dBLx,dBRx,dBLz,dBRz,dCLx,dCRx,dCLy,dCRy
+    real(kind=dp) :: sAL0,sAR0,sBL0,sBR0,sCL0,sCR0
+    real(kind=dp) :: ELL,ELR,ERL,ERR,FLL,FLR,FRL,FRR,GLL,GLR,GRL,GRR
+    real(kind=dp) :: sr0,su0,sv0,sw0,sp0, uu,vv,ww,Aa,Bb,Cc
+    integer :: work_idx, work_size, ix, iy, k, n
+
+    dtdx = dt/dx
+
+    ! ====================================================================
+    ! Phase 1: raw edge-centred E over [1, 2*nsubgrid+3] (CPU trace3d:935-951).
+    ! ====================================================================
+    work_size = 2*nsubgrid+3
+    do work_idx = thread_idx, work_size**3 - 1, blockDim%x
+       call index_1Dto3D(work_idx, work_size, work_size, ix, iy, k)
+       ix = ix + 1; iy = iy + 1; k = k + 1
+
+       ! Ex(ix,iy,k) = v*C - w*B   (x-edge at (i,j-1/2,k-1/2); averages over k-1,k)
+       vv = 0.25_dp*( local_mhd%velocity_y(ix,iy-1,k-1) + local_mhd%velocity_y(ix,iy-1,k) + &
+            &         local_mhd%velocity_y(ix,iy  ,k-1) + local_mhd%velocity_y(ix,iy  ,k) )
+       ww = 0.25_dp*( local_mhd%velocity_z(ix,iy-1,k-1) + local_mhd%velocity_z(ix,iy-1,k) + &
+            &         local_mhd%velocity_z(ix,iy  ,k-1) + local_mhd%velocity_z(ix,iy  ,k) )
+       Bb = 0.5_dp*( bf%by(ix,iy  ,k-1) + bf%by(ix,iy  ,k) )
+       Cc = 0.5_dp*( bf%bz(ix,iy-1,k  ) + bf%bz(ix,iy  ,k) )
+       edge_e%Ex(ix,iy,k) = vv*Cc - ww*Bb
+
+       ! Ey(ix,iy,k) = w*A - u*C   (y-edge at (i-1/2,j,k-1/2); averages over k-1,k)
+       uu = 0.25_dp*( local_mhd%velocity_x(ix-1,iy,k-1) + local_mhd%velocity_x(ix-1,iy,k) + &
+            &         local_mhd%velocity_x(ix  ,iy,k-1) + local_mhd%velocity_x(ix  ,iy,k) )
+       ww = 0.25_dp*( local_mhd%velocity_z(ix-1,iy,k-1) + local_mhd%velocity_z(ix-1,iy,k) + &
+            &         local_mhd%velocity_z(ix  ,iy,k-1) + local_mhd%velocity_z(ix  ,iy,k) )
+       Aa = 0.5_dp*( bf%bx(ix  ,iy,k-1) + bf%bx(ix,iy,k) )
+       Cc = 0.5_dp*( bf%bz(ix-1,iy,k  ) + bf%bz(ix,iy,k) )
+       edge_e%Ey(ix,iy,k) = ww*Aa - uu*Cc
+
+       ! Ez(ix,iy,k) = u*B - v*A   (z-edge at (i-1/2,j-1/2,k); in-plane)
+       uu = 0.25_dp*( local_mhd%velocity_x(ix-1,iy-1,k) + local_mhd%velocity_x(ix-1,iy,k) + &
+            &         local_mhd%velocity_x(ix  ,iy-1,k) + local_mhd%velocity_x(ix  ,iy,k) )
+       vv = 0.25_dp*( local_mhd%velocity_y(ix-1,iy-1,k) + local_mhd%velocity_y(ix-1,iy,k) + &
+            &         local_mhd%velocity_y(ix  ,iy-1,k) + local_mhd%velocity_y(ix  ,iy,k) )
+       Aa = 0.5_dp*( bf%bx(ix,iy-1,k) + bf%bx(ix,iy,k) )
+       Bb = 0.5_dp*( bf%by(ix-1,iy,k) + bf%by(ix,iy,k) )
+       edge_e%Ez(ix,iy,k) = uu*Bb - vv*Aa
+    end do
+
+    call syncthreads()
+
+    ! ====================================================================
+    ! Phase 2: cell predictor + corner states over [1, 2*nsubgrid+2].
+    ! ====================================================================
+    work_size = 2*nsubgrid+2
+    do work_idx = thread_idx, work_size**3 - 1, blockDim%x
+       call index_1Dto3D(work_idx, work_size, work_size, ix, iy, k)
+       ix = ix + 1; iy = iy + 1; k = k + 1
+
+       ! ---- Face-centred B values (CPU trace3d:961-966) -----------------------
+       AL = bf%bx(ix  ,iy  ,k  )
+       AR = bf%bx(ix+1,iy  ,k  )
+       BL = bf%by(ix  ,iy  ,k  )
+       BR = bf%by(ix  ,iy+1,k  )
+       CL = bf%bz(ix  ,iy  ,k  )
+       CR = bf%bz(ix  ,iy  ,k+1)
+
+       ! ---- Face-centred transverse slopes (0.5*dbf; CPU trace3d:969-982) -----
+       dALy = half*mhd_dbf_scratch(bslot)%dbx(ix  ,iy  ,k  ,1)
+       dARy = half*mhd_dbf_scratch(bslot)%dbx(ix+1,iy  ,k  ,1)
+       dALz = half*mhd_dbf_scratch(bslot)%dbx(ix  ,iy  ,k  ,2)
+       dARz = half*mhd_dbf_scratch(bslot)%dbx(ix+1,iy  ,k  ,2)
+       dBLx = half*mhd_dbf_scratch(bslot)%dby(ix  ,iy  ,k  ,1)
+       dBRx = half*mhd_dbf_scratch(bslot)%dby(ix  ,iy+1,k  ,1)
+       dBLz = half*mhd_dbf_scratch(bslot)%dby(ix  ,iy  ,k  ,2)
+       dBRz = half*mhd_dbf_scratch(bslot)%dby(ix  ,iy+1,k  ,2)
+       dCLx = half*mhd_dbf_scratch(bslot)%dbz(ix  ,iy  ,k  ,1)
+       dCRx = half*mhd_dbf_scratch(bslot)%dbz(ix  ,iy  ,k+1,1)
+       dCLy = half*mhd_dbf_scratch(bslot)%dbz(ix  ,iy  ,k  ,2)
+       dCRy = half*mhd_dbf_scratch(bslot)%dbz(ix  ,iy  ,k+1,2)
+
+       ! ---- Edge-centred E gathered (CPU trace3d:985-1000) --------------------
+       ELL = edge_e%Ex(ix  ,iy  ,k  ); ELR = edge_e%Ex(ix  ,iy  ,k+1)
+       ERL = edge_e%Ex(ix  ,iy+1,k  ); ERR = edge_e%Ex(ix  ,iy+1,k+1)
+       FLL = edge_e%Ey(ix  ,iy  ,k  ); FLR = edge_e%Ey(ix  ,iy  ,k+1)
+       FRL = edge_e%Ey(ix+1,iy  ,k  ); FRR = edge_e%Ey(ix+1,iy  ,k+1)
+       GLL = edge_e%Ez(ix  ,iy  ,k  ); GLR = edge_e%Ez(ix  ,iy+1,k  )
+       GRL = edge_e%Ez(ix+1,iy  ,k  ); GRR = edge_e%Ez(ix+1,iy+1,k  )
+
+       ! ---- Face-B predicted by discrete curl of edge-E (CPU trace3d:1003-1015)
+       sAL0 = + (GLR-GLL) - (FLR-FLL)
+       sAR0 = + (GRR-GRL) - (FRR-FRL)
+       sBL0 = - (GRL-GLL) + (ELR-ELL)
+       sBR0 = - (GRR-GLR) + (ERR-ERL)
+       sCL0 = + (FRL-FLL) - (ERL-ELL)
+       sCR0 = + (FRR-FLR) - (ERR-ELR)
+       AL = AL + sAL0*dtdx*half
+       AR = AR + sAR0*dtdx*half
+       BL = BL + sBL0*dtdx*half
+       BR = BR + sBR0*dtdx*half
+       CL = CL + sCL0*dtdx*half
+       CR = CR + sCR0*dtdx*half
+
+       ! ---- Cell-centred values + inline slopes (0.5*slope_moncen == half*dq) --
+       r = local_mhd%density   (ix,iy,k); r0 = r
+       u = local_mhd%velocity_x(ix,iy,k)
+       v = local_mhd%velocity_y(ix,iy,k)
+       w = local_mhd%velocity_z(ix,iy,k)
+       p = local_mhd%pressure  (ix,iy,k); p0 = p
+       A = local_mhd%Bx(ix,iy,k)
+       B = local_mhd%By(ix,iy,k)
+       C = local_mhd%Bz(ix,iy,k)
+       drx = half*slope_moncen(local_mhd%density   (ix-1,iy,k), r, local_mhd%density   (ix+1,iy,k), slope)
+       dux = half*slope_moncen(local_mhd%velocity_x(ix-1,iy,k), u, local_mhd%velocity_x(ix+1,iy,k), slope)
+       dvx = half*slope_moncen(local_mhd%velocity_y(ix-1,iy,k), v, local_mhd%velocity_y(ix+1,iy,k), slope)
+       dwx = half*slope_moncen(local_mhd%velocity_z(ix-1,iy,k), w, local_mhd%velocity_z(ix+1,iy,k), slope)
+       dpx = half*slope_moncen(local_mhd%pressure  (ix-1,iy,k), p, local_mhd%pressure  (ix+1,iy,k), slope)
+       dBx = half*slope_moncen(local_mhd%By(ix-1,iy,k), B, local_mhd%By(ix+1,iy,k), slope)
+       dCx = half*slope_moncen(local_mhd%Bz(ix-1,iy,k), C, local_mhd%Bz(ix+1,iy,k), slope)
+       dry = half*slope_moncen(local_mhd%density   (ix,iy-1,k), r, local_mhd%density   (ix,iy+1,k), slope)
+       duy = half*slope_moncen(local_mhd%velocity_x(ix,iy-1,k), u, local_mhd%velocity_x(ix,iy+1,k), slope)
+       dvy = half*slope_moncen(local_mhd%velocity_y(ix,iy-1,k), v, local_mhd%velocity_y(ix,iy+1,k), slope)
+       dwy = half*slope_moncen(local_mhd%velocity_z(ix,iy-1,k), w, local_mhd%velocity_z(ix,iy+1,k), slope)
+       dpy = half*slope_moncen(local_mhd%pressure  (ix,iy-1,k), p, local_mhd%pressure  (ix,iy+1,k), slope)
+       dAy = half*slope_moncen(local_mhd%Bx(ix,iy-1,k), A, local_mhd%Bx(ix,iy+1,k), slope)
+       dCy = half*slope_moncen(local_mhd%Bz(ix,iy-1,k), C, local_mhd%Bz(ix,iy+1,k), slope)
+       drz = half*slope_moncen(local_mhd%density   (ix,iy,k-1), r, local_mhd%density   (ix,iy,k+1), slope)
+       duz = half*slope_moncen(local_mhd%velocity_x(ix,iy,k-1), u, local_mhd%velocity_x(ix,iy,k+1), slope)
+       dvz = half*slope_moncen(local_mhd%velocity_y(ix,iy,k-1), v, local_mhd%velocity_y(ix,iy,k+1), slope)
+       dwz = half*slope_moncen(local_mhd%velocity_z(ix,iy,k-1), w, local_mhd%velocity_z(ix,iy,k+1), slope)
+       dpz = half*slope_moncen(local_mhd%pressure  (ix,iy,k-1), p, local_mhd%pressure  (ix,iy,k+1), slope)
+       dAz = half*slope_moncen(local_mhd%Bx(ix,iy,k-1), A, local_mhd%Bx(ix,iy,k+1), slope)
+       dBz = half*slope_moncen(local_mhd%By(ix,iy,k-1), B, local_mhd%By(ix,iy,k+1), slope)
+
+       ! ---- Source terms incl. Lorentz force (CPU trace3d:1077-1090) ----------
+       sr0 = -u*drx-v*dry-w*drz - (dux+dvy+dwz)*r
+       su0 = -u*dux-v*duy-w*duz - (dpx)/r
+       sv0 = -u*dvx-v*dvy-w*dvz - (dpy)/r
+       sw0 = -u*dwx-v*dwy-w*dwz - (dpz)/r
+       sp0 = -u*dpx-v*dpy-w*dpz - (dux+dvy+dwz)*gamma*p
+       su0 = su0 + (-(B*dBx+C*dCx)/r) + (B*dAy/r) + (C*dAz/r)
+       sv0 = sv0 + (A*dBx/r) + (-(A*dAy+C*dCy)/r) + (C*dBz/r)
+       sw0 = sw0 + (A*dCx/r) + (B*dCy/r) + (-(A*dAz+B*dBz)/r)
+       if (induction) then
+          su0 = 0.0_dp; sv0 = 0.0_dp; sw0 = 0.0_dp
+       end if
+
+       ! ---- Cell-centred predicted states (CPU trace3d:1102-1110) -------------
+       r = r + sr0*dtdx
+       u = u + su0*dtdx
+       v = v + sv0*dtdx
+       w = w + sw0*dtdx
+       p = p + sp0*dtdx
+       A = half*(AL+AR)
+       B = half*(BL+BR)
+       C = half*(CL+CR)
+
+       ! ---- X faces: qp(low-x)->right_x(ix-2), qm(high-x)->left_x(ix-1) -------
+       if (ix > 1 .and. (iy > 1 .and. iy < work_size) .and. (k > 1 .and. k < work_size)) then
+          right_x%density   (ix-2,iy-2,k-2) = r - drx
+          right_x%velocity_x(ix-2,iy-2,k-2) = u - dux
+          right_x%velocity_y(ix-2,iy-2,k-2) = v - dvx
+          right_x%velocity_z(ix-2,iy-2,k-2) = w - dwx
+          right_x%pressure  (ix-2,iy-2,k-2) = p - dpx
+          if (right_x%density (ix-2,iy-2,k-2) < smallr) right_x%density (ix-2,iy-2,k-2) = r0
+          if (right_x%pressure(ix-2,iy-2,k-2) < smallp) right_x%pressure(ix-2,iy-2,k-2) = p0
+          right_x%Bx(ix-2,iy-2,k-2) = AL
+          right_x%By(ix-2,iy-2,k-2) = B - dBx
+          right_x%Bz(ix-2,iy-2,k-2) = C - dCx
+       end if
+       if (ix < work_size .and. (iy > 1 .and. iy < work_size) .and. (k > 1 .and. k < work_size)) then
+          left_x%density   (ix-1,iy-2,k-2) = r + drx
+          left_x%velocity_x(ix-1,iy-2,k-2) = u + dux
+          left_x%velocity_y(ix-1,iy-2,k-2) = v + dvx
+          left_x%velocity_z(ix-1,iy-2,k-2) = w + dwx
+          left_x%pressure  (ix-1,iy-2,k-2) = p + dpx
+          if (left_x%density (ix-1,iy-2,k-2) < smallr) left_x%density (ix-1,iy-2,k-2) = r0
+          if (left_x%pressure(ix-1,iy-2,k-2) < smallp) left_x%pressure(ix-1,iy-2,k-2) = p0
+          left_x%Bx(ix-1,iy-2,k-2) = AR
+          left_x%By(ix-1,iy-2,k-2) = B + dBx
+          left_x%Bz(ix-1,iy-2,k-2) = C + dCx
+       end if
+
+       ! ---- Y faces: qp(low-y)->right_y(iy-2), qm(high-y)->left_y(iy-1) -------
+       if ((ix > 1 .and. ix < work_size) .and. iy > 1 .and. (k > 1 .and. k < work_size)) then
+          right_y%density   (ix-2,iy-2,k-2) = r - dry
+          right_y%velocity_x(ix-2,iy-2,k-2) = u - duy
+          right_y%velocity_y(ix-2,iy-2,k-2) = v - dvy
+          right_y%velocity_z(ix-2,iy-2,k-2) = w - dwy
+          right_y%pressure  (ix-2,iy-2,k-2) = p - dpy
+          if (right_y%density (ix-2,iy-2,k-2) < smallr) right_y%density (ix-2,iy-2,k-2) = r0
+          if (right_y%pressure(ix-2,iy-2,k-2) < smallp) right_y%pressure(ix-2,iy-2,k-2) = p0
+          right_y%Bx(ix-2,iy-2,k-2) = A - dAy
+          right_y%By(ix-2,iy-2,k-2) = BL
+          right_y%Bz(ix-2,iy-2,k-2) = C - dCy
+       end if
+       if ((ix > 1 .and. ix < work_size) .and. iy < work_size .and. (k > 1 .and. k < work_size)) then
+          left_y%density   (ix-2,iy-1,k-2) = r + dry
+          left_y%velocity_x(ix-2,iy-1,k-2) = u + duy
+          left_y%velocity_y(ix-2,iy-1,k-2) = v + dvy
+          left_y%velocity_z(ix-2,iy-1,k-2) = w + dwy
+          left_y%pressure  (ix-2,iy-1,k-2) = p + dpy
+          if (left_y%density (ix-2,iy-1,k-2) < smallr) left_y%density (ix-2,iy-1,k-2) = r0
+          if (left_y%pressure(ix-2,iy-1,k-2) < smallp) left_y%pressure(ix-2,iy-1,k-2) = p0
+          left_y%Bx(ix-2,iy-1,k-2) = A + dAy
+          left_y%By(ix-2,iy-1,k-2) = BR
+          left_y%Bz(ix-2,iy-1,k-2) = C + dCy
+       end if
+
+       ! ---- Z faces: qp(low-z)->right_z(k-2), qm(high-z)->left_z(k-1) ---------
+       if ((ix > 1 .and. ix < work_size) .and. (iy > 1 .and. iy < work_size) .and. k > 1) then
+          right_z%density   (ix-2,iy-2,k-2) = r - drz
+          right_z%velocity_x(ix-2,iy-2,k-2) = u - duz
+          right_z%velocity_y(ix-2,iy-2,k-2) = v - dvz
+          right_z%velocity_z(ix-2,iy-2,k-2) = w - dwz
+          right_z%pressure  (ix-2,iy-2,k-2) = p - dpz
+          if (right_z%density (ix-2,iy-2,k-2) < smallr) right_z%density (ix-2,iy-2,k-2) = r0
+          if (right_z%pressure(ix-2,iy-2,k-2) < smallp) right_z%pressure(ix-2,iy-2,k-2) = p0
+          right_z%Bx(ix-2,iy-2,k-2) = A - dAz
+          right_z%By(ix-2,iy-2,k-2) = B - dBz
+          right_z%Bz(ix-2,iy-2,k-2) = CL
+       end if
+       if ((ix > 1 .and. ix < work_size) .and. (iy > 1 .and. iy < work_size) .and. k < work_size) then
+          left_z%density   (ix-2,iy-2,k-1) = r + drz
+          left_z%velocity_x(ix-2,iy-2,k-1) = u + duz
+          left_z%velocity_y(ix-2,iy-2,k-1) = v + dvz
+          left_z%velocity_z(ix-2,iy-2,k-1) = w + dwz
+          left_z%pressure  (ix-2,iy-2,k-1) = p + dpz
+          if (left_z%density (ix-2,iy-2,k-1) < smallr) left_z%density (ix-2,iy-2,k-1) = r0
+          if (left_z%pressure(ix-2,iy-2,k-1) < smallp) left_z%pressure(ix-2,iy-2,k-1) = p0
+          left_z%Bx(ix-2,iy-2,k-1) = A + dAz
+          left_z%By(ix-2,iy-2,k-1) = B + dBz
+          left_z%Bz(ix-2,iy-2,k-1) = CR
+       end if
+
+       ! ---- X-edge corner states (orientation 1) (CPU trace3d:1226-1289) ------
+       mhd_corner_scratch(iqRT,bslot)%density   (ix,iy,k,1) = r + (+dry+drz)
+       mhd_corner_scratch(iqRT,bslot)%velocity_x(ix,iy,k,1) = u + (+duy+duz)
+       mhd_corner_scratch(iqRT,bslot)%velocity_y(ix,iy,k,1) = v + (+dvy+dvz)
+       mhd_corner_scratch(iqRT,bslot)%velocity_z(ix,iy,k,1) = w + (+dwy+dwz)
+       mhd_corner_scratch(iqRT,bslot)%pressure  (ix,iy,k,1) = p + (+dpy+dpz)
+       mhd_corner_scratch(iqRT,bslot)%Bx(ix,iy,k,1) = A + (+dAy+dAz)
+       mhd_corner_scratch(iqRT,bslot)%By(ix,iy,k,1) = BR + (   +dBRz)
+       mhd_corner_scratch(iqRT,bslot)%Bz(ix,iy,k,1) = CR + (+dCRy   )
+       if (mhd_corner_scratch(iqRT,bslot)%density (ix,iy,k,1) < smallr) mhd_corner_scratch(iqRT,bslot)%density (ix,iy,k,1) = r
+       if (mhd_corner_scratch(iqRT,bslot)%pressure(ix,iy,k,1) < smallp) mhd_corner_scratch(iqRT,bslot)%pressure(ix,iy,k,1) = p
+       mhd_corner_scratch(iqRB,bslot)%density   (ix,iy,k,1) = r + (+dry-drz)
+       mhd_corner_scratch(iqRB,bslot)%velocity_x(ix,iy,k,1) = u + (+duy-duz)
+       mhd_corner_scratch(iqRB,bslot)%velocity_y(ix,iy,k,1) = v + (+dvy-dvz)
+       mhd_corner_scratch(iqRB,bslot)%velocity_z(ix,iy,k,1) = w + (+dwy-dwz)
+       mhd_corner_scratch(iqRB,bslot)%pressure  (ix,iy,k,1) = p + (+dpy-dpz)
+       mhd_corner_scratch(iqRB,bslot)%Bx(ix,iy,k,1) = A + (+dAy-dAz)
+       mhd_corner_scratch(iqRB,bslot)%By(ix,iy,k,1) = BR + (   -dBRz)
+       mhd_corner_scratch(iqRB,bslot)%Bz(ix,iy,k,1) = CL + (+dCLy   )
+       if (mhd_corner_scratch(iqRB,bslot)%density (ix,iy,k,1) < smallr) mhd_corner_scratch(iqRB,bslot)%density (ix,iy,k,1) = r
+       if (mhd_corner_scratch(iqRB,bslot)%pressure(ix,iy,k,1) < smallp) mhd_corner_scratch(iqRB,bslot)%pressure(ix,iy,k,1) = p
+       mhd_corner_scratch(iqLT,bslot)%density   (ix,iy,k,1) = r + (-dry+drz)
+       mhd_corner_scratch(iqLT,bslot)%velocity_x(ix,iy,k,1) = u + (-duy+duz)
+       mhd_corner_scratch(iqLT,bslot)%velocity_y(ix,iy,k,1) = v + (-dvy+dvz)
+       mhd_corner_scratch(iqLT,bslot)%velocity_z(ix,iy,k,1) = w + (-dwy+dwz)
+       mhd_corner_scratch(iqLT,bslot)%pressure  (ix,iy,k,1) = p + (-dpy+dpz)
+       mhd_corner_scratch(iqLT,bslot)%Bx(ix,iy,k,1) = A + (-dAy+dAz)
+       mhd_corner_scratch(iqLT,bslot)%By(ix,iy,k,1) = BL + (   +dBLz)
+       mhd_corner_scratch(iqLT,bslot)%Bz(ix,iy,k,1) = CR + (-dCRy   )
+       if (mhd_corner_scratch(iqLT,bslot)%density (ix,iy,k,1) < smallr) mhd_corner_scratch(iqLT,bslot)%density (ix,iy,k,1) = r
+       if (mhd_corner_scratch(iqLT,bslot)%pressure(ix,iy,k,1) < smallp) mhd_corner_scratch(iqLT,bslot)%pressure(ix,iy,k,1) = p
+       mhd_corner_scratch(iqLB,bslot)%density   (ix,iy,k,1) = r + (-dry-drz)
+       mhd_corner_scratch(iqLB,bslot)%velocity_x(ix,iy,k,1) = u + (-duy-duz)
+       mhd_corner_scratch(iqLB,bslot)%velocity_y(ix,iy,k,1) = v + (-dvy-dvz)
+       mhd_corner_scratch(iqLB,bslot)%velocity_z(ix,iy,k,1) = w + (-dwy-dwz)
+       mhd_corner_scratch(iqLB,bslot)%pressure  (ix,iy,k,1) = p + (-dpy-dpz)
+       mhd_corner_scratch(iqLB,bslot)%Bx(ix,iy,k,1) = A + (-dAy-dAz)
+       mhd_corner_scratch(iqLB,bslot)%By(ix,iy,k,1) = BL + (   -dBLz)
+       mhd_corner_scratch(iqLB,bslot)%Bz(ix,iy,k,1) = CL + (-dCLy   )
+       if (mhd_corner_scratch(iqLB,bslot)%density (ix,iy,k,1) < smallr) mhd_corner_scratch(iqLB,bslot)%density (ix,iy,k,1) = r
+       ! NOTE: reproduces the CPU typo at umuscl.f90:1284 (pressure-floor branch
+       ! writes the density slot, not pressure) verbatim for bit-level CPU match.
+       if (mhd_corner_scratch(iqLB,bslot)%pressure(ix,iy,k,1) < smallp) mhd_corner_scratch(iqLB,bslot)%density(ix,iy,k,1) = p
+
+       ! ---- Y-edge corner states (orientation 2) (CPU trace3d:1290-1353) ------
+       mhd_corner_scratch(iqRT,bslot)%density   (ix,iy,k,2) = r + (+drx+drz)
+       mhd_corner_scratch(iqRT,bslot)%velocity_x(ix,iy,k,2) = u + (+dux+duz)
+       mhd_corner_scratch(iqRT,bslot)%velocity_y(ix,iy,k,2) = v + (+dvx+dvz)
+       mhd_corner_scratch(iqRT,bslot)%velocity_z(ix,iy,k,2) = w + (+dwx+dwz)
+       mhd_corner_scratch(iqRT,bslot)%pressure  (ix,iy,k,2) = p + (+dpx+dpz)
+       mhd_corner_scratch(iqRT,bslot)%Bx(ix,iy,k,2) = AR + (   +dARz)
+       mhd_corner_scratch(iqRT,bslot)%By(ix,iy,k,2) = B + (+dBx+dBz)
+       mhd_corner_scratch(iqRT,bslot)%Bz(ix,iy,k,2) = CR + (+dCRx   )
+       if (mhd_corner_scratch(iqRT,bslot)%density (ix,iy,k,2) < smallr) mhd_corner_scratch(iqRT,bslot)%density (ix,iy,k,2) = r
+       if (mhd_corner_scratch(iqRT,bslot)%pressure(ix,iy,k,2) < smallp) mhd_corner_scratch(iqRT,bslot)%pressure(ix,iy,k,2) = p
+       mhd_corner_scratch(iqRB,bslot)%density   (ix,iy,k,2) = r + (+drx-drz)
+       mhd_corner_scratch(iqRB,bslot)%velocity_x(ix,iy,k,2) = u + (+dux-duz)
+       mhd_corner_scratch(iqRB,bslot)%velocity_y(ix,iy,k,2) = v + (+dvx-dvz)
+       mhd_corner_scratch(iqRB,bslot)%velocity_z(ix,iy,k,2) = w + (+dwx-dwz)
+       mhd_corner_scratch(iqRB,bslot)%pressure  (ix,iy,k,2) = p + (+dpx-dpz)
+       mhd_corner_scratch(iqRB,bslot)%Bx(ix,iy,k,2) = AR + (   -dARz)
+       mhd_corner_scratch(iqRB,bslot)%By(ix,iy,k,2) = B + (+dBx-dBz)
+       mhd_corner_scratch(iqRB,bslot)%Bz(ix,iy,k,2) = CL + (+dCLx   )
+       if (mhd_corner_scratch(iqRB,bslot)%density (ix,iy,k,2) < smallr) mhd_corner_scratch(iqRB,bslot)%density (ix,iy,k,2) = r
+       if (mhd_corner_scratch(iqRB,bslot)%pressure(ix,iy,k,2) < smallp) mhd_corner_scratch(iqRB,bslot)%pressure(ix,iy,k,2) = p
+       mhd_corner_scratch(iqLT,bslot)%density   (ix,iy,k,2) = r + (-drx+drz)
+       mhd_corner_scratch(iqLT,bslot)%velocity_x(ix,iy,k,2) = u + (-dux+duz)
+       mhd_corner_scratch(iqLT,bslot)%velocity_y(ix,iy,k,2) = v + (-dvx+dvz)
+       mhd_corner_scratch(iqLT,bslot)%velocity_z(ix,iy,k,2) = w + (-dwx+dwz)
+       mhd_corner_scratch(iqLT,bslot)%pressure  (ix,iy,k,2) = p + (-dpx+dpz)
+       mhd_corner_scratch(iqLT,bslot)%Bx(ix,iy,k,2) = AL + (   +dALz)
+       mhd_corner_scratch(iqLT,bslot)%By(ix,iy,k,2) = B + (-dBx+dBz)
+       mhd_corner_scratch(iqLT,bslot)%Bz(ix,iy,k,2) = CR + (-dCRx   )
+       if (mhd_corner_scratch(iqLT,bslot)%density (ix,iy,k,2) < smallr) mhd_corner_scratch(iqLT,bslot)%density (ix,iy,k,2) = r
+       if (mhd_corner_scratch(iqLT,bslot)%pressure(ix,iy,k,2) < smallp) mhd_corner_scratch(iqLT,bslot)%pressure(ix,iy,k,2) = p
+       mhd_corner_scratch(iqLB,bslot)%density   (ix,iy,k,2) = r + (-drx-drz)
+       mhd_corner_scratch(iqLB,bslot)%velocity_x(ix,iy,k,2) = u + (-dux-duz)
+       mhd_corner_scratch(iqLB,bslot)%velocity_y(ix,iy,k,2) = v + (-dvx-dvz)
+       mhd_corner_scratch(iqLB,bslot)%velocity_z(ix,iy,k,2) = w + (-dwx-dwz)
+       mhd_corner_scratch(iqLB,bslot)%pressure  (ix,iy,k,2) = p + (-dpx-dpz)
+       mhd_corner_scratch(iqLB,bslot)%Bx(ix,iy,k,2) = AL + (   -dALz)
+       mhd_corner_scratch(iqLB,bslot)%By(ix,iy,k,2) = B + (-dBx-dBz)
+       mhd_corner_scratch(iqLB,bslot)%Bz(ix,iy,k,2) = CL + (-dCLx   )
+       if (mhd_corner_scratch(iqLB,bslot)%density (ix,iy,k,2) < smallr) mhd_corner_scratch(iqLB,bslot)%density (ix,iy,k,2) = r
+       if (mhd_corner_scratch(iqLB,bslot)%pressure(ix,iy,k,2) < smallp) mhd_corner_scratch(iqLB,bslot)%pressure(ix,iy,k,2) = p
+
+       ! ---- Z-edge corner states (orientation 3) (CPU trace3d:1354-1417) ------
+       mhd_corner_scratch(iqRT,bslot)%density   (ix,iy,k,3) = r + (+drx+dry)
+       mhd_corner_scratch(iqRT,bslot)%velocity_x(ix,iy,k,3) = u + (+dux+duy)
+       mhd_corner_scratch(iqRT,bslot)%velocity_y(ix,iy,k,3) = v + (+dvx+dvy)
+       mhd_corner_scratch(iqRT,bslot)%velocity_z(ix,iy,k,3) = w + (+dwx+dwy)
+       mhd_corner_scratch(iqRT,bslot)%pressure  (ix,iy,k,3) = p + (+dpx+dpy)
+       mhd_corner_scratch(iqRT,bslot)%Bx(ix,iy,k,3) = AR + (   +dARy)
+       mhd_corner_scratch(iqRT,bslot)%By(ix,iy,k,3) = BR + (+dBRx   )
+       mhd_corner_scratch(iqRT,bslot)%Bz(ix,iy,k,3) = C + (+dCx+dCy)
+       if (mhd_corner_scratch(iqRT,bslot)%density (ix,iy,k,3) < smallr) mhd_corner_scratch(iqRT,bslot)%density (ix,iy,k,3) = r
+       if (mhd_corner_scratch(iqRT,bslot)%pressure(ix,iy,k,3) < smallp) mhd_corner_scratch(iqRT,bslot)%pressure(ix,iy,k,3) = p
+       mhd_corner_scratch(iqRB,bslot)%density   (ix,iy,k,3) = r + (+drx-dry)
+       mhd_corner_scratch(iqRB,bslot)%velocity_x(ix,iy,k,3) = u + (+dux-duy)
+       mhd_corner_scratch(iqRB,bslot)%velocity_y(ix,iy,k,3) = v + (+dvx-dvy)
+       mhd_corner_scratch(iqRB,bslot)%velocity_z(ix,iy,k,3) = w + (+dwx-dwy)
+       mhd_corner_scratch(iqRB,bslot)%pressure  (ix,iy,k,3) = p + (+dpx-dpy)
+       mhd_corner_scratch(iqRB,bslot)%Bx(ix,iy,k,3) = AR + (   -dARy)
+       mhd_corner_scratch(iqRB,bslot)%By(ix,iy,k,3) = BL + (+dBLx   )
+       mhd_corner_scratch(iqRB,bslot)%Bz(ix,iy,k,3) = C + (+dCx-dCy)
+       if (mhd_corner_scratch(iqRB,bslot)%density (ix,iy,k,3) < smallr) mhd_corner_scratch(iqRB,bslot)%density (ix,iy,k,3) = r
+       if (mhd_corner_scratch(iqRB,bslot)%pressure(ix,iy,k,3) < smallp) mhd_corner_scratch(iqRB,bslot)%pressure(ix,iy,k,3) = p
+       mhd_corner_scratch(iqLT,bslot)%density   (ix,iy,k,3) = r + (-drx+dry)
+       mhd_corner_scratch(iqLT,bslot)%velocity_x(ix,iy,k,3) = u + (-dux+duy)
+       mhd_corner_scratch(iqLT,bslot)%velocity_y(ix,iy,k,3) = v + (-dvx+dvy)
+       mhd_corner_scratch(iqLT,bslot)%velocity_z(ix,iy,k,3) = w + (-dwx+dwy)
+       mhd_corner_scratch(iqLT,bslot)%pressure  (ix,iy,k,3) = p + (-dpx+dpy)
+       mhd_corner_scratch(iqLT,bslot)%Bx(ix,iy,k,3) = AL + (   +dALy)
+       mhd_corner_scratch(iqLT,bslot)%By(ix,iy,k,3) = BR + (-dBRx   )
+       mhd_corner_scratch(iqLT,bslot)%Bz(ix,iy,k,3) = C + (-dCx+dCy)
+       if (mhd_corner_scratch(iqLT,bslot)%density (ix,iy,k,3) < smallr) mhd_corner_scratch(iqLT,bslot)%density (ix,iy,k,3) = r
+       if (mhd_corner_scratch(iqLT,bslot)%pressure(ix,iy,k,3) < smallp) mhd_corner_scratch(iqLT,bslot)%pressure(ix,iy,k,3) = p
+       mhd_corner_scratch(iqLB,bslot)%density   (ix,iy,k,3) = r + (-drx-dry)
+       mhd_corner_scratch(iqLB,bslot)%velocity_x(ix,iy,k,3) = u + (-dux-duy)
+       mhd_corner_scratch(iqLB,bslot)%velocity_y(ix,iy,k,3) = v + (-dvx-dvy)
+       mhd_corner_scratch(iqLB,bslot)%velocity_z(ix,iy,k,3) = w + (-dwx-dwy)
+       mhd_corner_scratch(iqLB,bslot)%pressure  (ix,iy,k,3) = p + (-dpx-dpy)
+       mhd_corner_scratch(iqLB,bslot)%Bx(ix,iy,k,3) = AL + (   -dALy)
+       mhd_corner_scratch(iqLB,bslot)%By(ix,iy,k,3) = BL + (-dBLx   )
+       mhd_corner_scratch(iqLB,bslot)%Bz(ix,iy,k,3) = C + (-dCx-dCy)
+       if (mhd_corner_scratch(iqLB,bslot)%density (ix,iy,k,3) < smallr) mhd_corner_scratch(iqLB,bslot)%density (ix,iy,k,3) = r
+       if (mhd_corner_scratch(iqLB,bslot)%pressure(ix,iy,k,3) < smallp) mhd_corner_scratch(iqLB,bslot)%pressure(ix,iy,k,3) = p
+
+       ! ---- Passive-scalar advection predictor (CPU trace3d:1423-1448) --------
+       ! Uses the ORIGINAL cell velocities (re-read from local_mhd), not predicted.
+       do n = 1, nvar-5
+          rscal = scalar_sub(ix,iy,k,n)
+          u = local_mhd%velocity_x(ix,iy,k)
+          v = local_mhd%velocity_y(ix,iy,k)
+          w = local_mhd%velocity_z(ix,iy,k)
+          drx = half*slope_moncen(scalar_sub(ix-1,iy,k,n), rscal, scalar_sub(ix+1,iy,k,n), slope)
+          dry = half*slope_moncen(scalar_sub(ix,iy-1,k,n), rscal, scalar_sub(ix,iy+1,k,n), slope)
+          drz = half*slope_moncen(scalar_sub(ix,iy,k-1,n), rscal, scalar_sub(ix,iy,k+1,n), slope)
+          sr0 = -u*drx - v*dry - w*drz
+          rscal = rscal + sr0*dtdx
+          if (ix > 1 .and. (iy > 1 .and. iy < work_size) .and. (k > 1 .and. k < work_size)) &
+               & right_x%scalar(ix-2,iy-2,k-2,n) = rscal - drx
+          if (ix < work_size .and. (iy > 1 .and. iy < work_size) .and. (k > 1 .and. k < work_size)) &
+               & left_x%scalar(ix-1,iy-2,k-2,n) = rscal + drx
+          if ((ix > 1 .and. ix < work_size) .and. iy > 1 .and. (k > 1 .and. k < work_size)) &
+               & right_y%scalar(ix-2,iy-2,k-2,n) = rscal - dry
+          if ((ix > 1 .and. ix < work_size) .and. iy < work_size .and. (k > 1 .and. k < work_size)) &
+               & left_y%scalar(ix-2,iy-1,k-2,n) = rscal + dry
+          if ((ix > 1 .and. ix < work_size) .and. (iy > 1 .and. iy < work_size) .and. k > 1) &
+               & right_z%scalar(ix-2,iy-2,k-2,n) = rscal - drz
+          if ((ix > 1 .and. ix < work_size) .and. (iy > 1 .and. iy < work_size) .and. k < work_size) &
+               & left_z%scalar(ix-2,iy-2,k-1,n) = rscal + drz
+       end do
+
+    end do
+
+    call syncthreads()
+
+  end subroutine trace_3d_mhd
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief (Stage C2 helper) Return the HLL fast-magnetosonic wave speeds SL/SR
+  !> for the 1D MHD Riemann problem, identical to the speed computation inside
+  !> hll_mhd_fluxes (B4) -- recomputed here (rather than modifying B4, which is
+  !> frozen) so the passive-scalar HLL flux in riemann_driver_mhd uses the same
+  !> SL/SR as the MHD-core flux. Floors match B4 (no-ops for realistic states).
+  attributes(device) subroutine hll_mhd_wavespeeds(left, right, gamma, SL, SR)
+    type(primitive_mhd_t), intent(in) :: left, right
+    real(kind=dp), value :: gamma
+    real(kind=dp), intent(out) :: SL, SR
+    real(kind=dp), parameter :: smallr = 1d-10
+    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
+    real(kind=dp) :: smallp, bx_mean, rl, rr, pl, pr, ul, ur
+    real(kind=dp) :: blx, bly, blz, brx, bry, brz
+    real(kind=dp) :: b2l, b2r, c2l, c2r, d2l, d2r, cfleft, cfright
+
+    smallp = smallc_squared / gamma
+    bx_mean = 0.5d0 * (left%Bx + right%Bx)
+    rl = max(left%density, smallr);  rr = max(right%density, smallr)
+    pl = max(left%pressure, smallp*rl); pr = max(right%pressure, smallp*rr)
+    ul = left%velocity_x; ur = right%velocity_x
+    blx = bx_mean; brx = bx_mean
+    bly = left%By;  blz = left%Bz
+    bry = right%By; brz = right%Bz
+    b2l = compute_bsquared(blx, bly, blz); c2l = gamma*pl/rl
+    d2l = 0.5d0*(b2l/rl + c2l); cfleft = sqrt(d2l + sqrt(d2l**2 - c2l*blx*blx/rl))
+    b2r = compute_bsquared(brx, bry, brz); c2r = gamma*pr/rr
+    d2r = 0.5d0*(b2r/rr + c2r); cfright = sqrt(d2r + sqrt(d2r**2 - c2r*brx*brx/rr))
+    SL = min(min(ul, ur) - max(cfleft, cfright), 0.0_dp)
+    SR = max(max(ul, ur) + max(cfleft, cfright), 0.0_dp)
+  end subroutine hll_mhd_wavespeeds
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief (Stage C2) MHD 1D-flux driver. The MHD analog of riemann_driver: for
+  !> each of the X/Y/Z interfaces it gathers the qm/qp interface states, rotates
+  !> the velocity AND magnetic field into the face-normal frame (the CPU bn,bt1,bt2
+  !> / ln,lt1,lt2 permutations, cmpflxm umuscl.f90:131-204), calls riemann_mhd_fluxes
+  !> (B4), and unpacks the conserved fluxes back into the interface arrays with the
+  !> rotation reversed. Passive scalars are advected with the same SL/SR HLL flux as
+  !> the CPU (find_mhd_flux: ff(s)=d*u*s, cvar(s)=d*s; godunov_utils.f90:1332-1335).
+  !> At NDIM=3 the magnetic-flux slots (Bx/By/Bz) are written but never consumed --
+  !> B is advanced by constrained transport (the EMF curl in C5), not by these
+  !> face fluxes (CPU guards the face-flux B update #if NDIM<3, godunov_fine:771).
+  attributes(device) subroutine riemann_driver_mhd(left_x, right_x, left_y, right_y, &
+       & left_z, right_z, thread_idx, gamma, riemann)
+    type(subgrid_3x2x2cell_primitive_mhd), intent(inout) :: left_x, right_x
+    type(subgrid_2x3x2cell_primitive_mhd), intent(inout) :: left_y, right_y
+    type(subgrid_2x2x3cell_primitive_mhd), intent(inout) :: left_z, right_z
+    real(kind=dp), value :: gamma
+    integer, value :: riemann, thread_idx
+    real(kind=dp), parameter :: smallr = 1d-10
+    integer :: work_idx, interface_array_size, i, j, k, n
+    type(primitive_mhd_t) :: lft, rgt
+    type(conserved_mhd_t) :: flux
+    real(kind=dp) :: SL, SR, sLin, sRin, mfL, mfR, ucL, ucR
+
+    interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
+
+    do work_idx = thread_idx, interface_array_size * 3 - 1, blockDim%x
+       if (work_idx < interface_array_size) then
+          ! ---- X interfaces: normal frame is identity ----------------------
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
+          lft%density = left_x%density(i,j,k);  lft%pressure = left_x%pressure(i,j,k)
+          lft%velocity_x = left_x%velocity_x(i,j,k); lft%velocity_y = left_x%velocity_y(i,j,k)
+          lft%velocity_z = left_x%velocity_z(i,j,k)
+          lft%Bx = left_x%Bx(i,j,k); lft%By = left_x%By(i,j,k); lft%Bz = left_x%Bz(i,j,k)
+          rgt%density = right_x%density(i,j,k); rgt%pressure = right_x%pressure(i,j,k)
+          rgt%velocity_x = right_x%velocity_x(i,j,k); rgt%velocity_y = right_x%velocity_y(i,j,k)
+          rgt%velocity_z = right_x%velocity_z(i,j,k)
+          rgt%Bx = right_x%Bx(i,j,k); rgt%By = right_x%By(i,j,k); rgt%Bz = right_x%Bz(i,j,k)
+
+          flux = riemann_mhd_fluxes(lft, rgt, gamma, riemann)
+          call hll_mhd_wavespeeds(lft, rgt, gamma, SL, SR)
+
+          left_x%density(i,j,k) = flux%density
+          left_x%velocity_x(i,j,k) = flux%momentum_x
+          left_x%velocity_y(i,j,k) = flux%momentum_y
+          left_x%velocity_z(i,j,k) = flux%momentum_z
+          left_x%pressure(i,j,k) = flux%energy
+          left_x%Bx(i,j,k) = flux%Bx; left_x%By(i,j,k) = flux%By; left_x%Bz(i,j,k) = flux%Bz
+          do n = 1, nvar-5
+             sLin = left_x%scalar(i,j,k,n); sRin = right_x%scalar(i,j,k,n)
+             mfL = max(lft%density,smallr)*lft%velocity_x*sLin; ucL = max(lft%density,smallr)*sLin
+             mfR = max(rgt%density,smallr)*rgt%velocity_x*sRin; ucR = max(rgt%density,smallr)*sRin
+             left_x%scalar(i,j,k,n) = hll_flux(SL, SR, mfL, mfR, ucL, ucR)
+          end do
+
+       else if (work_idx < 2 * interface_array_size) then
+          ! ---- Y interfaces: normal=vy/By, t1=vx/Bx, t2=vz/Bz --------------
+          call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
+          lft%density = left_y%density(i,j,k);  lft%pressure = left_y%pressure(i,j,k)
+          lft%velocity_x = left_y%velocity_y(i,j,k); lft%velocity_y = left_y%velocity_x(i,j,k)
+          lft%velocity_z = left_y%velocity_z(i,j,k)
+          lft%Bx = left_y%By(i,j,k); lft%By = left_y%Bx(i,j,k); lft%Bz = left_y%Bz(i,j,k)
+          rgt%density = right_y%density(i,j,k); rgt%pressure = right_y%pressure(i,j,k)
+          rgt%velocity_x = right_y%velocity_y(i,j,k); rgt%velocity_y = right_y%velocity_x(i,j,k)
+          rgt%velocity_z = right_y%velocity_z(i,j,k)
+          rgt%Bx = right_y%By(i,j,k); rgt%By = right_y%Bx(i,j,k); rgt%Bz = right_y%Bz(i,j,k)
+
+          flux = riemann_mhd_fluxes(lft, rgt, gamma, riemann)
+          call hll_mhd_wavespeeds(lft, rgt, gamma, SL, SR)
+
+          left_y%density(i,j,k) = flux%density
+          left_y%velocity_y(i,j,k) = flux%momentum_x   ! normal momentum
+          left_y%velocity_x(i,j,k) = flux%momentum_y   ! tangential 1
+          left_y%velocity_z(i,j,k) = flux%momentum_z   ! tangential 2
+          left_y%pressure(i,j,k) = flux%energy
+          left_y%By(i,j,k) = flux%Bx; left_y%Bx(i,j,k) = flux%By; left_y%Bz(i,j,k) = flux%Bz
+          do n = 1, nvar-5
+             sLin = left_y%scalar(i,j,k,n); sRin = right_y%scalar(i,j,k,n)
+             mfL = max(lft%density,smallr)*lft%velocity_x*sLin; ucL = max(lft%density,smallr)*sLin
+             mfR = max(rgt%density,smallr)*rgt%velocity_x*sRin; ucR = max(rgt%density,smallr)*sRin
+             left_y%scalar(i,j,k,n) = hll_flux(SL, SR, mfL, mfR, ucL, ucR)
+          end do
+
+       else
+          ! ---- Z interfaces: normal=vz/Bz, t1=vx/Bx, t2=vy/By --------------
+          call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
+          lft%density = left_z%density(i,j,k);  lft%pressure = left_z%pressure(i,j,k)
+          lft%velocity_x = left_z%velocity_z(i,j,k); lft%velocity_y = left_z%velocity_x(i,j,k)
+          lft%velocity_z = left_z%velocity_y(i,j,k)
+          lft%Bx = left_z%Bz(i,j,k); lft%By = left_z%Bx(i,j,k); lft%Bz = left_z%By(i,j,k)
+          rgt%density = right_z%density(i,j,k); rgt%pressure = right_z%pressure(i,j,k)
+          rgt%velocity_x = right_z%velocity_z(i,j,k); rgt%velocity_y = right_z%velocity_x(i,j,k)
+          rgt%velocity_z = right_z%velocity_y(i,j,k)
+          rgt%Bx = right_z%Bz(i,j,k); rgt%By = right_z%Bx(i,j,k); rgt%Bz = right_z%By(i,j,k)
+
+          flux = riemann_mhd_fluxes(lft, rgt, gamma, riemann)
+          call hll_mhd_wavespeeds(lft, rgt, gamma, SL, SR)
+
+          left_z%density(i,j,k) = flux%density
+          left_z%velocity_z(i,j,k) = flux%momentum_x   ! normal momentum
+          left_z%velocity_x(i,j,k) = flux%momentum_y   ! tangential 1
+          left_z%velocity_y(i,j,k) = flux%momentum_z   ! tangential 2
+          left_z%pressure(i,j,k) = flux%energy
+          left_z%Bz(i,j,k) = flux%Bx; left_z%Bx(i,j,k) = flux%By; left_z%By(i,j,k) = flux%Bz
+          do n = 1, nvar-5
+             sLin = left_z%scalar(i,j,k,n); sRin = right_z%scalar(i,j,k,n)
+             mfL = max(lft%density,smallr)*lft%velocity_x*sLin; ucL = max(lft%density,smallr)*sLin
+             mfR = max(rgt%density,smallr)*rgt%velocity_x*sRin; ucR = max(rgt%density,smallr)*sRin
+             left_z%scalar(i,j,k,n) = hll_flux(SL, SR, mfL, mfR, ucL, ucR)
+          end do
+       end if
+    end do
+
+    call syncthreads()
+
+  end subroutine riemann_driver_mhd
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief (Stage C3 helper) Read one edge corner state from the global scratch
+  !> and permute it into the canonical 2D-Riemann frame: velocity_x/y/z <-
+  !> components (lp1,lp2,lor); Bx/By/Bz <- (bp1,bp2,bor). This is the per-corner
+  !> half of the CPU cmp_mag_flx gather (umuscl.f90:1640-1685): the raw primitive
+  !> component index (2/3/4 velocity, 6/7/8 magnetic) maps to a named field.
+  attributes(device) function gather_corner(c, islot, bslot, X, Y, Z, orient, &
+       & lp1, lp2, lor, bp1, bp2, bor) result(q)
+    type(subgrid_corner_state_t), device :: c(1:4,*)
+    integer, value :: islot, bslot, X, Y, Z, orient, lp1, lp2, lor, bp1, bp2, bor
+    type(primitive_mhd_t) :: q
+    q%density  = c(islot,bslot)%density (X,Y,Z,orient)
+    q%pressure = c(islot,bslot)%pressure(X,Y,Z,orient)
+    ! parallel velocity 1 -> velocity_x
+    select case (lp1)
+    case (2); q%velocity_x = c(islot,bslot)%velocity_x(X,Y,Z,orient)
+    case (3); q%velocity_x = c(islot,bslot)%velocity_y(X,Y,Z,orient)
+    case default; q%velocity_x = c(islot,bslot)%velocity_z(X,Y,Z,orient)
+    end select
+    ! parallel velocity 2 -> velocity_y
+    select case (lp2)
+    case (2); q%velocity_y = c(islot,bslot)%velocity_x(X,Y,Z,orient)
+    case (3); q%velocity_y = c(islot,bslot)%velocity_y(X,Y,Z,orient)
+    case default; q%velocity_y = c(islot,bslot)%velocity_z(X,Y,Z,orient)
+    end select
+    ! orthogonal velocity -> velocity_z
+    select case (lor)
+    case (2); q%velocity_z = c(islot,bslot)%velocity_x(X,Y,Z,orient)
+    case (3); q%velocity_z = c(islot,bslot)%velocity_y(X,Y,Z,orient)
+    case default; q%velocity_z = c(islot,bslot)%velocity_z(X,Y,Z,orient)
+    end select
+    ! parallel magnetic 1 -> Bx (continuity applied later)
+    select case (bp1)
+    case (6); q%Bx = c(islot,bslot)%Bx(X,Y,Z,orient)
+    case (7); q%Bx = c(islot,bslot)%By(X,Y,Z,orient)
+    case default; q%Bx = c(islot,bslot)%Bz(X,Y,Z,orient)
+    end select
+    ! parallel magnetic 2 -> By (continuity applied later)
+    select case (bp2)
+    case (6); q%By = c(islot,bslot)%Bx(X,Y,Z,orient)
+    case (7); q%By = c(islot,bslot)%By(X,Y,Z,orient)
+    case default; q%By = c(islot,bslot)%Bz(X,Y,Z,orient)
+    end select
+    ! orthogonal magnetic -> Bz
+    select case (bor)
+    case (6); q%Bz = c(islot,bslot)%Bx(X,Y,Z,orient)
+    case (7); q%Bz = c(islot,bslot)%By(X,Y,Z,orient)
+    case default; q%Bz = c(islot,bslot)%Bz(X,Y,Z,orient)
+    end select
+  end function gather_corner
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief (Stage C3 helper) Enforce the parallel-B continuity of cmp_mag_flx
+  !> (umuscl.f90:1669-1685) on the four (already permuted) corner states, then
+  !> call the 2D HLL EMF solver (B5). Bx holds parallel-B-1 (bp1), By parallel-B-2
+  !> (bp2); both are made single-valued across their respective edge directions.
+  attributes(device) function emf_solve(qLL, qLR, qRL, qRR, gamma, riemann2d) result(E)
+    type(primitive_mhd_t), intent(in) :: qLL, qLR, qRL, qRR
+    real(kind=dp), value :: gamma
+    integer, value :: riemann2d
+    real(kind=dp) :: E
+    type(primitive_mhd_t) :: sLL, sLR, sRL, sRR
+    real(kind=dp) :: b1_LL, b1_LR, b2_LL, b2_RL
+    real(kind=dp), parameter :: half = 0.5_dp
+
+    sLL = qLL; sLR = qLR; sRL = qRL; sRR = qRR
+    b1_LL = half*(qLL%Bx + qRL%Bx); b1_LR = half*(qLR%Bx + qRR%Bx)
+    sLL%Bx = b1_LL; sRL%Bx = b1_LL; sLR%Bx = b1_LR; sRR%Bx = b1_LR
+    b2_LL = half*(qLL%By + qLR%By); b2_RL = half*(qRL%By + qRR%By)
+    sLL%By = b2_LL; sLR%By = b2_LL; sRL%By = b2_RL; sRR%By = b2_RL
+    E = riemann2d_emf(sLL, sLR, sRL, sRR, gamma, riemann2d)
+  end function emf_solve
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief (Stage C3) Whole-subgrid EMF solve. The MHD-only stage with no hydro
+  !> analog. Mirrors the three CPU cmp_mag_flx calls (umuscl.f90:220-265). For each
+  !> output edge (I,J,K) in the real-oct-local [0,2]^3 frame (subgrid corner
+  !> (I+2,J+2,K+2)) and each orientation it gathers the four corner states from the
+  !> mhd_corner_scratch spill with the orientation-specific index shifts and the
+  !> qRT/qRB/qLT/qLB->qLL/qLR/qRL/qRR remap, then calls emf_solve. RAW E is stored
+  !> (the dt/dx scaling is applied once, in C5). Index-shift derivation: the CPU
+  !> passes shifted array sections to cmp_mag_flx, so dummy index (i,j,k) reads the
+  !> real array at the offset baked into the section bounds (umuscl.f90:220-258):
+  !>   Ez: qLL=qRT(X-1,Y-1,Z) qRL=qLT(X,Y-1,Z) qLR=qRB(X-1,Y,Z) qRR=qLB(X,Y,Z)
+  !>   Ey: qLL=qRT(X-1,Y,Z-1) qRL=qRB(X-1,Y,Z) qLR=qLT(X,Y,Z-1) qRR=qLB(X,Y,Z)
+  !>   Ex: qLL=qRT(X,Y-1,Z-1) qRL=qLT(X,Y,Z-1) qLR=qRB(X,Y-1,Z) qRR=qLB(X,Y,Z)
+  !> (note Ey swaps the qRL/qLR sources to qRB/qLT, the trickiest part).
+  attributes(device) subroutine cmp_mag_flx_mhd(mhd_corner_scratch, bslot, emf, thread_idx, gamma, riemann2d)
+    type(subgrid_corner_state_t), device :: mhd_corner_scratch(1:4,*)
+    integer, value :: bslot, thread_idx, riemann2d
+    real(kind=dp), value :: gamma
+    type(subgrid_emf_t), intent(inout) :: emf
+    integer, parameter :: iqRT = 1, iqRB = 2, iqLT = 3, iqLB = 4
+    integer :: work_idx, emf_size, I, J, K, X, Y, Z
+    type(primitive_mhd_t) :: qLL, qLR, qRL, qRR
+
+    emf_size = (2*nsubgrid+1)**3   ! 27 edges per orientation in the [0,2]^3 frame
+
+    do work_idx = thread_idx, emf_size*3 - 1, blockDim%x
+       if (work_idx < emf_size) then
+          ! ---- EMF z (orientation 3): lp1=2 lp2=3 lor=4, bp1=6 bp2=7 bor=8 ----
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
+          X = I+2; Y = J+2; Z = K+2
+          qLL = gather_corner(mhd_corner_scratch, iqRT, bslot, X-1, Y-1, Z, 3, 2,3,4, 6,7,8)
+          qRL = gather_corner(mhd_corner_scratch, iqLT, bslot, X  , Y-1, Z, 3, 2,3,4, 6,7,8)
+          qLR = gather_corner(mhd_corner_scratch, iqRB, bslot, X-1, Y  , Z, 3, 2,3,4, 6,7,8)
+          qRR = gather_corner(mhd_corner_scratch, iqLB, bslot, X  , Y  , Z, 3, 2,3,4, 6,7,8)
+          emf%emfz(I,J,K) = emf_solve(qLL, qLR, qRL, qRR, gamma, riemann2d)
+
+       else if (work_idx < 2*emf_size) then
+          ! ---- EMF y (orientation 2): lp1=4 lp2=2 lor=3, bp1=8 bp2=6 bor=7 ----
+          call index_1Dto3D(work_idx - emf_size, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
+          X = I+2; Y = J+2; Z = K+2
+          qLL = gather_corner(mhd_corner_scratch, iqRT, bslot, X-1, Y, Z-1, 2, 4,2,3, 8,6,7)
+          qRL = gather_corner(mhd_corner_scratch, iqRB, bslot, X-1, Y, Z  , 2, 4,2,3, 8,6,7)
+          qLR = gather_corner(mhd_corner_scratch, iqLT, bslot, X  , Y, Z-1, 2, 4,2,3, 8,6,7)
+          qRR = gather_corner(mhd_corner_scratch, iqLB, bslot, X  , Y, Z  , 2, 4,2,3, 8,6,7)
+          emf%emfy(I,J,K) = emf_solve(qLL, qLR, qRL, qRR, gamma, riemann2d)
+
+       else
+          ! ---- EMF x (orientation 1): lp1=3 lp2=4 lor=2, bp1=7 bp2=8 bor=6 ----
+          call index_1Dto3D(work_idx - 2*emf_size, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
+          X = I+2; Y = J+2; Z = K+2
+          qLL = gather_corner(mhd_corner_scratch, iqRT, bslot, X, Y-1, Z-1, 1, 3,4,2, 7,8,6)
+          qRL = gather_corner(mhd_corner_scratch, iqLT, bslot, X, Y  , Z-1, 1, 3,4,2, 7,8,6)
+          qLR = gather_corner(mhd_corner_scratch, iqRB, bslot, X, Y-1, Z  , 1, 3,4,2, 7,8,6)
+          qRR = gather_corner(mhd_corner_scratch, iqLB, bslot, X, Y  , Z  , 1, 3,4,2, 7,8,6)
+          emf%emfx(I,J,K) = emf_solve(qLL, qLR, qRL, qRR, gamma, riemann2d)
+       end if
+    end do
+
+    call syncthreads()
+
+  end subroutine cmp_mag_flx_mhd
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief (Stage C4a) MHD analog of zero_fine_fluxes. Zero the conserved fluxes
+  !> (and passive-scalar fluxes; and the unused-in-3D transverse-B advection
+  !> fluxes, for CPU fidelity) at faces touching a refined cell. Same refined-mask
+  !> stencil as the hydro zero_fine_fluxes (CPU godunov_fine.f90:648-664).
+  attributes(device) subroutine zero_fine_fluxes_mhd(local_mhd, fluxes_x, fluxes_y, fluxes_z, thread_idx)
+    type(subgrid_6x6x6cell_primitive_mhd), intent(in) :: local_mhd
+    type(subgrid_3x2x2cell_primitive_mhd), intent(inout) :: fluxes_x
+    type(subgrid_2x3x2cell_primitive_mhd), intent(inout) :: fluxes_y
+    type(subgrid_2x2x3cell_primitive_mhd), intent(inout) :: fluxes_z
+    integer, value :: thread_idx
+    integer :: work_idx, interface_array_size, i, j, k, n
+
+    interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
+
+    do work_idx = thread_idx, interface_array_size * 3 - 1, blockDim%x
+       if (work_idx < interface_array_size) then
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
+          if (local_mhd%refined(i+1,j+2,k+2) .or. local_mhd%refined(i+2,j+2,k+2)) then
+             fluxes_x%density(i,j,k) = 0_dp;  fluxes_x%velocity_x(i,j,k) = 0_dp
+             fluxes_x%velocity_y(i,j,k) = 0_dp; fluxes_x%velocity_z(i,j,k) = 0_dp
+             fluxes_x%pressure(i,j,k) = 0_dp
+             fluxes_x%Bx(i,j,k) = 0_dp; fluxes_x%By(i,j,k) = 0_dp; fluxes_x%Bz(i,j,k) = 0_dp
+             do n = 1, nvar-5
+                fluxes_x%scalar(i,j,k,n) = 0_dp
+             end do
+          end if
+       else if (work_idx < 2 * interface_array_size) then
+          call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
+          if (local_mhd%refined(i+2,j+1,k+2) .or. local_mhd%refined(i+2,j+2,k+2)) then
+             fluxes_y%density(i,j,k) = 0_dp;  fluxes_y%velocity_x(i,j,k) = 0_dp
+             fluxes_y%velocity_y(i,j,k) = 0_dp; fluxes_y%velocity_z(i,j,k) = 0_dp
+             fluxes_y%pressure(i,j,k) = 0_dp
+             fluxes_y%Bx(i,j,k) = 0_dp; fluxes_y%By(i,j,k) = 0_dp; fluxes_y%Bz(i,j,k) = 0_dp
+             do n = 1, nvar-5
+                fluxes_y%scalar(i,j,k,n) = 0_dp
+             end do
+          end if
+       else
+          call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
+          if (local_mhd%refined(i+2,j+2,k+1) .or. local_mhd%refined(i+2,j+2,k+2)) then
+             fluxes_z%density(i,j,k) = 0_dp;  fluxes_z%velocity_x(i,j,k) = 0_dp
+             fluxes_z%velocity_y(i,j,k) = 0_dp; fluxes_z%velocity_z(i,j,k) = 0_dp
+             fluxes_z%pressure(i,j,k) = 0_dp
+             fluxes_z%Bx(i,j,k) = 0_dp; fluxes_z%By(i,j,k) = 0_dp; fluxes_z%Bz(i,j,k) = 0_dp
+             do n = 1, nvar-5
+                fluxes_z%scalar(i,j,k,n) = 0_dp
+             end do
+          end if
+       end if
+    end do
+
+    call syncthreads()
+
+  end subroutine zero_fine_fluxes_mhd
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief (Stage C4b) Zero an edge EMF if ANY of the (up to 4) cells touching
+  !> that edge is refined. Port of CPU godunov_fine.f90:672-708. The edge (I,J,K)
+  !> in the [0,2]^3 local frame is at subgrid corner (X,Y,Z)=(I+2,J+2,K+2); the
+  !> four cells are the CPU okloc(i3-+..) neighbours mapped to the subgrid.
+  attributes(device) subroutine zero_fine_emf(local_mhd, emf, thread_idx)
+    type(subgrid_6x6x6cell_primitive_mhd), intent(in) :: local_mhd
+    type(subgrid_emf_t), intent(inout) :: emf
+    integer, value :: thread_idx
+    integer :: work_idx, emf_size, I, J, K, X, Y, Z
+
+    emf_size = (2*nsubgrid+1)**3
+
+    do work_idx = thread_idx, emf_size*3 - 1, blockDim%x
+       if (work_idx < emf_size) then
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
+          X = I+2; Y = J+2; Z = K+2
+          if (local_mhd%refined(X-1,Y-1,Z) .or. local_mhd%refined(X,Y-1,Z) .or. &
+               & local_mhd%refined(X-1,Y,Z) .or. local_mhd%refined(X,Y,Z)) emf%emfz(I,J,K) = 0_dp
+       else if (work_idx < 2*emf_size) then
+          call index_1Dto3D(work_idx - emf_size, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
+          X = I+2; Y = J+2; Z = K+2
+          if (local_mhd%refined(X-1,Y,Z-1) .or. local_mhd%refined(X,Y,Z-1) .or. &
+               & local_mhd%refined(X-1,Y,Z) .or. local_mhd%refined(X,Y,Z)) emf%emfy(I,J,K) = 0_dp
+       else
+          call index_1Dto3D(work_idx - 2*emf_size, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
+          X = I+2; Y = J+2; Z = K+2
+          if (local_mhd%refined(X,Y-1,Z-1) .or. local_mhd%refined(X,Y,Z-1) .or. &
+               & local_mhd%refined(X,Y-1,Z) .or. local_mhd%refined(X,Y,Z)) emf%emfx(I,J,K) = 0_dp
+       end if
+    end do
+
+    call syncthreads()
+
+  end subroutine zero_fine_emf
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief (Stage C5) MHD conservative + constrained-transport update at the
+  !> current level. The hydro part mirrors conservative_update (density/momentum/
+  !> energy) and extends it to passive scalars (CPU godunov_fine.f90:764-769,
+  !> unew(5+n) += scalar-flux diff). The CT part advances the 6 face-B of each
+  !> cell by the discrete curl of the EMFs (CPU godunov_fine.f90:823-861), with the
+  !> EMF *dt/dx scaling APPLIED EXACTLY ONCE HERE (C1/C3 keep raw E). bnew was
+  !> pre-loaded with bold by set_unew (A3), so bnew = bold + dt/dx*curl(E). Each
+  !> cell writes its own 6 faces -- no atomics at the current level (the shared
+  !> oct-boundary edges get identical EMFs from both blocks, preserving the face-B
+  !> redundancy / divB).
+  attributes(device) subroutine conservative_update_mhd(unew, bnew, nbor, fluxes_x, fluxes_y, fluxes_z, &
+       & emf, head_idx, block_idx, thread_idx, dtdx)
+    real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
+    integer(kind=4), device :: nbor(1:subgridsize,*)
+    type(subgrid_3x2x2cell_primitive_mhd), intent(in) :: fluxes_x
+    type(subgrid_2x3x2cell_primitive_mhd), intent(in) :: fluxes_y
+    type(subgrid_2x2x3cell_primitive_mhd), intent(in) :: fluxes_z
+    type(subgrid_emf_t), intent(in) :: emf
+    integer(kind=4), value :: head_idx
+    integer, value :: block_idx, thread_idx
+    real(kind=dp), value :: dtdx
+
+    integer :: work_size, i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
+    integer :: work_idx, subgrid_idx, oct_idx, cell_idx, ind_nbor, n
+    real(kind=dp) :: ud, umx, umy, umz, ue, supd, dflux
+
+    work_size = 2*nsubgrid
+
+    do work_idx = thread_idx, work_size**3 - 1, blockDim%x
+       subgrid_idx = head_idx + block_idx
+       call index_1Dto3D(work_idx/8, work_size/2, work_size/2, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx)
+       i_subgrid_idx = i_subgrid_idx + 1
+       j_subgrid_idx = j_subgrid_idx + 1
+       k_subgrid_idx = k_subgrid_idx + 1
+       ind_nbor = 1 + i_subgrid_idx + nsubgridp2 * j_subgrid_idx + nsubgridp2sq * k_subgrid_idx
+       oct_idx = nbor(ind_nbor, subgrid_idx)
+       cell_idx = mod(work_idx, 8) + 1
+       call index_1Dto3D(cell_idx - 1, 2, 2, i, j, k)
+       i = i + 2*(i_subgrid_idx - 1)
+       j = j + 2*(j_subgrid_idx - 1)
+       k = k + 2*(k_subgrid_idx - 1)
+
+       ! ---- Hydro conservative update (density, momentum, energy) -------------
+       ud  = (fluxes_x%density   (i,j,k) - fluxes_x%density   (i+1,j,k)) * dtdx
+       umx = (fluxes_x%velocity_x(i,j,k) - fluxes_x%velocity_x(i+1,j,k)) * dtdx
+       umy = (fluxes_x%velocity_y(i,j,k) - fluxes_x%velocity_y(i+1,j,k)) * dtdx
+       umz = (fluxes_x%velocity_z(i,j,k) - fluxes_x%velocity_z(i+1,j,k)) * dtdx
+       ue  = (fluxes_x%pressure  (i,j,k) - fluxes_x%pressure  (i+1,j,k)) * dtdx
+       ud  = ud  + (fluxes_y%density   (i,j,k) - fluxes_y%density   (i,j+1,k)) * dtdx
+       umx = umx + (fluxes_y%velocity_x(i,j,k) - fluxes_y%velocity_x(i,j+1,k)) * dtdx
+       umy = umy + (fluxes_y%velocity_y(i,j,k) - fluxes_y%velocity_y(i,j+1,k)) * dtdx
+       umz = umz + (fluxes_y%velocity_z(i,j,k) - fluxes_y%velocity_z(i,j+1,k)) * dtdx
+       ue  = ue  + (fluxes_y%pressure  (i,j,k) - fluxes_y%pressure  (i,j+1,k)) * dtdx
+       ud  = ud  + (fluxes_z%density   (i,j,k) - fluxes_z%density   (i,j,k+1)) * dtdx
+       umx = umx + (fluxes_z%velocity_x(i,j,k) - fluxes_z%velocity_x(i,j,k+1)) * dtdx
+       umy = umy + (fluxes_z%velocity_y(i,j,k) - fluxes_z%velocity_y(i,j,k+1)) * dtdx
+       umz = umz + (fluxes_z%velocity_z(i,j,k) - fluxes_z%velocity_z(i,j,k+1)) * dtdx
+       ue  = ue  + (fluxes_z%pressure  (i,j,k) - fluxes_z%pressure  (i,j,k+1)) * dtdx
+       unew(cell_idx, 1, oct_idx) = unew(cell_idx, 1, oct_idx) + ud
+       unew(cell_idx, 2, oct_idx) = unew(cell_idx, 2, oct_idx) + umx
+       unew(cell_idx, 3, oct_idx) = unew(cell_idx, 3, oct_idx) + umy
+       unew(cell_idx, 4, oct_idx) = unew(cell_idx, 4, oct_idx) + umz
+       unew(cell_idx, 5, oct_idx) = unew(cell_idx, 5, oct_idx) + ue
+
+       ! ---- Passive scalars: unew(5+n) += scalar-flux diff --------------------
+       do n = 1, nvar-5
+          supd = (fluxes_x%scalar(i,j,k,n) - fluxes_x%scalar(i+1,j,k,n)) * dtdx &
+               & + (fluxes_y%scalar(i,j,k,n) - fluxes_y%scalar(i,j+1,k,n)) * dtdx &
+               & + (fluxes_z%scalar(i,j,k,n) - fluxes_z%scalar(i,j,k+1,n)) * dtdx
+          unew(cell_idx, 5+n, oct_idx) = unew(cell_idx, 5+n, oct_idx) + supd
+       end do
+
+       ! ---- Constrained-transport update of the 6 face-B (CPU :823-861) -------
+       ! EMF indices are in the real-oct-local [0,2] frame; (i,j,k) here is the
+       ! oct-local cell coord {0,1} (i_subgrid_idx==1 for nsubgrid=1). *dtdx ONCE.
+       dflux = ( (emf%emfy(i,j,k)-emf%emfy(i,j,k+1)) - (emf%emfz(i,j,k)-emf%emfz(i,j+1,k)) ) * dtdx
+       bnew(cell_idx, 1, oct_idx) = bnew(cell_idx, 1, oct_idx) + dflux
+       dflux = ( (emf%emfy(i+1,j,k)-emf%emfy(i+1,j,k+1)) - (emf%emfz(i+1,j,k)-emf%emfz(i+1,j+1,k)) ) * dtdx
+       bnew(cell_idx, 4, oct_idx) = bnew(cell_idx, 4, oct_idx) + dflux
+       dflux = ( (emf%emfz(i,j,k)-emf%emfz(i+1,j,k)) - (emf%emfx(i,j,k)-emf%emfx(i,j,k+1)) ) * dtdx
+       bnew(cell_idx, 2, oct_idx) = bnew(cell_idx, 2, oct_idx) + dflux
+       dflux = ( (emf%emfz(i,j+1,k)-emf%emfz(i+1,j+1,k)) - (emf%emfx(i,j+1,k)-emf%emfx(i,j+1,k+1)) ) * dtdx
+       bnew(cell_idx, 5, oct_idx) = bnew(cell_idx, 5, oct_idx) + dflux
+       dflux = ( (emf%emfx(i,j,k)-emf%emfx(i,j+1,k)) - (emf%emfy(i,j,k)-emf%emfy(i+1,j,k)) ) * dtdx
+       bnew(cell_idx, 3, oct_idx) = bnew(cell_idx, 3, oct_idx) + dflux
+       dflux = ( (emf%emfx(i,j,k+1)-emf%emfx(i,j+1,k+1)) - (emf%emfy(i,j,k+1)-emf%emfy(i+1,j,k+1)) ) * dtdx
+       bnew(cell_idx, 6, oct_idx) = bnew(cell_idx, 6, oct_idx) + dflux
+
+    end do
+
+  end subroutine conservative_update_mhd
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief (Stage C6 helper) For the neighbouring oct at oct-offset (di,dj,dk)
+  !> from this block's central oct, report whether it is a COARSE (cache) oct and,
+  !> if so, the parent coarse oct index + cell index it stands for. This is the
+  !> GPU analog of the CPU childloc/gridloc/cellloc lookup: a cache oct has index
+  !> > ngridmax (it represents an unrefined level-(ilevel-1) cell); its coarse cell
+  !> is father(cache) + the ckey-derived child position (same idiom as the hydro
+  !> coarse_cell_update). is_coarse maps to the CPU .not.ok(childloc).
+  attributes(device) subroutine get_cf_cell(nbor, grid, father, subgrid_idx, ngridmax, &
+       & di, dj, dk, is_coarse, coct, ccell)
+    integer(kind=4), device :: nbor(1:subgridsize,*)
+    type(oct), device :: grid(*)
+    integer, device :: father(*)
+    integer, value :: subgrid_idx, ngridmax, di, dj, dk
+    logical, intent(out) :: is_coarse
+    integer, intent(out) :: coct, ccell
+    integer :: stencil_idx, nbidx, fidx, ci, cj, ck
+
+    stencil_idx = 1 + (1+di) + nsubgridp2*(1+dj) + nsubgridp2sq*(1+dk)
+    nbidx = nbor(stencil_idx, subgrid_idx)
+    is_coarse = (nbidx > ngridmax)
+    coct = 0; ccell = 1
+    if (is_coarse) then
+       fidx = father(nbidx)
+       ci = grid(nbidx)%ckey(1) - 2*grid(fidx)%ckey(1)
+       cj = grid(nbidx)%ckey(2) - 2*grid(fidx)%ckey(2)
+       ck = grid(nbidx)%ckey(3) - 2*grid(fidx)%ckey(3)
+       ccell = 1 + ci + 2*cj + 4*ck
+       coct = fidx
+    end if
+  end subroutine get_cf_cell
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief (Stage C6) MHD coarse/fine correction at level ilevel-1. Two parts:
+  !>  (1) Hydro flux correction -- mirrors the (proven) cube coarse_cell_update,
+  !>      extended to passive scalars (unew slot 5+n from the scalar flux). The 6
+  !>      oct-boundary faces' summed fine fluxes are atomicadded into the coarse
+  !>      parent cell (found via nbor>ngridmax -> father -> ckey).
+  !>  (2) Coarse/fine EMF correction -- port of CPU godunov_fine.f90:1037-1282. At
+  !>      each of the central oct's 12 boundary edges, the fine EMF is averaged
+  !>      (*0.25*weight) into the coarse face-B of whichever of the (up to 3) octs
+  !>      sharing the edge are coarse. weight=0.5 if any sharer is refined, else 1.
+  !>      Done by thread 0 only (12 edges; atomicadd handles cross-block races).
+  !>
+  !>  ##### HIGHEST-RISK / LEAST-VERIFIED STAGE. ##### The CPU uses a childloc/
+  !>  gridloc/cellloc neighbourhood workspace; this re-expresses it on the GPU
+  !>  nbor/father/ckey model. It is NOT exercised by E2 (level-min: C6 is never
+  !>  called) and reaching E3 (AMR) also needs D4 (interpol_mhd, out of scope). The
+  !>  edge slot/sign/weight tables below are transcribed from the CPU; they are the
+  !>  primary thing to validate (max|divB| over time) once E3 is reachable.
+  attributes(device) subroutine coarse_cell_update_mhd(grid, unew, bnew, father, nbor, &
+       & fluxes_x, fluxes_y, fluxes_z, emf, head_idx, block_idx, thread_idx, ngridmax, dtdx)
+    type(oct), device :: grid(*)
+    integer, device :: father(*)
+    integer, device :: nbor(1:subgridsize,*)
+    real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
+    type(subgrid_3x2x2cell_primitive_mhd), intent(in) :: fluxes_x
+    type(subgrid_2x3x2cell_primitive_mhd), intent(in) :: fluxes_y
+    type(subgrid_2x2x3cell_primitive_mhd), intent(in) :: fluxes_z
+    type(subgrid_emf_t), intent(in) :: emf
+    integer, value :: head_idx, block_idx, thread_idx, ngridmax
+    real(kind=dp), value :: dtdx
+    real(kind=dp), parameter :: inv_twotondim = 1.0_dp / real(twotondim, kind=dp)
+
+    integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
+    integer :: subgrid_idx, cell_idx, source_idx, father_idx, work_idx
+    integer :: interface_array_size, info, ind_nbor, n
+    real(kind=dp) :: fd, fmx, fmy, fmz, fe, fs(1:nvar-5), scale, dflux, weight
+    logical :: c1, c2, c3
+    integer :: oc1, oc2, oc3, cc1, cc2, cc3
+
+    interface_array_size = nsubgrid**(ndim-1)
+    scale = dtdx * inv_twotondim
+    subgrid_idx = head_idx + block_idx
+
+    ! =================================================================
+    ! Part 1: hydro flux + passive-scalar coarse/fine correction
+    ! =================================================================
+    if (thread_idx < interface_array_size) then            ! left X
+       work_idx = thread_idx
+       call index_1Dto2D(work_idx, nsubgrid, j_subgrid_idx, k_subgrid_idx)
+       i_subgrid_idx = 0; j_subgrid_idx = j_subgrid_idx + 1; k_subgrid_idx = k_subgrid_idx + 1
+       fd=0_dp; fmx=0_dp; fmy=0_dp; fmz=0_dp; fe=0_dp
+       do n=1,nvar-5; fs(n)=0_dp; end do
+       do j = 2*j_subgrid_idx-2, 2*j_subgrid_idx-1
+          do k = 2*k_subgrid_idx-2, 2*k_subgrid_idx-1
+             fd  = fd  - fluxes_x%density   (0,j,k)*scale; fmx = fmx - fluxes_x%velocity_x(0,j,k)*scale
+             fmy = fmy - fluxes_x%velocity_y(0,j,k)*scale; fmz = fmz - fluxes_x%velocity_z(0,j,k)*scale
+             fe  = fe  - fluxes_x%pressure  (0,j,k)*scale
+             do n=1,nvar-5; fs(n) = fs(n) - fluxes_x%scalar(0,j,k,n)*scale; end do
+          end do
+       end do
+       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
+       source_idx = nbor(ind_nbor, subgrid_idx)
+       if (source_idx > ngridmax) then
+          father_idx = father(source_idx)
+          i = grid(source_idx)%ckey(1) - 2*grid(father_idx)%ckey(1)
+          j = grid(source_idx)%ckey(2) - 2*grid(father_idx)%ckey(2)
+          k = grid(source_idx)%ckey(3) - 2*grid(father_idx)%ckey(3)
+          cell_idx = 1 + i + 2*j + 4*k
+          info = atomicadd(unew(cell_idx,1,father_idx), fd);  info = atomicadd(unew(cell_idx,2,father_idx), fmx)
+          info = atomicadd(unew(cell_idx,3,father_idx), fmy); info = atomicadd(unew(cell_idx,4,father_idx), fmz)
+          info = atomicadd(unew(cell_idx,5,father_idx), fe)
+          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
+       end if
+    else if (thread_idx < 2*interface_array_size) then     ! right X
+       work_idx = thread_idx - interface_array_size
+       call index_1Dto2D(work_idx, nsubgrid, j_subgrid_idx, k_subgrid_idx)
+       i_subgrid_idx = nsubgrid+1; j_subgrid_idx = j_subgrid_idx + 1; k_subgrid_idx = k_subgrid_idx + 1
+       fd=0_dp; fmx=0_dp; fmy=0_dp; fmz=0_dp; fe=0_dp
+       do n=1,nvar-5; fs(n)=0_dp; end do
+       do j = 2*j_subgrid_idx-2, 2*j_subgrid_idx-1
+          do k = 2*k_subgrid_idx-2, 2*k_subgrid_idx-1
+             fd  = fd  + fluxes_x%density   (2*nsubgrid,j,k)*scale; fmx = fmx + fluxes_x%velocity_x(2*nsubgrid,j,k)*scale
+             fmy = fmy + fluxes_x%velocity_y(2*nsubgrid,j,k)*scale; fmz = fmz + fluxes_x%velocity_z(2*nsubgrid,j,k)*scale
+             fe  = fe  + fluxes_x%pressure  (2*nsubgrid,j,k)*scale
+             do n=1,nvar-5; fs(n) = fs(n) + fluxes_x%scalar(2*nsubgrid,j,k,n)*scale; end do
+          end do
+       end do
+       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
+       source_idx = nbor(ind_nbor, subgrid_idx)
+       if (source_idx > ngridmax) then
+          father_idx = father(source_idx)
+          i = grid(source_idx)%ckey(1) - 2*grid(father_idx)%ckey(1)
+          j = grid(source_idx)%ckey(2) - 2*grid(father_idx)%ckey(2)
+          k = grid(source_idx)%ckey(3) - 2*grid(father_idx)%ckey(3)
+          cell_idx = 1 + i + 2*j + 4*k
+          info = atomicadd(unew(cell_idx,1,father_idx), fd);  info = atomicadd(unew(cell_idx,2,father_idx), fmx)
+          info = atomicadd(unew(cell_idx,3,father_idx), fmy); info = atomicadd(unew(cell_idx,4,father_idx), fmz)
+          info = atomicadd(unew(cell_idx,5,father_idx), fe)
+          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
+       end if
+    else if (thread_idx < 3*interface_array_size) then     ! left Y
+       work_idx = thread_idx - 2*interface_array_size
+       call index_1Dto2D(work_idx, nsubgrid, i_subgrid_idx, k_subgrid_idx)
+       i_subgrid_idx = i_subgrid_idx + 1; j_subgrid_idx = 0; k_subgrid_idx = k_subgrid_idx + 1
+       fd=0_dp; fmx=0_dp; fmy=0_dp; fmz=0_dp; fe=0_dp
+       do n=1,nvar-5; fs(n)=0_dp; end do
+       do i = 2*i_subgrid_idx-2, 2*i_subgrid_idx-1
+          do k = 2*k_subgrid_idx-2, 2*k_subgrid_idx-1
+             fd  = fd  - fluxes_y%density   (i,0,k)*scale; fmx = fmx - fluxes_y%velocity_x(i,0,k)*scale
+             fmy = fmy - fluxes_y%velocity_y(i,0,k)*scale; fmz = fmz - fluxes_y%velocity_z(i,0,k)*scale
+             fe  = fe  - fluxes_y%pressure  (i,0,k)*scale
+             do n=1,nvar-5; fs(n) = fs(n) - fluxes_y%scalar(i,0,k,n)*scale; end do
+          end do
+       end do
+       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
+       source_idx = nbor(ind_nbor, subgrid_idx)
+       if (source_idx > ngridmax) then
+          father_idx = father(source_idx)
+          i = grid(source_idx)%ckey(1) - 2*grid(father_idx)%ckey(1)
+          j = grid(source_idx)%ckey(2) - 2*grid(father_idx)%ckey(2)
+          k = grid(source_idx)%ckey(3) - 2*grid(father_idx)%ckey(3)
+          cell_idx = 1 + i + 2*j + 4*k
+          info = atomicadd(unew(cell_idx,1,father_idx), fd);  info = atomicadd(unew(cell_idx,2,father_idx), fmx)
+          info = atomicadd(unew(cell_idx,3,father_idx), fmy); info = atomicadd(unew(cell_idx,4,father_idx), fmz)
+          info = atomicadd(unew(cell_idx,5,father_idx), fe)
+          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
+       end if
+    else if (thread_idx < 4*interface_array_size) then     ! right Y
+       work_idx = thread_idx - 3*interface_array_size
+       call index_1Dto2D(work_idx, nsubgrid, i_subgrid_idx, k_subgrid_idx)
+       i_subgrid_idx = i_subgrid_idx + 1; j_subgrid_idx = nsubgrid+1; k_subgrid_idx = k_subgrid_idx + 1
+       fd=0_dp; fmx=0_dp; fmy=0_dp; fmz=0_dp; fe=0_dp
+       do n=1,nvar-5; fs(n)=0_dp; end do
+       do i = 2*i_subgrid_idx-2, 2*i_subgrid_idx-1
+          do k = 2*k_subgrid_idx-2, 2*k_subgrid_idx-1
+             fd  = fd  + fluxes_y%density   (i,2*nsubgrid,k)*scale; fmx = fmx + fluxes_y%velocity_x(i,2*nsubgrid,k)*scale
+             fmy = fmy + fluxes_y%velocity_y(i,2*nsubgrid,k)*scale; fmz = fmz + fluxes_y%velocity_z(i,2*nsubgrid,k)*scale
+             fe  = fe  + fluxes_y%pressure  (i,2*nsubgrid,k)*scale
+             do n=1,nvar-5; fs(n) = fs(n) + fluxes_y%scalar(i,2*nsubgrid,k,n)*scale; end do
+          end do
+       end do
+       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
+       source_idx = nbor(ind_nbor, subgrid_idx)
+       if (source_idx > ngridmax) then
+          father_idx = father(source_idx)
+          i = grid(source_idx)%ckey(1) - 2*grid(father_idx)%ckey(1)
+          j = grid(source_idx)%ckey(2) - 2*grid(father_idx)%ckey(2)
+          k = grid(source_idx)%ckey(3) - 2*grid(father_idx)%ckey(3)
+          cell_idx = 1 + i + 2*j + 4*k
+          info = atomicadd(unew(cell_idx,1,father_idx), fd);  info = atomicadd(unew(cell_idx,2,father_idx), fmx)
+          info = atomicadd(unew(cell_idx,3,father_idx), fmy); info = atomicadd(unew(cell_idx,4,father_idx), fmz)
+          info = atomicadd(unew(cell_idx,5,father_idx), fe)
+          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
+       end if
+    else if (thread_idx < 5*interface_array_size) then     ! left Z
+       work_idx = thread_idx - 4*interface_array_size
+       call index_1Dto2D(work_idx, nsubgrid, i_subgrid_idx, j_subgrid_idx)
+       i_subgrid_idx = i_subgrid_idx + 1; j_subgrid_idx = j_subgrid_idx + 1; k_subgrid_idx = 0
+       fd=0_dp; fmx=0_dp; fmy=0_dp; fmz=0_dp; fe=0_dp
+       do n=1,nvar-5; fs(n)=0_dp; end do
+       do i = 2*i_subgrid_idx-2, 2*i_subgrid_idx-1
+          do j = 2*j_subgrid_idx-2, 2*j_subgrid_idx-1
+             fd  = fd  - fluxes_z%density   (i,j,0)*scale; fmx = fmx - fluxes_z%velocity_x(i,j,0)*scale
+             fmy = fmy - fluxes_z%velocity_y(i,j,0)*scale; fmz = fmz - fluxes_z%velocity_z(i,j,0)*scale
+             fe  = fe  - fluxes_z%pressure  (i,j,0)*scale
+             do n=1,nvar-5; fs(n) = fs(n) - fluxes_z%scalar(i,j,0,n)*scale; end do
+          end do
+       end do
+       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
+       source_idx = nbor(ind_nbor, subgrid_idx)
+       if (source_idx > ngridmax) then
+          father_idx = father(source_idx)
+          i = grid(source_idx)%ckey(1) - 2*grid(father_idx)%ckey(1)
+          j = grid(source_idx)%ckey(2) - 2*grid(father_idx)%ckey(2)
+          k = grid(source_idx)%ckey(3) - 2*grid(father_idx)%ckey(3)
+          cell_idx = 1 + i + 2*j + 4*k
+          info = atomicadd(unew(cell_idx,1,father_idx), fd);  info = atomicadd(unew(cell_idx,2,father_idx), fmx)
+          info = atomicadd(unew(cell_idx,3,father_idx), fmy); info = atomicadd(unew(cell_idx,4,father_idx), fmz)
+          info = atomicadd(unew(cell_idx,5,father_idx), fe)
+          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
+       end if
+    else if (thread_idx < 6*interface_array_size) then     ! right Z
+       work_idx = thread_idx - 5*interface_array_size
+       call index_1Dto2D(work_idx, nsubgrid, i_subgrid_idx, j_subgrid_idx)
+       i_subgrid_idx = i_subgrid_idx + 1; j_subgrid_idx = j_subgrid_idx + 1; k_subgrid_idx = nsubgrid+1
+       fd=0_dp; fmx=0_dp; fmy=0_dp; fmz=0_dp; fe=0_dp
+       do n=1,nvar-5; fs(n)=0_dp; end do
+       do i = 2*i_subgrid_idx-2, 2*i_subgrid_idx-1
+          do j = 2*j_subgrid_idx-2, 2*j_subgrid_idx-1
+             fd  = fd  + fluxes_z%density   (i,j,2*nsubgrid)*scale; fmx = fmx + fluxes_z%velocity_x(i,j,2*nsubgrid)*scale
+             fmy = fmy + fluxes_z%velocity_y(i,j,2*nsubgrid)*scale; fmz = fmz + fluxes_z%velocity_z(i,j,2*nsubgrid)*scale
+             fe  = fe  + fluxes_z%pressure  (i,j,2*nsubgrid)*scale
+             do n=1,nvar-5; fs(n) = fs(n) + fluxes_z%scalar(i,j,2*nsubgrid,n)*scale; end do
+          end do
+       end do
+       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
+       source_idx = nbor(ind_nbor, subgrid_idx)
+       if (source_idx > ngridmax) then
+          father_idx = father(source_idx)
+          i = grid(source_idx)%ckey(1) - 2*grid(father_idx)%ckey(1)
+          j = grid(source_idx)%ckey(2) - 2*grid(father_idx)%ckey(2)
+          k = grid(source_idx)%ckey(3) - 2*grid(father_idx)%ckey(3)
+          cell_idx = 1 + i + 2*j + 4*k
+          info = atomicadd(unew(cell_idx,1,father_idx), fd);  info = atomicadd(unew(cell_idx,2,father_idx), fmx)
+          info = atomicadd(unew(cell_idx,3,father_idx), fmy); info = atomicadd(unew(cell_idx,4,father_idx), fmz)
+          info = atomicadd(unew(cell_idx,5,father_idx), fe)
+          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
+       end if
+    end if
+
+    ! =================================================================
+    ! Part 2: coarse/fine EMF correction (CPU godunov_fine.f90:1037-1282).
+    ! Done by thread 0; emf is the fine EMF in the [0,2]^3 local frame; offsets
+    ! (di,dj,dk) index the octs sharing each of the 12 boundary edges. c1/c2/c3 =
+    ! is_coarse for those neighbours (CPU .not.ok1/2/3); weight=0.5 if any is
+    ! refined. atomicadd handles other blocks correcting the same coarse cell.
+    ! =================================================================
+    if (thread_idx == 0) then
+
+       ! ---- 4 EMFz edges ----
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1,-1, 0, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emf%emfz(0,0,0)+emf%emfz(0,0,1))*0.25_dp*weight
+          if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,1,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,4,oc2),dflux);  info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,4,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 1, 0, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emf%emfz(0,2,0)+emf%emfz(0,2,1))*0.25_dp*weight
+          if(c1)then; info=atomicadd(bnew(cc1,4,oc1),dflux);  info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,4,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,1,oc3),-dflux); info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 1, 0, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emf%emfz(2,2,0)+emf%emfz(2,2,1))*0.25_dp*weight
+          if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,4,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,1,oc2),-dflux); info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,1,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1,-1, 0, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emf%emfz(2,0,0)+emf%emfz(2,0,1))*0.25_dp*weight
+          if(c1)then; info=atomicadd(bnew(cc1,1,oc1),-dflux); info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,1,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,4,oc3),dflux);  info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
+       end if
+
+       ! ---- 4 EMFx edges ----
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1,-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emf%emfx(0,0,0)+emf%emfx(1,0,0))*0.25_dp*weight
+          if(c1)then; info=atomicadd(bnew(cc1,6,oc1),dflux);  info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,6,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,3,oc3),-dflux); info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emf%emfx(0,0,2)+emf%emfx(1,0,2))*0.25_dp*weight
+          if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,6,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,3,oc2),-dflux); info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,3,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emf%emfx(0,2,2)+emf%emfx(1,2,2))*0.25_dp*weight
+          if(c1)then; info=atomicadd(bnew(cc1,3,oc1),-dflux); info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,3,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,6,oc3),dflux);  info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1,-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emf%emfx(0,2,0)+emf%emfx(1,2,0))*0.25_dp*weight
+          if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,3,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,6,oc2),dflux);  info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,6,oc3),-dflux); endif
+       end if
+
+       ! ---- 4 EMFy edges ----
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0,-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emf%emfy(0,0,0)+emf%emfy(0,1,0))*0.25_dp*weight
+          if(c1)then; info=atomicadd(bnew(cc1,6,oc1),-dflux); info=atomicadd(bnew(cc1,1,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,4,oc2),-dflux); info=atomicadd(bnew(cc2,6,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,3,oc3),dflux);  info=atomicadd(bnew(cc3,4,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emf%emfy(0,0,2)+emf%emfy(0,1,2))*0.25_dp*weight
+          if(c1)then; info=atomicadd(bnew(cc1,4,oc1),-dflux); info=atomicadd(bnew(cc1,6,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,3,oc2),dflux);  info=atomicadd(bnew(cc2,4,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,1,oc3),dflux);  info=atomicadd(bnew(cc3,3,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emf%emfy(2,0,2)+emf%emfy(2,1,2))*0.25_dp*weight
+          if(c1)then; info=atomicadd(bnew(cc1,3,oc1),dflux);  info=atomicadd(bnew(cc1,4,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,1,oc2),dflux);  info=atomicadd(bnew(cc2,3,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,6,oc3),-dflux); info=atomicadd(bnew(cc3,1,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0,-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emf%emfy(2,0,0)+emf%emfy(2,1,0))*0.25_dp*weight
+          if(c1)then; info=atomicadd(bnew(cc1,1,oc1),dflux);  info=atomicadd(bnew(cc1,3,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,6,oc2),-dflux); info=atomicadd(bnew(cc2,1,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,4,oc3),-dflux); info=atomicadd(bnew(cc3,6,oc3),dflux);  endif
+       end if
+
+    end if
+
+  end subroutine coarse_cell_update_mhd
+  ! =========================================================================
+
   ! ##########################################################################
   ! ## STAGE B1 PLACEHOLDER: mhd_integrator_kernel SHARED-MEMORY BUDGET      ##
   ! ##########################################################################
@@ -1948,6 +3559,25 @@ contains
   ! Reference: the current hydro_integrator_kernel resident shared is
   !   subgrid_6x6x6cell_primitive (5*216*8 + 864 = 9504 B) + 6 interface arrays
   !   (2880 B) = 12384 B = 12.1 KB. Option (1) keeps MHD at ~3.4x that, under 48 KB.
+  !
+  ! IMPLEMENTED (Stage C7): mhd_integrator_kernel below applies BOTH folds (1)+(2):
+  !   * corner states (F) -> global mhd_corner_scratch(1:4, block).
+  !   * dbf (C)           -> global mhd_dbf_scratch(block).
+  !   because the C2 interface widening (5 -> 8 named fields + nvar-5 passive
+  !   scalars) grows (G) and pushes the corner-spill-only resident (40.6 KB) just
+  !   over 48 KB. Resident shared with both spills (nsubgrid=1, nvar=8):
+  !     (A) subgrid_6x6x6cell_primitive_mhd  14688
+  !         scalar_subgrid (nvar-5=3)         5184
+  !     (B) bf                                6048
+  !     (D) edge_e                            5184
+  !     (E) emf                                648
+  !     (G) 6 MHD interface arrays (11-wide)  6336
+  !         ------------------------------------------
+  !         TOTAL resident                   38088 B = 37.2 KB  < 48 KB default. OK.
+  !   Both scratch arrays are LAZILY allocated at the first MHD launch in
+  !   gpu_godunov, sized to num_subgrids of the level being integrated (NOT
+  !   ngridmax), with a stat= OOM guard -- this replaces the eager ngridmax-sized
+  !   placeholder alloc that was the B1 OOM blocker (init_amr.f90).
   ! ##########################################################################
 
 #ifndef PAPER
@@ -2035,6 +3665,99 @@ contains
     endif
 
   end subroutine hydro_integrator_kernel
+
+  ! =========================================================================
+  !> @brief (Stage C7) Fused cube ("rock") MHD Godunov + constrained-transport
+  !> integrator. The MHD analog of hydro_integrator_kernel, dispatched at runtime
+  !> by gpu_godunov when sim%r%mhd (no #ifdef MHD under gpu/). Pipeline over the
+  !> shared 6^3 subgrid:
+  !>   B2 subgrid_conserved_2_primitive_mhd  (rho,v,P,B + scalars + face-B bf)
+  !>   B3 mhd_face_b_slopes_subgrid          (face-B dbf -> mhd_dbf_scratch)
+  !>   C1 trace_3d_mhd                        (edge-E, predictor, qm/qp, corners)
+  !>   C2 riemann_driver_mhd                  (1D fluxes)
+  !>   C3 cmp_mag_flx_mhd                      (2D EMF solve from corner scratch)
+  !>   C4 zero_fine_fluxes_mhd + zero_fine_emf (if ilevel<levelmax)
+  !>   C5 conservative_update_mhd             (cell update + CT, EMF *dt/dx once)
+  !>   C6 coarse_cell_update_mhd              (if ilevel>levelmin)
+  !> Corner states (C1->C3) and face-B slopes (B3->C1) spill to the global scratch
+  !> arrays (B1 budget). slope=slope_type, slope_mag=slope_mag_type, riemann (1D),
+  !> riemann2d (2D), induction are passed by value; gravity via constant_gravity/f.
+  attributes(global) subroutine mhd_integrator_kernel(grid, uold, unew, bold, bnew, &
+       & mhd_corner_scratch, mhd_dbf_scratch, f, father, nbor, &
+       & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
+       & gamma, dt, dx, slope, slope_mag, riemann, riemann2d, induction, constant_gravity)
+    type(oct), device :: grid(*)
+    integer, device :: father(*)
+    integer, device :: nbor(1:subgridsize,*)
+    real(kind=8), device :: constant_gravity(1:3)
+    real(kind=dp), device :: f(1:twotondim,1:ndim,*)
+    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
+    type(subgrid_corner_state_t), device :: mhd_corner_scratch(1:4,*)
+    type(subgrid_face_db_t), device :: mhd_dbf_scratch(*)
+    integer(kind=4), intent(in), value :: head_idx, num_subgrids
+    integer, intent(in), value :: ngridmax, ilevel, levelmin, levelmax
+    real(kind=dp), intent(in), value :: gamma, dt, dx
+    integer, intent(in), value :: slope, slope_mag, riemann, riemann2d
+    logical, intent(in), value :: induction
+
+    ! Resident shared buffers (corner states + dbf are in global scratch). See the
+    ! budget block above: ~37.2 KB at nsubgrid=1, nvar=8 -> fits the 48 KB limit.
+    type(subgrid_6x6x6cell_primitive_mhd), shared :: local_mhd
+    real(kind=dp), shared :: scalar_subgrid(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nvar-5)
+    type(subgrid_face_b_t), shared :: bf
+    type(subgrid_edge_e_t), shared :: edge_e
+    type(subgrid_emf_t), shared :: emf
+    type(subgrid_3x2x2cell_primitive_mhd), shared :: left_x, right_x
+    type(subgrid_2x3x2cell_primitive_mhd), shared :: left_y, right_y
+    type(subgrid_2x2x3cell_primitive_mhd), shared :: left_z, right_z
+    real(kind=dp) :: dtdx
+    integer :: block_idx, thread_idx, bslot
+
+    dtdx = dt/dx
+    block_idx = blockIdx%x - 1
+    thread_idx = threadIdx%x - 1
+    bslot = blockIdx%x                ! 1-based per-block slot into the global scratch
+    if (block_idx >= num_subgrids) return
+
+    ! B2: conserved -> primitive (+ cell-centred B + bf face buffer + scalars)
+    call subgrid_conserved_2_primitive_mhd(grid, uold, bold, f, constant_gravity, nbor, &
+         & head_idx, block_idx, thread_idx, gamma, dt, local_mhd, scalar_subgrid, bf)
+
+    ! B3: face-B transverse slopes (dbf) over the subgrid -> global scratch
+    call mhd_face_b_slopes_subgrid(bf, mhd_dbf_scratch, bslot, thread_idx, slope_mag)
+
+    ! C1: edge-E + MUSCL predictor + face-B predict + qm/qp + corner states
+    call trace_3d_mhd(local_mhd, scalar_subgrid, bf, mhd_dbf_scratch, edge_e, &
+         & mhd_corner_scratch, bslot, thread_idx, left_x, right_x, left_y, right_y, &
+         & left_z, right_z, gamma, dx, dt, slope, induction)
+
+    ! C2: 1D MHD fluxes (written back into the left_* interface arrays)
+    call riemann_driver_mhd(left_x, right_x, left_y, right_y, left_z, right_z, &
+         & thread_idx, gamma, riemann)
+
+    ! C3: 2D EMF solve from the corner-state scratch -> emf subgrid
+    call cmp_mag_flx_mhd(mhd_corner_scratch, bslot, emf, thread_idx, gamma, riemann2d)
+
+    ! C4: zero fluxes + EMFs at refined boundaries (only if finer levels exist)
+    if (ilevel < levelmax) then
+       call zero_fine_fluxes_mhd(local_mhd, left_x, left_y, left_z, thread_idx)
+       call zero_fine_emf(local_mhd, emf, thread_idx)
+    endif
+
+    ! C5: conservative update at current level + constrained-transport B update
+    call conservative_update_mhd(unew, bnew, nbor, left_x, left_y, left_z, emf, &
+         & head_idx, block_idx, thread_idx, dtdx)
+
+    ! C6: coarse/fine flux + EMF correction into the parent level
+    if (ilevel > levelmin) then
+       call coarse_cell_update_mhd(grid, unew, bnew, father, nbor, left_x, left_y, left_z, &
+            & emf, head_idx, block_idx, thread_idx, ngridmax, dtdx)
+    endif
+
+  end subroutine mhd_integrator_kernel
 #endif
   ! =========================================================================
 
