@@ -100,17 +100,21 @@ subroutine init_part(r,g,m,p)
   allocate(mp(1:r%npartmax))
   allocate(levelp(1:r%npartmax))
   allocate(sortp(1:r%npartmax))
-  allocate(idp(1:r%npartmax))
+  if (r%nlevelmax > r%levelmin) allocate(idp(1:r%npartmax))
 #ifdef OUTPUT_PARTICLE_POTENTIAL
   allocate(phip(1:r%npartmax))
 #endif
   ! gpu_cic_part source map.
-  allocate(xp_swap (1:r%npartmax))
+  allocate(xp_swap(1:r%npartmax))
   allocate(isp_swap(1:r%npartmax))
   allocate(idp_swap(1:r%npartmax))
+! CUB workspace
+#if defined(CUB_SORT_PART)
+  allocate(hkeyp(1:r%npartmax))
+#endif
   ! Prefix sum arrays
   scan_size = max(r%npartmax, m%ngridmax + m%ncachemax)
-  call ensure_scan_capacity_part(scan_size)
+  call ensure_scan_capacity_part(scan_size, r%part_dep_algo)
 #endif
 end subroutine init_part
 !#########################################################################

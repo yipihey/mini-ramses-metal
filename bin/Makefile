@@ -4,7 +4,6 @@
 # Compilation time parameters
 COMPILER = GNU
 CUDA_ARCH = sm_80
-CUDA_PROFILE = 0
 NDIM = 3
 MPI = 0
 HYDRO = 1
@@ -36,7 +35,13 @@ NHILBERT = 1
 NVECTOR = 32
 NPRE = 8
 PATCH =
+CUDA_PROFILE = 0
 PAPER = 0
+CUB_SORT_PART = 1
+# Warp-cooperative fine-force gather in the GPU particle kick (default OFF).
+KICK_COOP_GATHER = 0
+CUB_SCAN_REFINE = 1
+FASTMATH = 0
 DEBUG = 0
 HDF5 = 0
 MPIF90 = mpif90
@@ -51,13 +56,16 @@ NION := $(NION)+$(N_SULFUR_IONS)+$(N_IRON_IONS)
 NION := $(NION)+$(N_HYDROGEN_IONS)+$(N_H2)+$(N_HELIUM_IONS)
 endif
 NVAR := $(NHYDRO)+$(NENER)+$(NPSCAL)+$(NMETAL)+$(NION)
+DEFINES = -DNDIM=$(NDIM) -DNVAR=$(NVAR)
 #############################################################################
+# Collect git version and Makefile options
 GITBRANCH = $(shell git rev-parse --abbrev-ref HEAD)
 GITHASH = $(shell git log --pretty=format:'%H' -n 1)
 GITREPO = $(shell git config --get remote.origin.url)
 BUILDDATE = $(shell date +"%D-%T")
 BUILDCOMMAND = ${MAKE} ${MAKEFLAGS}
-DEFINES = -DNDIM=$(NDIM) -DNVAR=$(NVAR)
+#############################################################################
+# RTZ options
 ifeq ($(RTZ),1)
 DEFINES += -DN_HYDROGEN_IONS=$(N_HYDROGEN_IONS)
 DEFINES += -DN_HELIUM_IONS=$(N_HELIUM_IONS)
@@ -71,6 +79,8 @@ DEFINES += -DN_SULFUR_IONS=$(N_SULFUR_IONS)
 DEFINES += -DN_IRON_IONS=$(N_IRON_IONS)
 DEFINES += -DN_H2=$(N_H2)
 endif
+#############################################################################
+# Main compilation options
 ifneq ($(NION),0)
    DEFINES += -DNION=$(NION)
 endif
@@ -106,9 +116,6 @@ ifneq ($(NPRE),8)
 endif
 ifneq ($(NHILBERT),1)
    DEFINES += -DNHILBERT=$(NHILBERT)
-endif
-ifeq ($(PAPER),1)
-   DEFINES += -DPAPER
 endif
 #############################################################################
 # Set proper units and initial conditions
@@ -162,10 +169,27 @@ ifeq ($(COMPILER),INTEL)
    endif
 endif
 #############################################################################
-# NVHPC compiler
+# NVHPC compiler (optional -gpu=$(CUDA_ARCH),fastmath via FASTMATH=1)
 ifeq ($(COMPILER),NVHPC)
-   FFLAGS = -cpp -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx $(DEFINES)
-   LIBS = -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx -lstdc++
+   ifeq ($(PAPER),1)
+      DEFINES += -DPAPER
+   endif
+   ifneq ($(CUB_SORT_PART),0)
+      DEFINES += -DCUB_SORT_PART
+   endif
+   ifneq ($(CUB_SCAN_REFINE),0)
+      DEFINES += -DCUB_SCAN_REFINE
+   endif
+   ifeq ($(KICK_COOP_GATHER),1)
+      DEFINES += -DKICK_COOP_GATHER
+   endif
+ifeq ($(FASTMATH),1)
+   GPU_ARCH_OPTS = $(CUDA_ARCH),fastmath
+else
+   GPU_ARCH_OPTS = $(CUDA_ARCH)
+endif
+   FFLAGS = -cpp -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx $(DEFINES)
+   LIBS = -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx -lstdc++
    GPU_PATH = ../gpu
    ifeq ($(CUDA_PROFILE),1)
       FFLAGS += -gpu=lineinfo,ptxinfo -Minstrument -traceback -gopt
@@ -220,9 +244,9 @@ MODOBJ = amr_parameters.o hydro_parameters.o rt_parameters.o oct_commons.o \
 	 cosmic_ray_ionization_module.o photoionization_UVB_module.o dust_recombination_module.o \
 	 molecules_module.o charge_exchange_module.o rtz_module.o
 ifeq ($(RTZ),1)
-MODOBJ += rtz_coolrates_module.o rtz_cooling_module.o
+   MODOBJ += rtz_coolrates_module.o rtz_cooling_module.o
 else
-MODOBJ += neq_cooling_module.o 
+   MODOBJ += neq_cooling_module.o
 endif
 MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 	 cross_sections_module.o rt_spectra.o  \
@@ -230,9 +254,10 @@ MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 	 boundaries.o output_hydro.o output_poisson.o output_part.o output_rt.o output_amr.o movie.o \
 	 sort.o nbors_utils.o hydro_flag.o marshal.o
 ifeq ($(COMPILER),NVHPC)
-MODOBJ += cub_inclusive_scan_c.o cub_inclusive_scan_f.o gpu_utils.o gpu_hydro.o \
-   gpu_cooling.o gpu_rho.o gpu_mg.o gpu_refine.o gpu_flag.o gpu_runner.o \
-   gpu_part.o gpu_manager.o
+   MODOBJ += cub_module_radix_sort_c.o cub_module_radix_sort_f.o \
+      cub_inclusive_scan_c.o cub_inclusive_scan_f.o gpu_utils.o gpu_hydro.o \
+      gpu_cooling.o gpu_rho.o gpu_mg.o gpu_refine.o gpu_flag.o gpu_runner.o \
+      gpu_part.o gpu_manager.o
 endif
 MODOBJ +=  multigrid_fine_coarse.o rho_fine.o upload.o init_xion.o \
 	 rt_flux_module.o rt_godunov_fine.o rt_input_condinit.o rt_init_flow_fine.o rt_units.o  \
@@ -269,14 +294,22 @@ cub_inclusive_scan_c.o: cub_inclusive_scan.h cub_inclusive_scan.cu
 #############################################################################
 cub_inclusive_scan_f.o: cub_inclusive_scan.cuf cub_inclusive_scan_c.o
 	nvfortran $(FFLAGS) -c cub_inclusive_scan_c.o $(GPU_PATH)/cub_inclusive_scan.cuf -o cub_inclusive_scan_f.o
+#############################################################################
+cub_module_radix_sort_c.o: cub_module_radix_sort.h cub_module_radix_sort.cu
+	nvcc -arch=$(CUDA_ARCH) -O3 -lineinfo -c $(GPU_PATH)/cub_module_radix_sort.cu -o cub_module_radix_sort_c.o
+#############################################################################
+cub_module_radix_sort_f.o: cub_module_radix_sort.cuf cub_module_radix_sort_c.o
+	nvfortran $(FFLAGS) -c cub_module_radix_sort_c.o $(GPU_PATH)/cub_module_radix_sort.cuf -o cub_module_radix_sort_f.o
 
 %.o:%.cuf
-	$(F90) $(FFLAGS) -c $^ -o $@ $(LIBS)
+	$(F90) $(FFLAGS) -c $< -o $@ $(LIBS)
 %.o:%.f90
-	$(F90) $(FFLAGS) -c $^ -o $@ $(LIBS)
+	$(F90) $(FFLAGS) -c $< -o $@ $(LIBS)
 %.o:%.c
-	$(C) $(CFLAGS) -c $^ -o $@
+	$(C) $(CFLAGS) -c $< -o $@
 FORCE:
+#############################################################################
+-include deps.mk
 #############################################################################
 clean :
 	rm -f *.o *.$(MOD)

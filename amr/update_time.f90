@@ -117,7 +117,7 @@ subroutine m_update_time(pst,ilevel,done)
         if(r%part)then
 #ifdef _CUDA
            write(*,888)g%nstep,g%t,dt,g%aexp,real(100.0D0*dble(m%noct_used_max)/dble(m%ngridmax)),&
-                & real(100.0D0*dble(m%ifree_cache)/dble(r%ncachemax)),&
+                & real(100.0D0*dble(m%ifree_cache)/dble(m%ncachemax)),&
                 & real(100.0D0*dble(p%npart_max)/dble(r%npartmax+1))
 #else
            write(*,888)g%nstep,g%t,dt,g%aexp,real(100.0D0*dble(m%noct_used_max)/dble(m%ngridmax)),&
@@ -126,7 +126,7 @@ subroutine m_update_time(pst,ilevel,done)
         else
 #ifdef _CUDA
            write(*,888)g%nstep,g%t,dt,g%aexp,real(100.0D0*dble(m%noct_used_max)/dble(m%ngridmax)),&
-                & real(100.0D0*dble(m%ifree_cache)/dble(r%ncachemax))
+                & real(100.0D0*dble(m%ifree_cache)/dble(m%ncachemax))
 #else
                 write(*,888)g%nstep,g%t,dt,g%aexp,real(100.0D0*dble(m%noct_used_max)/dble(m%ngridmax))
 #endif
@@ -158,7 +158,7 @@ subroutine m_update_time(pst,ilevel,done)
         if(r%part)then
 #ifdef _CUDA
            write(*,888)g%nstep,g%t,dt,g%aexp,real(100.0D0*dble(m%noct_used_max)/dble(m%ngridmax)),&
-                & real(100.0D0*dble(m%ifree_cache)/dble(r%ncachemax)),&
+                & real(100.0D0*dble(m%ifree_cache)/dble(m%ncachemax)),&
                 & real(100.0D0*dble(p%npart_max)/dble(r%npartmax+1))
 #else
            write(*,888)g%nstep,g%t,dt,g%aexp,real(100.0D0*dble(m%noct_used_max)/dble(m%ngridmax)),&
@@ -167,14 +167,14 @@ subroutine m_update_time(pst,ilevel,done)
         else
 #ifdef _CUDA
            write(*,888)g%nstep,g%t,dt,g%aexp,real(100.0D0*dble(m%noct_used_max)/dble(m%ngridmax)),&
-                & real(100.0D0*dble(m%ifree_cache)/dble(r%ncachemax))
+                & real(100.0D0*dble(m%ifree_cache)/dble(m%ncachemax))
 #else
                 write(*,888)g%nstep,g%t,dt,g%aexp,real(100.0D0*dble(m%noct_used_max)/dble(m%ngridmax))
 #endif
         endif
      end if
   end if
-888 format(' Fine step= ',i0,' t=',1pe12.5,' dt=',1pe10.3,' a=',1pe10.3,' mem=',0pF4.1,'% ',0pF4.1,'% ',0pF4.1,'%')
+888 format(' Fine step= ',i0,' t=',1pe12.5,' dt=',1pe10.3,' a=',1pe10.3,' mem=',0pF0.1,'% ',0pF0.1,'% ',0pF0.1,'%')
  
   !------------------------
   ! Update time variables

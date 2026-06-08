@@ -1,9 +1,6 @@
 ! =========================================================================
 !> @brief
-!> 64-bit integer finalizer (SplitMix64-style) used as the open-addressing
-!> bucket hash. Preferred over fnv64 on the hot GPU lookups: 3 multiplies
-!> instead of 8, with good avalanche. Must stay identical between hash_set
-!> and hash_get so a key always lands in the same bucket.
+!> Compute mix64 hash
 !>
 attributes(device) pure function mix64(key)
   implicit none
@@ -96,7 +93,7 @@ attributes(device) subroutine hash_set(hash_key, hash_val, hash_size, key, val)
   integer(kind=8) :: ibucket, prev
 
   ! Compute bucket idx from hash function
-  ibucket = MOD(mix64(key), hash_size)
+  ibucket = MOD(fnv64(key), hash_size)
   if (ibucket < 0) ibucket = ibucket + hash_size
   ibucket = ibucket + 1
 
@@ -127,7 +124,7 @@ attributes(device) subroutine hash_free(hash_key, hash_val, hash_size, key)
   integer(kind=8) :: ibucket
 
   ! Compute bucket idx from hash function
-  ibucket = MOD(mix64(key), hash_size)
+  ibucket = MOD(fnv64(key), hash_size)
   if (ibucket < 0) ibucket = ibucket + hash_size
   ibucket = ibucket + 1
 
@@ -162,7 +159,7 @@ attributes(device) subroutine hash_update(hash_key, hash_val, hash_size, key, va
   integer(kind=8) :: ibucket
 
   ! Compute bucket idx from hash function
-  ibucket = MOD(mix64(key), hash_size)
+  ibucket = MOD(fnv64(key), hash_size)
   if (ibucket < 0) ibucket = ibucket + hash_size
   ibucket = ibucket + 1
 
@@ -196,7 +193,7 @@ attributes(device) function hash_get(hash_key, hash_val, hash_size, key)
   integer(kind=8) :: ibucket
 
   ! Compute bucket idx from hash function
-  ibucket = MOD(mix64(key), hash_size)
+  ibucket = MOD(fnv64(key), hash_size)
   if (ibucket < 0) ibucket = ibucket + hash_size
   ibucket = ibucket + 1
 

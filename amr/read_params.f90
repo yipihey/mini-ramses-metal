@@ -319,7 +319,8 @@ subroutine m_read_params(pst)
 
   ! Poisson solver parameters
   logical :: gravity_test=.false. ! Use file rho_ana.f90 to test the Poisson solers.
-  real(kind=8)::epsilon=1.0D-4 ! Convergence criterion
+  real(kind=8)::epsilon=1.0D-4    ! Convergence criterion
+  integer :: nvcycle = -1         ! Desired number of V-cycles
   real(kind=8),dimension(1:10)::gravity_params=0.0 ! Gravity parameters
   integer :: gravity_type=0 ! Type of gravity calculations (see user guide)
   integer :: cic_levelmax=0 ! Maximum level for CIC dark matter interpolation
@@ -328,6 +329,7 @@ subroutine m_read_params(pst)
   ! level >=cg_levelmin uses conjugate gradient
   logical :: fast_solver=.false.   ! Fast solver with MPI pre-fetch (memory intensive)
   integer :: part_mass_deposition_scheme=1     ! part mass deposition schemes (CIC 1, TSC 2, PCS 3)
+  integer :: part_dep_algo=1   ! GPU CIC particle deposition algorithm (1: large 27-offset, 2: medium shifted 8-offset, 3: small shifted 8-offset prefix-sum)
   integer :: part_force_interpolation_scheme=1 ! part force interpolation schemes (CIC 1, TSC 2, PCS 3)
   integer :: star_mass_deposition_scheme=1     ! star mass deposition schemes
   integer :: star_force_interpolation_scheme=1 ! star force interpolation schemes
@@ -571,9 +573,9 @@ subroutine m_read_params(pst)
   namelist/amr_params/levelmin,levelmax,ngridmax,ncachemax,ngridtot &
        & ,npartmax,nparttot,nexpand,boxlen
   ! Poisson solver parameters
-  namelist/poisson_params/epsilon,gravity_type,gravity_params &
+  namelist/poisson_params/epsilon,nvcycle,gravity_type,gravity_params &
        & ,cg_levelmin,cic_levelmax,fast_solver,gravity_test &
-       & ,part_mass_deposition_scheme,part_force_interpolation_scheme &
+       & ,part_mass_deposition_scheme,part_dep_algo,part_force_interpolation_scheme &
        & ,star_mass_deposition_scheme,star_force_interpolation_scheme &
        & ,sink_mass_deposition_scheme,sink_force_interpolation_scheme &
        & ,tree_mass_deposition_scheme,tree_force_interpolation_scheme
@@ -718,7 +720,7 @@ subroutine m_read_params(pst)
   write(*,*)'_/    _/   _/    _/   _/    _/    _/_/_/   _/_/_/_/    _/_/_/  '
   write(*,*)'                        Version 3.0                            '
   write(*,*)'       written by Romain Teyssier (Princeton University)       '
-  write(*,*)'        (c) CEA 1999-2007, UZH 2008-2021, PU 2022-2025         '
+  write(*,*)'        (c) CEA 1999-2007, UZH 2008-2021, PU 2022-2026         '
   write(*,*)' '
 
   write(*,'(" Working with ndim = ",I0)')ndim
@@ -836,6 +838,11 @@ subroutine m_read_params(pst)
   if(nlevelmax<levelmin)then
      write(*,*)'Error in the namelist:'
      write(*,*)'levelmax should not be lower than levelmin'
+     nml_ok=.false.
+  end if
+  if(part_dep_algo<1 .or. part_dep_algo>3)then
+     write(*,*)'Error in the namelist:'
+     write(*,*)'part_dep_algo must be 1 (large), 2 (medium) or 3 (small)'
      nml_ok=.false.
   end if
   if(ngridmax==0)then
@@ -1283,12 +1290,14 @@ subroutine m_read_params(pst)
 
   s%r%gravity_test=gravity_test
   s%r%epsilon=epsilon
+  s%r%nvcycle=nvcycle
   s%r%gravity_type=gravity_type
   s%r%gravity_params=gravity_params
   s%r%cic_levelmax=cic_levelmax
   s%r%cg_levelmin=cg_levelmin
   s%r%fast_solver=fast_solver
   s%r%part_mass_deposition_scheme=part_mass_deposition_scheme
+  s%r%part_dep_algo=part_dep_algo
   s%r%part_force_interpolation_scheme=part_force_interpolation_scheme
   s%r%star_mass_deposition_scheme=star_mass_deposition_scheme
   s%r%star_force_interpolation_scheme=star_force_interpolation_scheme

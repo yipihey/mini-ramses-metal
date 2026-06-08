@@ -15,6 +15,7 @@ module gpu_runner
   integer(kind=8), device, allocatable, dimension(:) :: key_off
   integer(kind=4), device, allocatable, dimension(:,:) :: box_ckey_min, box_ckey_max
   integer(kind=4), device, allocatable, dimension(:,:,:) :: bound_ckey_min, bound_ckey_max
+  real(kind=8), device, allocatable, dimension(:)::d_skip ! Coordinates of lower left corner of the box
 
   !> Arrays to hold the grid on the device
   type(oct), device, allocatable, dimension(:) :: grid
@@ -49,6 +50,11 @@ module gpu_runner
   integer(kind=8), device, allocatable, dimension(:) :: idp_swap
   integer(kind=4), device, allocatable, dimension(:) :: isp_swap
 
+  ! CUB workspace
+#if defined(CUB_SORT_PART)
+  integer(kind=8), device, allocatable, dimension(:) :: hkeyp
+#endif
+
   !> Arrays to hold the hash table on the device
   integer(kind=8), device, allocatable, dimension(:) :: hash_key
   integer(kind=4), device, allocatable, dimension(:) :: hash_val
@@ -57,6 +63,8 @@ module gpu_runner
   integer(kind=4), device, allocatable, dimension(:) :: swap_local, swap_global
   integer(kind=4), device, allocatable, dimension(:) :: prefix_sum
   integer(kind=4), device, allocatable, dimension(:) :: partial_sums_0, partial_sums_1, partial_sums_2
+  !> Real(dp) partial-sum workspace for the dark matter CIC small-stencil deposit
+  real(kind=dp), device, allocatable, dimension(:) :: partial_sums_dp_0, partial_sums_dp_1, partial_sums_dp_2
 
   !> Arrays to hold the multigrid variables on the device
   type(oct), device, allocatable, dimension(:) :: grid_mg
@@ -304,18 +312,17 @@ contains
     head_idx = (sim%m%head(ilevel) - 1) / nsubgridtondim + 1
     num_subgrids = sim%m%noct(ilevel) / nsubgridtondim
     num_blocks = num_subgrids
-    if(nsubgrid == 1)then
-       threads_per_block = 64
-    else
-       threads_per_block = 256
-    endif
 
     call nvtxStartRange("GPU Godunov", color=0)!green
 #ifdef PAPER
+    threads_per_block = (2*nsubgrid + 4)**2
+    threads_per_block = ((threads_per_block + 31) / 32) * 32
     call hydro_integrator_paper_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
          & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
          & gamma, dt, dx, slope, riemann, constant_gravity)
 #else
+    if(nsubgrid == 1)threads_per_block = 64
+    if(nsubgrid == 2)threads_per_block = 256
     call hydro_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
          & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
          & gamma, dt, dx, slope, riemann, constant_gravity)
@@ -395,14 +402,12 @@ contains
 
   end subroutine gpu_cooling
 
-! gpu_refine
-! fused kernels and cub inclusive sum
-! undefine these to go back to the original implementation
-#undef FUSE_LEVEL
-#undef FUSE_HILBERT
-#undef FUSE_CACHE
-#undef FUSE_SCATTER_GATHER
-#undef CUB_SCAN
+! fuse relies on cooperative groups grid sync which requires all blocks to
+! reside concurrently on the SM. On large problems RAMSES needs more blocks.
+!#define FUSE_LEVEL
+!#define FUSE_HILBERT
+!#define FUSE_CACHE
+!#define FUSE_SCATTER_GATHER
 
   !> @brief
   !> This routine deals with AMR refinements and de-refinements on the GPU.
@@ -542,8 +547,9 @@ contains
                & head_idx, num_octs, ilev)
 
           ! Compute prefix sum
-#if defined(CUB_SCAN)
+#if defined(CUB_SCAN_REFINE)
           call cub_inclusive_sum(c_loc(prefix_sum), head_idx, num_octs)
+          call get_total_sum<<<1,1>>>(prefix_sum, head_idx, num_octs, new_noct_d)
 #else
           call gpu_scan(head_idx, num_octs, new_noct_d)
 #endif
@@ -601,7 +607,7 @@ contains
                   & head_idx, num_octs, ibit)
 
              ! Compute prefix sum
-#if defined(CUB_SCAN)
+#if defined(CUB_SCAN_REFINE)
              call cub_inclusive_sum(c_loc(prefix_sum), head_idx, num_octs)
 #else
              call gpu_scan(head_idx, num_octs)
@@ -728,7 +734,7 @@ contains
                   & head_idx, num_subgrids, ind, prefix_sum = prefix_sum)
 
              ! Compute prefix sum
-#if defined(CUB_SCAN)
+#if defined(CUB_SCAN_REFINE)
              call cub_inclusive_sum(c_loc(prefix_sum), head_idx, num_subgrids)
 #else
              call gpu_scan(head_idx, num_subgrids, new_noct_d)
@@ -743,8 +749,8 @@ contains
                   & hash_val, sim%m%hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, &
                   & periodic, sim%m%ngridmax, ifree_cache_d, ind, head_idx, num_subgrids, sim%r%mhd)
 #else
-#if defined(CUB_SCAN)
-             call get_total_sum(prefix_sum, head_idx, num_subgrids, new_noct_d)
+#if defined(CUB_SCAN_REFINE)
+             call get_total_sum<<<1,1>>>(prefix_sum, head_idx, num_subgrids, new_noct_d)
 #endif
              call compute_cache_swap_table<<<num_blocks, num_threads>>>(swap_local, prefix_sum, &
                   & head_idx, num_subgrids)
@@ -1111,6 +1117,86 @@ contains
     endif
 
   end subroutine gpu_scan
+
+  !> @brief
+  !> Perform an inclusive prefix sum (scan) in place on the real(dp) array data
+  !>
+  !> @detail
+  !> Mirrors gpu_scan but operates on a real(dp) array passed as argument, using
+  !> the real(dp) partial-sum workspace. Scans num_octs elements starting at
+  !> index head_idx. Used by the DM CIC small-stencil deposit to accumulate
+  !> per-offset particle weight contributions.
+  !>
+  subroutine gpu_scan_dp(data, head_idx, num_octs)
+    real(kind=dp), device :: data(*)
+    integer(kind=4) :: head_idx
+    integer(kind=4) :: num_octs
+    !
+    integer(kind=4) :: block_size, grid_size_0, grid_size_1, grid_size_2
+    integer(kind=4) :: offset, size
+    integer(kind=4) :: num_max_0, num_max_1, num_max_2
+
+    block_size = 256
+    num_max_0 = block_size**2
+    num_max_1 = block_size**3
+    num_max_2 = huge(1_4)
+
+    if(num_octs <= num_max_0)then
+
+       grid_size_0 = (num_octs + block_size - 1) / block_size
+       call block_scan_dp<<<grid_size_0, block_size>>>(data, head_idx, num_octs, partial_sums_dp_0)
+       if (grid_size_0 > 1) then
+          call block_scan_dp<<<1, grid_size_0>>>(partial_sums_dp_0, 1, grid_size_0)
+          offset = head_idx + block_size
+          size = num_octs - block_size
+          call uniform_add_dp<<<grid_size_0 - 1, block_size>>>(data, offset, size, partial_sums_dp_0)
+       end if
+
+    else if(num_octs <= num_max_1)then
+
+       grid_size_0 = (num_octs + block_size - 1) / block_size
+       call block_scan_dp<<<grid_size_0, block_size>>>(data, head_idx, num_octs, partial_sums_dp_0)
+       grid_size_1 = (grid_size_0 + block_size - 1) / block_size
+       call block_scan_dp<<<grid_size_1, block_size>>>(partial_sums_dp_0, 1, grid_size_0, partial_sums_dp_1)
+       if (grid_size_1 > 1) then
+          call block_scan_dp<<<1, grid_size_1>>>(partial_sums_dp_1, 1, grid_size_1)
+          offset = 1 + block_size
+          size = grid_size_0 - block_size
+          call uniform_add_dp<<<grid_size_1 - 1, block_size>>>(partial_sums_dp_0, offset, size, partial_sums_dp_1)
+       end if
+       offset = head_idx + block_size
+       size = num_octs - block_size
+       call uniform_add_dp<<<grid_size_0 - 1, block_size>>>(data, offset, size, partial_sums_dp_0)
+
+    else if(num_octs <= num_max_2)then
+
+       grid_size_0 = (num_octs + block_size - 1) / block_size
+       call block_scan_dp<<<grid_size_0, block_size>>>(data, head_idx, num_octs, partial_sums_dp_0)
+       grid_size_1 = (grid_size_0 + block_size - 1) / block_size
+       call block_scan_dp<<<grid_size_1, block_size>>>(partial_sums_dp_0, 1, grid_size_0, partial_sums_dp_1)
+       grid_size_2 = (grid_size_1 + block_size - 1) / block_size
+       call block_scan_dp<<<grid_size_2, block_size>>>(partial_sums_dp_1, 1, grid_size_1, partial_sums_dp_2)
+       if (grid_size_2 > 1) then
+          call block_scan_dp<<<1, grid_size_2>>>(partial_sums_dp_2, 1, grid_size_2)
+          offset = 1 + block_size
+          size = grid_size_1 - block_size
+          call uniform_add_dp<<<grid_size_2 - 1, block_size>>>(partial_sums_dp_1, offset, size, partial_sums_dp_2)
+       end if
+       offset = 1 + block_size
+       size =  grid_size_0 - block_size
+       call uniform_add_dp<<<grid_size_1 - 1, block_size>>>(partial_sums_dp_0, offset, size, partial_sums_dp_1)
+       offset = head_idx + block_size
+       size = num_octs - block_size
+       call uniform_add_dp<<<grid_size_0 - 1, block_size>>>(data, offset, size, partial_sums_dp_0)
+
+    else
+
+       write(*,*)'Too many parts for prefix sum...'
+       stop
+
+    endif
+
+  end subroutine gpu_scan_dp
 
   !> @brief
   !> Initialize the hash table

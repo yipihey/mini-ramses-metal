@@ -46,7 +46,7 @@ recursive subroutine r_set_grid_device(pst)
         mp     = pst%s%p%mp
         levelp = pst%s%p%levelp
         sortp  = pst%s%p%sortp
-        idp    = pst%s%p%idp
+        if (allocated(idp)) idp = pst%s%p%idp
 !!$        if (allocated(pst%s%p%jp)     .and. allocated(jp))     jp     = pst%s%p%jp
 !!$        if (allocated(pst%s%p%zp)     .and. allocated(zp))     zp     = pst%s%p%zp
 !!$        if (allocated(pst%s%p%tp)     .and. allocated(tp))     tp     = pst%s%p%tp
@@ -151,7 +151,7 @@ subroutine gpu_to_host_part(pst)
   pst%s%p%mp     = mp
   pst%s%p%levelp = levelp
   pst%s%p%sortp  = sortp
-  pst%s%p%idp    = idp
+  if (allocated(idp)) pst%s%p%idp = idp
 !!$  if (allocated(jp)     .and. allocated(pst%s%p%jp))     pst%s%p%jp     = jp
 !!$  if (allocated(zp)     .and. allocated(pst%s%p%zp))     pst%s%p%zp     = zp
 !!$  if (allocated(tp)     .and. allocated(pst%s%p%tp))     pst%s%p%tp     = tp
