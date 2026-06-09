@@ -224,12 +224,13 @@ subroutine init_amr(r,g,m,type)
      ! and face-B-slope scratch (mhd_corner_scratch / mhd_dbf_scratch) are NO LONGER
      ! allocated here. The previous placeholder eagerly sized mhd_corner_scratch by
      ! ngridmax (~4*41472 B * ngridmax ~= 16.6 GB at ngridmax=1e5), with no stat=
-     ! guard, so merely setting r%mhd would hard-abort init_amr with a CUDA OOM
-     ! before any kernel ran. They are now LAZILY allocated on the first MHD launch
-     ! in gpu_godunov (gpu_runner.cuf), right-sized to the per-level launch grid
-     ! (num_subgrids, not ngridmax) and behind a stat= OOM guard. So r%mhd is safe
-     ! on real grids; the only GPU-memory cost is ~(4*162+11.8) KB * num_subgrids of
-     ! the finest level, the accepted cube-paradigm capacity ceiling (mhd_plan.md).
+     ! guard, so an MHD build would hard-abort init_amr with a CUDA OOM before any
+     ! kernel ran. They are now LAZILY allocated on the first MHD launch in
+     ! gpu_godunov (gpu_runner.cuf, under #ifdef MHD), right-sized to the per-level
+     ! launch grid (num_subgrids, not ngridmax) and behind a stat= OOM guard. The
+     ! only GPU-memory cost is ~(4*162+11.8) KB * num_subgrids of the finest level,
+     ! the accepted cube-paradigm capacity ceiling (mhd_plan.md). Gating here is
+     ! #ifdef MHD (parallel with uold), per the PI meeting notes -- not r%mhd.
 #endif
 #ifdef GRAV
      allocate(rho(1:twotondim,1:m%ngridmax+m%ncachemax))

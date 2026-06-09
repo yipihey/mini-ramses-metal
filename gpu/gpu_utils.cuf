@@ -29,6 +29,7 @@ module gpu_utils
      logical      , dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: refined
   end type subgrid_6x6x6cell_primitive
 
+#ifdef MHD
   !> @brief
   !> MHD counterpart of subgrid_6x6x6cell_primitive: a 6 by 6 by 6 subgrid of
   !> primitive variables that additionally carries the *cell-centred* magnetic
@@ -47,6 +48,7 @@ module gpu_utils
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: Bz
      logical      , dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: refined
   end type subgrid_6x6x6cell_primitive_mhd
+#endif
 
   !> @brief
   !> Contains a 6 by 6 by 6 subgrid of conserved variables. Intended to act as a subgrid

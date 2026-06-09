@@ -83,6 +83,7 @@ module hydro_device
      real(kind=dp) :: pressure
   end type primitive_t
 
+#ifdef MHD
   ! ==========================================================================
   ! MHD cell types (Stage B1). These extend the hydro conserved_t / primitive_t
   ! with the three *cell-centred* magnetic field components. They use named
@@ -248,6 +249,7 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: Bz
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:nvar-5) :: scalar
   end type subgrid_2x2x3cell_primitive_mhd
+#endif
 
 contains
 
@@ -436,6 +438,7 @@ contains
   end function primitive_2_conserved
   ! ==========================================================================
 
+#ifdef MHD
   ! ==========================================================================
   ! MHD device helpers (Stage B1). Small attributes(device) functions mirroring
   ! the conserved<->primitive math of CPU ctoprim (umuscl.f90:1720). Currently
@@ -1211,6 +1214,7 @@ contains
     return
   end function riemann2d_emf
   ! ==========================================================================
+#endif
 
   ! ==========================================================================
   !> @brief
@@ -2298,6 +2302,7 @@ contains
   end subroutine coarse_cell_update
   ! =========================================================================
 
+#ifdef MHD
   ! #########################################################################
   ! ##  CUBE ("rock") MHD INTEGRATOR DEVICE ROUTINES (Stages B2-C6)        ##
   ! ##                                                                     ##
@@ -3877,6 +3882,7 @@ contains
 
   end subroutine coarse_cell_update_mhd
   ! =========================================================================
+#endif
 
   ! ##########################################################################
   ! ## STAGE B1 PLACEHOLDER: mhd_integrator_kernel SHARED-MEMORY BUDGET      ##
@@ -4055,8 +4061,9 @@ contains
 
   ! =========================================================================
   !> @brief (Stage C7) Fused cube ("rock") MHD Godunov + constrained-transport
-  !> integrator. The MHD analog of hydro_integrator_kernel, dispatched at runtime
-  !> by gpu_godunov when sim%r%mhd (no #ifdef MHD under gpu/). Pipeline over the
+  !> integrator. The MHD analog of hydro_integrator_kernel, dispatched by
+  !> gpu_godunov under #ifdef MHD (this whole kernel is compiled only when MHD is
+  !> defined; the rest of the build is intact otherwise). Pipeline over the
   !> shared 6^3 subgrid:
   !>   B2 subgrid_conserved_2_primitive_mhd  (rho,v,P,B + scalars + face-B bf)
   !>   B3 mhd_face_b_slopes_subgrid          (face-B dbf -> mhd_dbf_scratch)
@@ -4069,6 +4076,7 @@ contains
   !> Corner states (C1->C3) and face-B slopes (B3->C1) spill to the global scratch
   !> arrays (B1 budget). slope=slope_type, slope_mag=slope_mag_type, riemann (1D),
   !> riemann2d (2D), induction are passed by value; gravity via constant_gravity/f.
+#ifdef MHD
   attributes(global) subroutine mhd_integrator_kernel(grid, uold, unew, bold, bnew, &
        & mhd_corner_scratch, mhd_dbf_scratch, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
@@ -4148,6 +4156,7 @@ contains
     endif
 
   end subroutine mhd_integrator_kernel
+#endif
 #endif
   ! =========================================================================
 
@@ -4282,19 +4291,23 @@ contains
   ! =========================================================================~
 
   ! =========================================================================
-  attributes(global) subroutine upload_kernel(grid, father, uold, bold, head_idx, num_octs, mhd)
+  attributes(global) subroutine upload_kernel(grid, father, uold, bold, head_idx, num_octs, interpol_var, smallr)
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: father(*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
-    logical, value :: mhd
+    integer(kind=4), intent(in), value :: interpol_var
+    real(kind=dp), intent(in), value :: smallr
 
     integer :: tid, bid, cell_idx, oct_idx
     integer :: ind, father_idx, i, j, k
-    integer :: idim ! Spatial dimension (MHD face-B restriction)
+    integer :: idim ! Spatial dimension (face-B restriction / energy split)
+    real(kind=dp) :: eint_sum, ekin, erad, emag ! interpol_var==1 internal-energy restriction
+#ifdef MHD
     integer, dimension(1:6,1:4) :: hh ! Child cells lying on each parent face (MHD)
+#endif
     real(kind=dp), parameter :: inv_twotondim = 1.0_dp / real(twotondim, kind=dp)
 
     ! Thread and block id
@@ -4335,53 +4348,104 @@ contains
     ! used above for uold. This averaging preserves the face-B redundancy across the parent
     ! level: a shared coarse face is the mean of the 4 fine faces on it, and those fine
     ! faces are pairwise equal across the two coarse cells, so divB stays at round-off.
-    if (mhd) then
-       ! Child cells whose low/high face on each axis lies on the corresponding parent face
-       hh(1,1:4) = (/1,3,5,7/) ! low-x face children
-       hh(2,1:4) = (/2,4,6,8/) ! high-x face children
-       hh(3,1:4) = (/1,2,5,6/) ! low-y face children
-       hh(4,1:4) = (/3,4,7,8/) ! high-y face children
-       hh(5,1:4) = (/1,2,3,4/) ! low-z face children
-       hh(6,1:4) = (/5,6,7,8/) ! high-z face children
+#ifdef MHD
+    ! Child cells whose low/high face on each axis lies on the corresponding parent face
+    hh(1,1:4) = (/1,3,5,7/) ! low-x face children
+    hh(2,1:4) = (/2,4,6,8/) ! high-x face children
+    hh(3,1:4) = (/1,2,5,6/) ! low-y face children
+    hh(4,1:4) = (/3,4,7,8/) ! high-y face children
+    hh(5,1:4) = (/1,2,3,4/) ! low-z face children
+    hh(6,1:4) = (/5,6,7,8/) ! high-z face children
 
-       ! Reset parent face-B (this refined parent cell)
-       do idim = 1, 6
-          bold(cell_idx, idim, father_idx) = 0_dp
-       end do
+    ! Reset parent face-B (this refined parent cell)
+    do idim = 1, 6
+       bold(cell_idx, idim, father_idx) = 0_dp
+    end do
 
-       ! Area-average each parent face from the 4 child faces lying on it
-       do idim = 1, ndim
-          ! Low-side face (component idim)
-          do ind = 1, twotondim/2
-             bold(cell_idx, idim, father_idx) = bold(cell_idx, idim, father_idx) &
-                  & + bold(hh(2*idim-1,ind), idim, oct_idx) / dble(twotondim/2)
-          end do
-          ! High-side face (component idim+3)
-          do ind = 1, twotondim/2
-             bold(cell_idx, idim+3, father_idx) = bold(cell_idx, idim+3, father_idx) &
-                  & + bold(hh(2*idim,ind), idim+3, oct_idx) / dble(twotondim/2)
-          end do
+    ! Area-average each parent face from the 4 child faces lying on it
+    do idim = 1, ndim
+       ! Low-side face (component idim)
+       do ind = 1, twotondim/2
+          bold(cell_idx, idim, father_idx) = bold(cell_idx, idim, father_idx) &
+               & + bold(hh(2*idim-1,ind), idim, oct_idx) / dble(twotondim/2)
        end do
-    endif
+       ! High-side face (component idim+3)
+       do ind = 1, twotondim/2
+          bold(cell_idx, idim+3, father_idx) = bold(cell_idx, idim+3, father_idx) &
+               & + bold(hh(2*idim,ind), idim+3, oct_idx) / dble(twotondim/2)
+       end do
+    end do
+#endif
+
+    ! Average INTERNAL energy instead of total energy (interpol_var==1), mirroring CPU
+    ! upload_fine (upload.f90:222-262). The slot-5 average above is TOTAL energy; when
+    ! interpol_var==1 we OVERWRITE it: per child eint = E - ekin - erad - emag, average
+    ! those, then add back the parent's ekin (+erad)(+emag) from the already-restricted
+    ! parent cell. Per the PI, the GPU kernel's MISSING interpol_var==1 guard (it always
+    ! averaged total energy) is the likely cause of the earlier hydro regression.
+    if (interpol_var == 1) then
+       eint_sum = 0.0_dp
+       do ind = 1, twotondim
+          ekin = 0.0_dp
+          do idim = 1, 3
+             ekin = ekin + 0.5_dp*uold(ind,idim+1,oct_idx)**2 / max(uold(ind,1,oct_idx), smallr)
+          end do
+          emag = 0.0_dp
+#ifdef MHD
+          ! Mirrors CPU upload.f90:233 EXACTLY: this emag is LINEAR in B
+          ! (0.125*(B_lo+B_hi), no square), unlike courant_fine's 0.125*(.)**2. Kept
+          ! bug-for-bug so the GPU restriction matches the CPU bit-for-bit.
+          do idim = 1, 3
+             emag = emag + 0.125_dp*(bold(ind,idim,oct_idx)+bold(ind,idim+3,oct_idx))
+          end do
+#endif
+          erad = 0.0_dp
+#if NENER>0
+          do idim = 1, nener
+             erad = erad + uold(ind,5+idim,oct_idx)
+          end do
+#endif
+          eint_sum = eint_sum + uold(ind,5,oct_idx) - ekin - erad - emag
+       end do
+       ! Add back the parent-cell ekin (+erad)(+emag), recomputed from the restricted parent
+       ekin = 0.0_dp
+       do idim = 1, 3
+          ekin = ekin + 0.5_dp*uold(cell_idx,idim+1,father_idx)**2 / max(uold(cell_idx,1,father_idx), smallr)
+       end do
+       emag = 0.0_dp
+#ifdef MHD
+       do idim = 1, 3
+          emag = emag + 0.125_dp*(bold(cell_idx,idim,father_idx)+bold(cell_idx,idim+3,father_idx))
+       end do
+#endif
+       erad = 0.0_dp
+#if NENER>0
+       do idim = 1, nener
+          erad = erad + uold(cell_idx,5+idim,father_idx)
+       end do
+#endif
+       uold(cell_idx,5,father_idx) = eint_sum*inv_twotondim + ekin + erad + emag
+    end if
 
   end subroutine upload_kernel
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine set_uold_kernel(uold, unew, bold, bnew, head_idx, num_octs, mhd)
+  attributes(global) subroutine set_uold_kernel(uold, unew, bold, bnew, head_idx, num_octs)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     real(kind=dp), device :: bold(1:twotondim,1:6,*)
     real(kind=dp), device :: bnew(1:twotondim,1:6,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
-    logical, value :: mhd
 
     integer :: block_idx ! The index of this block, corresponds to the oct to load
     integer :: cell_idx ! The index of the cell within the block
     integer :: oct_idx ! The index of the oct  within the block
+#ifdef MHD
     integer :: ib ! Face-B component index (MHD)
     integer :: ivar ! Passive-scalar index (MHD, nvar>5)
+#endif
 
     block_idx = blockIdx%x - 1
 
@@ -4402,33 +4466,34 @@ contains
     ! Set bold to bnew (mirrors CPU set_uold, godunov_fine.f90:213 m%bold(:,:,i)=m%bnew(:,:,i))
     ! and write back the passive scalars that conservative_update_mhd advanced
     ! (slots 6:nvar; the cube hydro path never touches them, so do this only for MHD).
-    if (mhd) then
-       do ib = 1, 6
-          bold(cell_idx, ib, oct_idx) = bnew(cell_idx, ib, oct_idx)
-       end do
-       do ivar = 6, nvar
-          uold(cell_idx, ivar, oct_idx) = unew(cell_idx, ivar, oct_idx)
-       end do
-    endif
+#ifdef MHD
+    do ib = 1, 6
+       bold(cell_idx, ib, oct_idx) = bnew(cell_idx, ib, oct_idx)
+    end do
+    do ivar = 6, nvar
+       uold(cell_idx, ivar, oct_idx) = unew(cell_idx, ivar, oct_idx)
+    end do
+#endif
 
   end subroutine set_uold_kernel
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine set_unew_kernel(uold, unew, bold, bnew, head_idx, num_octs, mhd)
+  attributes(global) subroutine set_unew_kernel(uold, unew, bold, bnew, head_idx, num_octs)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     real(kind=dp), device :: bold(1:twotondim,1:6,*)
     real(kind=dp), device :: bnew(1:twotondim,1:6,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
-    logical, value :: mhd
 
     integer :: block_idx ! The index of this block, corresponds to the oct to load
     integer :: cell_idx ! The index of the cell within the block
     integer :: oct_idx ! The index of the oct  within the block
+#ifdef MHD
     integer :: ib ! Face-B component index (MHD)
     integer :: ivar ! Passive-scalar index (MHD, nvar>5)
+#endif
 
     block_idx = blockIdx%x - 1
 
@@ -4449,20 +4514,20 @@ contains
     ! Set bnew to bold (mirrors CPU set_unew, godunov_fine.f90:150 m%bnew(:,:,i)=m%bold(:,:,i))
     ! and seed unew with the passive scalars so conservative_update_mhd accumulates
     ! onto uold (slots 6:nvar; MHD-only, the cube hydro path never touches them).
-    if (mhd) then
-       do ib = 1, 6
-          bnew(cell_idx, ib, oct_idx) = bold(cell_idx, ib, oct_idx)
-       end do
-       do ivar = 6, nvar
-          unew(cell_idx, ivar, oct_idx) = uold(cell_idx, ivar, oct_idx)
-       end do
-    endif
+#ifdef MHD
+    do ib = 1, 6
+       bnew(cell_idx, ib, oct_idx) = bold(cell_idx, ib, oct_idx)
+    end do
+    do ivar = 6, nvar
+       unew(cell_idx, ivar, oct_idx) = uold(cell_idx, ivar, oct_idx)
+    end do
+#endif
 
   end subroutine set_unew_kernel
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine sync_hydro(uold, f, constant_gravity, head_idx, num_octs, gamma, smallr, dt, mhd)
+  attributes(global) subroutine sync_hydro(uold, f, constant_gravity, head_idx, num_octs, gamma, smallr, dt)
     real(kind=8), device :: constant_gravity(1:3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -4470,7 +4535,6 @@ contains
     integer(kind=4), intent(in), value :: num_octs
     real(kind=dp), intent(in), value :: gamma, smallr
     real(kind=8), intent(in), value :: dt
-    logical, intent(in), value :: mhd
 
     integer :: block_idx, cell_idx, oct_idx
     type(primitive_t) :: prim
@@ -4487,7 +4551,7 @@ contains
     ! Compute the cell idx
     cell_idx = threadIdx%x
 
-    if (mhd) then
+#ifdef MHD
        ! MHD: apply the gravity source DIRECTLY on the conserved variables
        ! (CPU synchro_hydro_fine, synchro_hydro_fine.f90:88-115). The magnetic
        ! energy is never separated out -- it rides inside (E - kinetic), so it is
@@ -4511,7 +4575,7 @@ contains
        uold(cell_idx, 3, oct_idx) = my
        uold(cell_idx, 4, oct_idx) = mz
        uold(cell_idx, 5, oct_idx) = ener
-    else
+#else
        ! Hydro: c2p -> velocity update -> p2c (unchanged).
        cons%density    = uold(cell_idx, 1, oct_idx)
        cons%momentum_x = uold(cell_idx, 2, oct_idx)
@@ -4534,13 +4598,13 @@ contains
        uold(cell_idx, 3, oct_idx) = cons%momentum_y
        uold(cell_idx, 4, oct_idx) = cons%momentum_z
        uold(cell_idx, 5, oct_idx) = cons%energy
-    endif
+#endif
 
   end subroutine sync_hydro
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine grav_hydro(uold, unew, f, constant_gravity, head_idx, num_octs, gamma, smallr, dt, mhd)
+  attributes(global) subroutine grav_hydro(uold, unew, f, constant_gravity, head_idx, num_octs, gamma, smallr, dt)
     real(kind=8), device :: constant_gravity(1:3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -4549,7 +4613,6 @@ contains
     integer(kind=4), intent(in), value :: num_octs
     real(kind=dp), intent(in), value :: gamma, smallr
     real(kind=8), intent(in), value :: dt
-    logical, intent(in), value :: mhd
 
     integer :: block_idx, cell_idx, oct_idx
     real(kind=dp) :: rho_old_new_ratio_dt
@@ -4567,7 +4630,7 @@ contains
     ! Compute the cell idx
     cell_idx = threadIdx%x
 
-    if (mhd) then
+#ifdef MHD
        ! MHD: gravity source DIRECTLY on the conserved unew (CPU gravity_hydro_fine,
        ! synchro_hydro_fine.f90:177-207). emag stays inside (E - kinetic) -> not
        ! folded into pressure (D3); B is untouched; no bold needed. The dispatcher
@@ -4591,7 +4654,7 @@ contains
        unew(cell_idx, 3, oct_idx) = my
        unew(cell_idx, 4, oct_idx) = mz
        unew(cell_idx, 5, oct_idx) = e_prim + 0.5_dp*(mx*mx + my*my + mz*mz)/d
-    else
+#else
        ! Hydro: c2p -> velocity update -> p2c (unchanged).
        cons%density    = unew(cell_idx, 1, oct_idx)
        cons%momentum_x = unew(cell_idx, 2, oct_idx)
@@ -4615,7 +4678,7 @@ contains
        unew(cell_idx, 3, oct_idx) = cons%momentum_y
        unew(cell_idx, 4, oct_idx) = cons%momentum_z
        unew(cell_idx, 5, oct_idx) = cons%energy
-    endif
+#endif
 
   end subroutine grav_hydro
   ! =========================================================================
@@ -4626,7 +4689,7 @@ contains
   ! requires changing other files in the code. This should be done if OK for numerical accuracy.
   ! In this case, all the 'd0' should be changed to '_dp'
   attributes(global) subroutine cmpdt_kernel(grid, uold, bold, f, constant_gravity, &
-      & head_idx, num_octs, data_out, dx, gamma, smallr, smallc, courant_factor, mhd, induction)
+      & head_idx, num_octs, data_out, dx, gamma, smallr, smallc, courant_factor, induction)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -4636,11 +4699,13 @@ contains
     integer(kind=4), intent(in), value :: num_octs
     real(kind=8), device :: data_out(*) !mass, ekin, eint, emag, dt
     real(kind=dp), value :: dx, gamma, smallr, smallc, courant_factor
-    logical, value :: mhd, induction
+    logical, value :: induction
 
     type(primitive_t) :: primitive
     type(conserved_t) :: conserved
+#ifdef MHD
     type(primitive_mhd_t) :: prim_mhd
+#endif
     integer :: info
     integer :: tid, bid ! The index of the thread and the block
     integer :: cell_idx ! The index of the cell
@@ -4694,7 +4759,7 @@ contains
           mass_loc = conserved%density*vol_loc
           ekin_loc = conserved%energy*vol_loc
 
-          if (mhd) then
+#ifdef MHD
              ! MHD: cell-centred B + emag-subtracted gas pressure (CPU cmpdt,
              ! godunov_utils.f90:244-305). Wave speed = |v_d| + fast magnetosonic
              ! speed per direction; sound speed (|v_d|+smallc) under induction.
@@ -4716,7 +4781,7 @@ contains
                      & + abs(prim_mhd%velocity_y) + sqrt(c2v + sqrt(c2v**2 - a2*prim_mhd%By**2*rinv)) &
                      & + abs(prim_mhd%velocity_z) + sqrt(c2v + sqrt(c2v**2 - a2*prim_mhd%Bz**2*rinv))
              endif
-          else
+#else
              ! Convert to primitive variables (hydro)
              primitive = conserved_2_primitive(conserved, gamma)
              mass_loc = primitive%density*vol_loc
@@ -4724,7 +4789,7 @@ contains
              emag_loc = 0_dp
              sound_speed = sqrt(gamma*primitive%pressure/primitive%density)
              ctot = (abs(primitive%velocity_x)+abs(primitive%velocity_y)+abs(primitive%velocity_z)+3d0*sound_speed)
-          endif
+#endif
 #ifdef GRAV
           grav = abs(f(cell_idx, 1, oct_idx)) + abs(f(cell_idx, 2, oct_idx)) + abs(f(cell_idx, 3, oct_idx))
 #else

@@ -3,7 +3,9 @@ module gpu_runner
   use hydro_parameters, only: nvar
   use oct_commons, only: oct
   use gpu_utils
+#ifdef MHD
   use hydro_device, only: subgrid_corner_state_t, subgrid_face_db_t
+#endif
   use cudafor
   implicit none
   integer, dimension(1:3), parameter::n_nbor = (/1,2,2/)
@@ -30,6 +32,7 @@ module gpu_runner
   !> Arrays to hold the face-centred B field on the device (MHD)
   real(kind=dp), device, allocatable, dimension(:,:,:) :: bold, bnew
 
+#ifdef MHD
   !> MHD corner-state scratch passed to the cube mhd_integrator_kernel at C7.
   !> First index maps qRT,qRB,qLT,qLB; second is the integrator block index
   !> written by trace_3d_mhd and read by cmp_mag_flx. The four corner states are
@@ -50,6 +53,7 @@ module gpu_runner
   !> per-level num_subgrids (NOT ngridmax), growing as needed -- this replaces the
   !> eager ngridmax-sized placeholder that was the B1 OOM blocker (init_amr.f90).
   integer :: mhd_scratch_nblocks = 0
+#endif
 
   !> Arrays to hold the gravity variables on the device
   real(kind=dp), device, allocatable, dimension(:,:) :: phi, rho, nref, phi_old
@@ -157,7 +161,7 @@ contains
     call nvtxStartRange("GPU cmpdt", color=0)!green
     call cmpdt_kernel<<<num_blocks, num_threads>>>(grid, uold, bold, f, &
         & constant_gravity, head_idx, num_octs, d_data, dx, gamma, &
-        & smallr, smallc, courant_factor, sim%r%mhd, sim%r%induction)
+        & smallr, smallc, courant_factor, sim%r%induction)
     call nvtxEndRange()
 
     ! move results to host
@@ -196,7 +200,7 @@ contains
     threadsY_per_block = 16
     num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
     call nvtxStartRange("GPU Set_uold", color=0)!green
-    call set_uold_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, unew, bold, bnew, head_idx, num_octs, sim%r%mhd)
+    call set_uold_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, unew, bold, bnew, head_idx, num_octs)
     call GPU_Error_Check(__FILE__, __LINE__)
     call nvtxEndRange()
 
@@ -225,7 +229,7 @@ contains
     threadsY_per_block = 16
     num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
     call nvtxStartRange("GPU Set_unew", color=0)!green
-    call set_unew_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, unew, bold, bnew, head_idx, num_octs, sim%r%mhd)
+    call set_unew_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, unew, bold, bnew, head_idx, num_octs)
     call GPU_Error_Check(__FILE__, __LINE__)
     call nvtxEndRange()
 
@@ -261,7 +265,7 @@ contains
 
     call nvtxStartRange("GPU sync_hydro", color=0)!green
     call sync_hydro<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, f, constant_gravity, &
-         & head_idx, num_octs, gamma, smallr, dt, sim%r%mhd)
+         & head_idx, num_octs, gamma, smallr, dt)
     call nvtxEndRange()
 
   end subroutine gpu_sync_hydro
@@ -297,7 +301,7 @@ contains
 
     call nvtxStartRange("GPU grav_hydro", color=0)!green
     call grav_hydro<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, unew, f, constant_gravity, &
-         & head_idx, num_octs, gamma, smallr, dt, sim%r%mhd)
+         & head_idx, num_octs, gamma, smallr, dt)
     call nvtxEndRange()
 
   end subroutine gpu_grav_hydro
@@ -316,7 +320,10 @@ contains
 #ifdef PAPER
     use hydro_device, only: hydro_integrator_paper_kernel
 #else
-    use hydro_device, only: hydro_integrator_kernel, mhd_integrator_kernel
+    use hydro_device, only: hydro_integrator_kernel
+#ifdef MHD
+    use hydro_device, only: mhd_integrator_kernel
+#endif
 #endif
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout)::sim
@@ -357,7 +364,7 @@ contains
 #else
     if(nsubgrid == 1)threads_per_block = 64
     if(nsubgrid == 2)threads_per_block = 256
-    if (sim%r%mhd) then
+#ifdef MHD
        ! LAZY allocation of the MHD scratch arrays (C7 fix for the B1 OOM blocker).
        ! Size to this level's launch grid (num_subgrids), NOT ngridmax, growing the
        ! capacity across levels as needed, behind a stat= OOM guard. This is what
@@ -384,11 +391,11 @@ contains
             & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
             & gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
             & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
-    else
+#else
        call hydro_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
             & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
             & gamma, dt, dx, slope, riemann, constant_gravity)
-    endif
+#endif
 #endif
     call GPU_Error_Check(__FILE__, __LINE__)
     call nvtxEndRange()
@@ -421,7 +428,7 @@ contains
 
     if (num_octs > 0) then
        call nvtxStartRange("GPU upload", color=0)!green
-       call upload_kernel<<<num_blocks, num_threads>>>(grid, father, uold, bold, head_idx, num_octs, sim%r%mhd)
+       call upload_kernel<<<num_blocks, num_threads>>>(grid, father, uold, bold, head_idx, num_octs, sim%r%interpol_var, sim%r%smallr)
        call nvtxEndRange()
     endif
 
@@ -529,7 +536,7 @@ contains
     if (num_octs > 0) then
        call refine_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(grid, flag1, &
             & uold, bold, f, phi, phi_old, &
-            & ifree_d, head_idx, num_octs, sim%r%mhd)
+            & ifree_d, head_idx, num_octs)
     endif
 
     ! Copy back to host new free memory pointer ifree
@@ -721,11 +728,11 @@ contains
             & swap_global, head_idx, num_octs)
        info = cudaMemcpy(uold(1,1,head_idx), unew(1,1,head_idx), twotondim*nvar*num_octs)
 #endif
-       if (sim%r%mhd) then
-          call sort_gather_mhd<<<num_blocks_2, dim3(threadsX_per_block,threadsY_per_block,1)>>>(bnew, bold, &
-               & swap_global, head_idx, num_octs)
-          info = cudaMemcpy(bold(1,1,head_idx), bnew(1,1,head_idx), twotondim*6*num_octs)
-       endif
+#ifdef MHD
+       call sort_gather_mhd<<<num_blocks_2, dim3(threadsX_per_block,threadsY_per_block,1)>>>(bnew, bold, &
+            & swap_global, head_idx, num_octs)
+       info = cudaMemcpy(bold(1,1,head_idx), bnew(1,1,head_idx), twotondim*6*num_octs)
+#endif
 #ifdef GRAV
 #if defined(FUSE_SCATTER_GATHER)
        call sort_gather_scatter_force_phi<<<num_blocks, num_threads>>>(f, phi, phi_old, nref, swap_global, head_idx, num_octs)
@@ -810,7 +817,7 @@ contains
              call make_cache_insert_ghost_octs<<<num_blocks, num_threads>>>(grid, flag1, &
                   & uold, bold, f, phi, phi_old, swap_local, prefix_sum, father, nbor, hash_key, &
                   & hash_val, sim%m%hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, &
-                  & periodic, sim%m%ngridmax, ifree_cache_d, ind, head_idx, num_subgrids, sim%r%mhd)
+                  & periodic, sim%m%ngridmax, ifree_cache_d, ind, head_idx, num_subgrids)
 #else
 #if defined(CUB_SCAN_REFINE)
              call get_total_sum<<<1,1>>>(prefix_sum, head_idx, num_subgrids, new_noct_d)
@@ -821,7 +828,7 @@ contains
              call make_cache_octs<<<num_blocks, num_threads>>>(grid, flag1, &
                   & uold, bold, f, phi, phi_old, swap_local, father, nbor, &
                   & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-                  & sim%m%ngridmax, ifree_cache_d, new_noct_d, ind, sim%r%mhd)
+                  & sim%m%ngridmax, ifree_cache_d, new_noct_d, ind)
 
              call insert_hash_cache<<<num_blocks, num_threads>>>(grid, hash_key, hash_val, sim%m%hash_size, &
                   & ckey_max, key_off, sim%m%ngridmax, ifree_cache_d, new_noct_d)
