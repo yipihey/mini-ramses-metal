@@ -687,8 +687,163 @@ contains
 
   ! ==========================================================================
   !> @brief
-  !> Dispatch GPU MHD Riemann solvers. Only HLL is implemented for now; all other
-  !> solver ids intentionally fall back to HLL until their ports are added.
+  !> GPU implementation of the HLLD MHD Riemann solver (Miyoshi & Kusano 2005,
+  !> JCP 208, 315). Direct port of CPU riemann_hlld (godunov_utils.f90:967-1249),
+  !> x as the normal direction (callers rotate y/z). Returns the conserved_mhd_t
+  !> Godunov flux with the SAME field mapping as hll_mhd_fluxes (Bx flux = 0, By/Bz
+  !> are the transverse-B fluxes), so it is a drop-in alternative in the dispatcher.
+  !> The two-state-per-side structure (acoustic star + Alfven double-star) resolves
+  !> the rotational/Alfven waves the single HLL average smears. Floors match
+  !> hll_mhd_fluxes (smallr, smallp); the Alfven-degeneracy guard
+  !> abs(estar)<1e-4*A^2 is the CPU one. The fast speed reuses find_speed_fast's
+  !> formula with the continuity-enforced normal field A.
+  !>
+  !> @param[in] left  : The state on the left side of the interface
+  !> @param[in] right : The state on the right side of the interface
+  !> @param[in] gamma : The adiabatic index
+  !>
+  !> @return
+  !> flux : The conserved_mhd_t of the HLLD MHD fluxes
+  attributes(device) function hlld_mhd_fluxes(left, right, gamma) result(flux)
+    type(primitive_mhd_t), intent(in) :: left, right
+    real(kind=dp), value :: gamma
+    type(conserved_mhd_t) :: flux
+    real(kind=dp), parameter :: smallr = 1d-10
+    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
+    type(primitive_mhd_t) :: ls, rs
+    real(kind=dp) :: smallp, entho, A, sgnm
+    real(kind=dp) :: rl, ul, vl, wl, Pl, Bl, Cl, ekinl, emagl, etotl, Ptotl, vdotBl
+    real(kind=dp) :: rr, ur, vr, wr, Pr, Br, Cr, ekinr, emagr, etotr, Ptotr, vdotBr
+    real(kind=dp) :: b2l, c2l, d2l, cfastl, b2r, c2r, d2r, cfastr, SL, SR, rcl, rcr, ustar, Ptotstar
+    real(kind=dp) :: rstarl, estar, el, vstarl, Bstarl, wstarl, Cstarl, vdotBstarl, etotstarl, sqrrstarl, calfvenl, SAL
+    real(kind=dp) :: rstarr, er, vstarr, Bstarr, wstarr, Cstarr, vdotBstarr, etotstarr, sqrrstarr, calfvenr, SAR
+    real(kind=dp) :: vstarstar, wstarstar, Bstarstar, Cstarstar, vdotBstarstar, etotstarstarl, etotstarstarr
+    real(kind=dp) :: ro, uo, vo, wo, Bo, Co, Ptoto, etoto, vdotBo
+
+    smallp = smallc_squared / gamma
+    entho = 1.0d0 / (gamma - 1.0d0)
+
+    ! Floor the states (GPU convention, matches hll_mhd_fluxes; no-op for the
+    ! already trace-floored inputs).
+    ls = left; rs = right
+    ls%density  = max(ls%density,  smallr);  rs%density  = max(rs%density,  smallr)
+    ls%pressure = max(ls%pressure, smallp*ls%density)
+    rs%pressure = max(rs%pressure, smallp*rs%density)
+
+    ! Enforce continuity of the normal magnetic field (CPU :1006-1008).
+    A = 0.5d0*(ls%Bx + rs%Bx)
+    sgnm = sign(1.0d0, A)
+
+    ! Left variables (CPU :1011-1025). %By/%Bz are the transverse B (Bl,Cl).
+    rl = ls%density; ul = ls%velocity_x; vl = ls%velocity_y; wl = ls%velocity_z
+    Pl = ls%pressure; Bl = ls%By; Cl = ls%Bz
+    ekinl = 0.5d0*(ul*ul + vl*vl + wl*wl)*rl
+    emagl = 0.5d0*(A*A + Bl*Bl + Cl*Cl)
+    etotl = Pl*entho + ekinl + emagl
+    Ptotl = Pl + emagl
+    vdotBl = ul*A + vl*Bl + wl*Cl
+
+    ! Right variables (CPU :1028-1042).
+    rr = rs%density; ur = rs%velocity_x; vr = rs%velocity_y; wr = rs%velocity_z
+    Pr = rs%pressure; Br = rs%By; Cr = rs%Bz
+    ekinr = 0.5d0*(ur*ur + vr*vr + wr*wr)*rr
+    emagr = 0.5d0*(A*A + Br*Br + Cr*Cr)
+    etotr = Pr*entho + ekinr + emagr
+    Ptotr = Pr + emagr
+    vdotBr = ur*A + vr*Br + wr*Cr
+
+    ! Fast magnetosonic speeds (find_speed_fast) using the continuity-enforced A.
+    b2l = A*A + Bl*Bl + Cl*Cl; c2l = gamma*Pl/rl; d2l = 0.5d0*(b2l/rl + c2l)
+    cfastl = sqrt(d2l + sqrt(d2l**2 - c2l*A*A/rl))
+    b2r = A*A + Br*Br + Cr*Cr; c2r = gamma*Pr/rr; d2r = 0.5d0*(b2r/rr + c2r)
+    cfastr = sqrt(d2r + sqrt(d2r**2 - c2r*A*A/rr))
+
+    ! HLL wave speeds, Lagrangian sound speeds, acoustic star state (CPU :1049-1060).
+    SL = min(ul, ur) - max(cfastl, cfastr)
+    SR = max(ul, ur) + max(cfastl, cfastr)
+    rcl = rl*(ul - SL); rcr = rr*(SR - ur)
+    ustar    = (rcr*ur    + rcl*ul    + (Ptotl - Ptotr))      /(rcr + rcl)
+    Ptotstar = (rcr*Ptotl + rcl*Ptotr + rcl*rcr*(ul - ur))    /(rcr + rcl)
+
+    ! Left star region (CPU :1063-1087).
+    rstarl = rl*(SL - ul)/(SL - ustar)
+    estar  = rl*(SL - ul)*(SL - ustar) - A*A
+    el     = rl*(SL - ul)*(SL - ul   ) - A*A
+    if (abs(estar) < 1d-4*A*A) then
+       vstarl = vl; Bstarl = Bl; wstarl = wl; Cstarl = Cl
+    else
+       vstarl = vl - A*Bl*(ustar - ul)/estar
+       Bstarl = Bl*el/estar
+       wstarl = wl - A*Cl*(ustar - ul)/estar
+       Cstarl = Cl*el/estar
+    endif
+    vdotBstarl = ustar*A + vstarl*Bstarl + wstarl*Cstarl
+    etotstarl = ((SL - ul)*etotl - Ptotl*ul + Ptotstar*ustar + A*(vdotBl - vdotBstarl))/(SL - ustar)
+    sqrrstarl = sqrt(rstarl); calfvenl = abs(A)/sqrrstarl; SAL = ustar - calfvenl
+
+    ! Right star region (CPU :1090-1114).
+    rstarr = rr*(SR - ur)/(SR - ustar)
+    estar  = rr*(SR - ur)*(SR - ustar) - A*A
+    er     = rr*(SR - ur)*(SR - ur   ) - A*A
+    if (abs(estar) < 1d-4*A*A) then
+       vstarr = vr; Bstarr = Br; wstarr = wr; Cstarr = Cr
+    else
+       vstarr = vr - A*Br*(ustar - ur)/estar
+       Bstarr = Br*er/estar
+       wstarr = wr - A*Cr*(ustar - ur)/estar
+       Cstarr = Cr*er/estar
+    endif
+    vdotBstarr = ustar*A + vstarr*Bstarr + wstarr*Cstarr
+    etotstarr = ((SR - ur)*etotr - Ptotr*ur + Ptotstar*ustar + A*(vdotBr - vdotBstarr))/(SR - ustar)
+    sqrrstarr = sqrt(rstarr); calfvenr = abs(A)/sqrrstarr; SAR = ustar + calfvenr
+
+    ! Double star region (CPU :1117-1123).
+    vstarstar = (sqrrstarl*vstarl + sqrrstarr*vstarr + sgnm*(Bstarr - Bstarl))/(sqrrstarl + sqrrstarr)
+    wstarstar = (sqrrstarl*wstarl + sqrrstarr*wstarr + sgnm*(Cstarr - Cstarl))/(sqrrstarl + sqrrstarr)
+    Bstarstar = (sqrrstarl*Bstarr + sqrrstarr*Bstarl + sgnm*sqrrstarl*sqrrstarr*(vstarr - vstarl))/(sqrrstarl + sqrrstarr)
+    Cstarstar = (sqrrstarl*Cstarr + sqrrstarr*Cstarl + sgnm*sqrrstarl*sqrrstarr*(wstarr - wstarl))/(sqrrstarl + sqrrstarr)
+    vdotBstarstar = ustar*A + vstarstar*Bstarstar + wstarstar*Cstarstar
+    etotstarstarl = etotstarl - sgnm*sqrrstarl*(vdotBstarl - vdotBstarstar)
+    etotstarstarr = etotstarr + sgnm*sqrrstarr*(vdotBstarr - vdotBstarstar)
+
+    ! Sample the solution at x/t = 0 (CPU :1126-1222).
+    if (SL > 0.0d0) then
+       ro = rl; uo = ul; vo = vl; wo = wl; Bo = Bl; Co = Cl; Ptoto = Ptotl; etoto = etotl; vdotBo = vdotBl
+    else if (SAL > 0.0d0) then
+       ro = rstarl; uo = ustar; vo = vstarl; wo = wstarl; Bo = Bstarl; Co = Cstarl
+       Ptoto = Ptotstar; etoto = etotstarl; vdotBo = vdotBstarl
+    else if (ustar > 0.0d0) then
+       ro = rstarl; uo = ustar; vo = vstarstar; wo = wstarstar; Bo = Bstarstar; Co = Cstarstar
+       Ptoto = Ptotstar; etoto = etotstarstarl; vdotBo = vdotBstarstar
+    else if (SAR > 0.0d0) then
+       ro = rstarr; uo = ustar; vo = vstarstar; wo = wstarstar; Bo = Bstarstar; Co = Cstarstar
+       Ptoto = Ptotstar; etoto = etotstarstarr; vdotBo = vdotBstarstar
+    else if (SR > 0.0d0) then
+       ro = rstarr; uo = ustar; vo = vstarr; wo = wstarr; Bo = Bstarr; Co = Cstarr
+       Ptoto = Ptotstar; etoto = etotstarr; vdotBo = vdotBstarr
+    else
+       ro = rr; uo = ur; vo = vr; wo = wr; Bo = Br; Co = Cr; Ptoto = Ptotr; etoto = etotr; vdotBo = vdotBr
+    endif
+
+    ! Godunov flux (CPU :1225-1232). Bx flux is zero (constrained transport).
+    flux%density    = ro*uo
+    flux%momentum_x = ro*uo*uo + Ptoto - A*A
+    flux%momentum_y = ro*uo*vo - A*Bo
+    flux%momentum_z = ro*uo*wo - A*Co
+    flux%energy     = (etoto + Ptoto)*uo - A*vdotBo
+    flux%Bx = 0.0_dp
+    flux%By = Bo*uo - A*vo
+    flux%Bz = Co*uo - A*wo
+
+    return
+  end function hlld_mhd_fluxes
+  ! ==========================================================================
+
+  ! ==========================================================================
+  !> @brief
+  !> Dispatch GPU MHD Riemann solvers on the `riemann` integer id. HLL (B4) and
+  !> HLLD (Miyoshi & Kusano) are implemented; other ids fall back to HLL with a
+  !> TODO (llf/roe/upwind not yet ported).
   !>
   !> @param[in] left  : The state on the left side of the interface
   !> @param[in] right : The state on the right side of the interface
@@ -703,10 +858,12 @@ contains
     integer, value :: riemann
     type(conserved_mhd_t) :: flux
 
-    if (riemann .eq. solver_hll) then
+    if (riemann .eq. solver_hlld) then
+       flux = hlld_mhd_fluxes(left, right, gamma)
+    else if (riemann .eq. solver_hll) then
        flux = hll_mhd_fluxes(left, right, gamma)
     else
-       ! TODO: add solver_hlld / solver_llf / solver_roe here.
+       ! TODO: add solver_llf / solver_roe / solver_upwind here.
        flux = hll_mhd_fluxes(left, right, gamma)   ! fall back to HLL
     endif
 
@@ -2630,6 +2787,27 @@ contains
   ! =========================================================================
 
   ! =========================================================================
+  !> @brief (Stage C2 helper) Passive-scalar interface flux, matched to the chosen
+  !> 1D solver: HLLD upwinds by the (HLLD) mass flux fdens (CPU riemann_hlld:1240-
+  !> 1244, fgdnv(s)=fgdnv(1)*qleft/qright); HLL (and the fall-throughs) use the full
+  !> HLL flux on (rho*u*s) with the same SL/SR as the MHD core (CPU riemann_hll_mhd).
+  attributes(device) function mhd_scalar_flux(riemann, fdens, SL, SR, rhoL, uL, sL, rhoR, uR, sR) result(fs)
+    integer, value :: riemann
+    real(kind=dp), value :: fdens, SL, SR, rhoL, uL, sL, rhoR, uR, sR
+    real(kind=dp) :: fs
+    if (riemann .eq. solver_hlld) then
+       if (fdens > 0.0_dp) then
+          fs = fdens*sL
+       else
+          fs = fdens*sR
+       endif
+    else
+       fs = hll_flux(SL, SR, rhoL*uL*sL, rhoR*uR*sR, rhoL*sL, rhoR*sR)
+    endif
+  end function mhd_scalar_flux
+  ! =========================================================================
+
+  ! =========================================================================
   !> @brief (Stage C2 helper) Return the HLL fast-magnetosonic wave speeds SL/SR
   !> for the 1D MHD Riemann problem, identical to the speed computation inside
   !> hll_mhd_fluxes (B4) -- recomputed here (rather than modifying B4, which is
@@ -2684,7 +2862,7 @@ contains
     integer :: work_idx, interface_array_size, i, j, k, n
     type(primitive_mhd_t) :: lft, rgt
     type(conserved_mhd_t) :: flux
-    real(kind=dp) :: SL, SR, sLin, sRin, mfL, mfR, ucL, ucR
+    real(kind=dp) :: SL, SR, sLin, sRin
 
     interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
 
@@ -2712,9 +2890,8 @@ contains
           left_x%Bx(i,j,k) = flux%Bx; left_x%By(i,j,k) = flux%By; left_x%Bz(i,j,k) = flux%Bz
           do n = 1, nvar-5
              sLin = left_x%scalar(i,j,k,n); sRin = right_x%scalar(i,j,k,n)
-             mfL = max(lft%density,smallr)*lft%velocity_x*sLin; ucL = max(lft%density,smallr)*sLin
-             mfR = max(rgt%density,smallr)*rgt%velocity_x*sRin; ucR = max(rgt%density,smallr)*sRin
-             left_x%scalar(i,j,k,n) = hll_flux(SL, SR, mfL, mfR, ucL, ucR)
+             left_x%scalar(i,j,k,n) = mhd_scalar_flux(riemann, flux%density, SL, SR, &
+                  & max(lft%density,smallr), lft%velocity_x, sLin, max(rgt%density,smallr), rgt%velocity_x, sRin)
           end do
 
        else if (work_idx < 2 * interface_array_size) then
@@ -2740,9 +2917,8 @@ contains
           left_y%By(i,j,k) = flux%Bx; left_y%Bx(i,j,k) = flux%By; left_y%Bz(i,j,k) = flux%Bz
           do n = 1, nvar-5
              sLin = left_y%scalar(i,j,k,n); sRin = right_y%scalar(i,j,k,n)
-             mfL = max(lft%density,smallr)*lft%velocity_x*sLin; ucL = max(lft%density,smallr)*sLin
-             mfR = max(rgt%density,smallr)*rgt%velocity_x*sRin; ucR = max(rgt%density,smallr)*sRin
-             left_y%scalar(i,j,k,n) = hll_flux(SL, SR, mfL, mfR, ucL, ucR)
+             left_y%scalar(i,j,k,n) = mhd_scalar_flux(riemann, flux%density, SL, SR, &
+                  & max(lft%density,smallr), lft%velocity_x, sLin, max(rgt%density,smallr), rgt%velocity_x, sRin)
           end do
 
        else
@@ -2768,9 +2944,8 @@ contains
           left_z%Bz(i,j,k) = flux%Bx; left_z%Bx(i,j,k) = flux%By; left_z%By(i,j,k) = flux%Bz
           do n = 1, nvar-5
              sLin = left_z%scalar(i,j,k,n); sRin = right_z%scalar(i,j,k,n)
-             mfL = max(lft%density,smallr)*lft%velocity_x*sLin; ucL = max(lft%density,smallr)*sLin
-             mfR = max(rgt%density,smallr)*rgt%velocity_x*sRin; ucR = max(rgt%density,smallr)*sRin
-             left_z%scalar(i,j,k,n) = hll_flux(SL, SR, mfL, mfR, ucL, ucR)
+             left_z%scalar(i,j,k,n) = mhd_scalar_flux(riemann, flux%density, SL, SR, &
+                  & max(lft%density,smallr), lft%velocity_x, sLin, max(rgt%density,smallr), rgt%velocity_x, sRin)
           end do
        end if
     end do
