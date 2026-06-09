@@ -177,8 +177,8 @@ ifeq ($(COMPILER),NVHPC)
    ifneq ($(CUB_SCAN_REFINE),0)
       DEFINES += -DCUB_SCAN_REFINE
    endif
-   FFLAGS = -cpp -gpu=$(CUDA_ARCH),fastmath -cuda -cudalib=nvtx $(DEFINES)
-   LIBS = -gpu=$(CUDA_ARCH),fastmath -cuda -cudalib=nvtx -lstdc++
+   FFLAGS = -cpp -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx $(DEFINES)
+   LIBS = -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx -lstdc++
    GPU_PATH = ../gpu
    ifeq ($(CUDA_PROFILE),1)
       FFLAGS += -gpu=lineinfo,ptxinfo -Minstrument -traceback -gopt

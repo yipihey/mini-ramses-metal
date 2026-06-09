@@ -347,6 +347,13 @@ contains
     !
     integer(kind=4) :: head_idx, num_octs
     integer(kind=4) :: num_threads, num_blocks
+    logical :: internal_energy
+
+    if (sim%r%interpol_var == 1) then
+       internal_energy = .true.
+    else
+       internal_energy = .false.
+    endif
 
     head_idx = sim%m%head(ilevel+1)
     num_octs = sim%m%noct(ilevel+1)
@@ -355,7 +362,8 @@ contains
 
     if (num_octs > 0) then
        call nvtxStartRange("GPU upload", color=0)!green
-       call upload_kernel<<<num_blocks, num_threads>>>(grid, father, uold, head_idx, num_octs)
+       call upload_kernel<<<num_blocks, num_threads>>>(grid, father, uold, head_idx, num_octs, &
+            & internal_energy, sim%r%smallr)
        call nvtxEndRange()
     endif
 

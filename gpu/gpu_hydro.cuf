@@ -1562,16 +1562,19 @@ contains
   ! =========================================================================~
 
   ! =========================================================================
-  attributes(global) subroutine upload_kernel(grid, father, uold, head_idx, num_octs)
+  attributes(global) subroutine upload_kernel(grid, father, uold, head_idx, num_octs, internal_energy, smallr)
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     integer(kind=4), device :: father(*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
+    real(kind=8), intent(in), value :: smallr
+    logical, intent(in), value :: internal_energy
 
     integer :: tid, bid, cell_idx, oct_idx
     integer :: ind, father_idx, i, j, k
     real(kind=dp), parameter :: inv_twotondim = 1.0_dp / real(twotondim, kind=dp)
+    real(kind=dp) :: eint, ekin, eint_average, ekin_average
 
     ! Thread and block id
     tid = threadIdx%x - 1
@@ -1604,6 +1607,26 @@ contains
        uold(cell_idx, 4, father_idx) = uold(cell_idx, 4, father_idx) + uold(ind, 4, oct_idx) * inv_twotondim
        uold(cell_idx, 5, father_idx) = uold(cell_idx, 5, father_idx) + uold(ind, 5, oct_idx) * inv_twotondim
     end do
+
+    ! Non-conservative upload
+    if (internal_energy) then
+       eint_average = 0_dp
+       do ind = 1, twotondim
+          ! Compute children kinetic and internal energy
+          ekin = 0.5_dp * uold(ind, 2, oct_idx)**2 / max( real(uold(ind, 1, oct_idx),kind=8), smallr) + &
+               & 0.5_dp * uold(ind, 3, oct_idx)**2 / max( real(uold(ind, 1, oct_idx),kind=8), smallr) + &
+               & 0.5_dp * uold(ind, 4, oct_idx)**2 / max( real(uold(ind, 1, oct_idx),kind=8), smallr)
+          eint = uold(ind, 5, oct_idx) - ekin
+          ! Average children internal energy
+          eint_average = eint_average + eint * inv_twotondim
+       end do
+       ! Compute father kinetic energy
+       ekin_average = 0.5_dp * uold(cell_idx, 2, father_idx)**2 / max( real(uold(cell_idx, 1, father_idx),kind=8), smallr) + &
+            &         0.5_dp * uold(cell_idx, 3, father_idx)**2 / max( real(uold(cell_idx, 1, father_idx),kind=8), smallr) + &
+            &         0.5_dp * uold(cell_idx, 4, father_idx)**2 / max( real(uold(cell_idx, 1, father_idx),kind=8), smallr)
+       ! Add father internal energy
+       uold(cell_idx, 5, father_idx) = eint_average + ekin_average
+    end if
 
   end subroutine upload_kernel
   ! =========================================================================
