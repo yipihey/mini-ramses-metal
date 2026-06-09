@@ -153,9 +153,9 @@ contains
     num_threads = 256
     num_blocks = (num_octs * twotondim + num_threads - 1 ) / num_threads
     call nvtxStartRange("GPU cmpdt", color=0)!green
-    call cmpdt_kernel<<<num_blocks, num_threads>>>(grid, uold, f, &
+    call cmpdt_kernel<<<num_blocks, num_threads>>>(grid, uold, bold, f, &
         & constant_gravity, head_idx, num_octs, d_data, dx, gamma, &
-        & courant_factor)
+        & courant_factor, sim%r%mhd, sim%r%induction)
     call nvtxEndRange()
 
     ! move results to host
@@ -258,7 +258,7 @@ contains
 
     call nvtxStartRange("GPU sync_hydro", color=0)!green
     call sync_hydro<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, f, constant_gravity, &
-         & head_idx, num_octs, gamma, dt)
+         & head_idx, num_octs, gamma, dt, sim%r%mhd)
     call nvtxEndRange()
 
   end subroutine gpu_sync_hydro
@@ -293,7 +293,7 @@ contains
 
     call nvtxStartRange("GPU grav_hydro", color=0)!green
     call grav_hydro<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, unew, f, constant_gravity, &
-         & head_idx, num_octs, gamma, dt)
+         & head_idx, num_octs, gamma, dt, sim%r%mhd)
     call nvtxEndRange()
 
   end subroutine gpu_grav_hydro
