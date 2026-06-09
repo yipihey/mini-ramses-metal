@@ -489,28 +489,30 @@ contains
   !> the magnetic energy from the total energy before forming the gas pressure.
   !> See CPU ctoprim (umuscl.f90:1804-1845): the input energy is the TOTAL energy
   !> so both kinetic and magnetic energy are removed to get the internal energy.
-  !> No floors are applied here, matching the hydro conserved_2_primitive /
-  !> compute_pressure (smallr/smallp are applied later in the trace/Riemann).
+  !> Floors match CPU ctoprim: density is floored before forming velocity/kinetic
+  !> energy, then internal energy is floored before gas pressure is formed.
   !>
   !> @param[in] conserved : The hydro conserved variables (density, momentum, total energy)
   !> @param[in] bxl, bxr  : The low/high x-face magnetic field of the cell
   !> @param[in] byl, byr  : The low/high y-face magnetic field of the cell
   !> @param[in] bzl, bzr  : The low/high z-face magnetic field of the cell
   !> @param[in] gamma     : The adiabatic index
+  !> @param[in] smallr    : Density floor
+  !> @param[in] smallc    : Sound-speed floor
   !>
   !> @return
   !> A primitive_mhd_t with cell-centred B and gas pressure
-  attributes(device) function mhd_conserved_2_primitive(conserved, bxl, bxr, byl, byr, bzl, bzr, gamma) result(primitive)
+  attributes(device) function mhd_conserved_2_primitive(conserved, bxl, bxr, byl, byr, bzl, bzr, gamma, smallr, smallc) result(primitive)
     type(conserved_t), intent(in) :: conserved
     real(kind=dp), value :: bxl, bxr, byl, byr, bzl, bzr
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc
     type(primitive_mhd_t) :: primitive
-    real(kind=dp) :: momentum_squared, emag
+    real(kind=dp) :: momentum_squared, emag, eint, smalle
 
-    primitive%density    = conserved%density
-    primitive%velocity_x = conserved%momentum_x / conserved%density
-    primitive%velocity_y = conserved%momentum_y / conserved%density
-    primitive%velocity_z = conserved%momentum_z / conserved%density
+    primitive%density    = max(conserved%density, smallr)
+    primitive%velocity_x = conserved%momentum_x / primitive%density
+    primitive%velocity_y = conserved%momentum_y / primitive%density
+    primitive%velocity_z = conserved%momentum_z / primitive%density
 
     ! Cell-centred magnetic field: average of the two opposing faces per axis
     primitive%Bx = 0.5d0 * (bxl + bxr)
@@ -520,7 +522,9 @@ contains
     ! Gas pressure from total energy minus kinetic and magnetic energy
     momentum_squared = magnitude_squared(conserved%momentum_x, conserved%momentum_y, conserved%momentum_z)
     emag = compute_emag(primitive%Bx, primitive%By, primitive%Bz)
-    primitive%pressure = (gamma - 1.d0) * (conserved%energy - 0.5d0*momentum_squared/conserved%density - emag)
+    smalle = smallc**2/gamma/(gamma - 1.0_dp)
+    eint = max(conserved%energy - 0.5d0*momentum_squared/primitive%density - emag, smalle*primitive%density)
+    primitive%pressure = (gamma - 1.d0) * eint
     return
   end function mhd_conserved_2_primitive
   ! ==========================================================================
@@ -572,12 +576,10 @@ contains
   !>
   !> @return
   !> flux : The conserved_mhd_t of the HLL MHD fluxes
-  attributes(device) function hll_mhd_fluxes(left, right, gamma) result(flux)
+  attributes(device) function hll_mhd_fluxes(left, right, gamma, smallr, smallc) result(flux)
     type(primitive_mhd_t), intent(in) :: left, right
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc
     type(conserved_mhd_t) :: flux
-    real(kind=dp), parameter :: smallr = 1d-10
-    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
     type(primitive_mhd_t) :: left_state, right_state
     type(conserved_mhd_t) :: left_state_c, right_state_c, left_fluxes, right_fluxes
     real(kind=dp) :: smallp
@@ -588,7 +590,7 @@ contains
     real(kind=dp) :: b2l, b2r, c2l, c2r, d2l, d2r, cfleft, cfright
     real(kind=dp) :: speed_l, speed_r
 
-    smallp = smallc_squared / gamma
+    smallp = smallc**2 / gamma
 
     left_state = left
     right_state = right
@@ -704,12 +706,10 @@ contains
   !>
   !> @return
   !> flux : The conserved_mhd_t of the HLLD MHD fluxes
-  attributes(device) function hlld_mhd_fluxes(left, right, gamma) result(flux)
+  attributes(device) function hlld_mhd_fluxes(left, right, gamma, smallr, smallc) result(flux)
     type(primitive_mhd_t), intent(in) :: left, right
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc
     type(conserved_mhd_t) :: flux
-    real(kind=dp), parameter :: smallr = 1d-10
-    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
     type(primitive_mhd_t) :: ls, rs
     real(kind=dp) :: smallp, entho, A, sgnm
     real(kind=dp) :: rl, ul, vl, wl, Pl, Bl, Cl, ekinl, emagl, etotl, Ptotl, vdotBl
@@ -720,7 +720,7 @@ contains
     real(kind=dp) :: vstarstar, wstarstar, Bstarstar, Cstarstar, vdotBstarstar, etotstarstarl, etotstarstarr
     real(kind=dp) :: ro, uo, vo, wo, Bo, Co, Ptoto, etoto, vdotBo
 
-    smallp = smallc_squared / gamma
+    smallp = smallc**2 / gamma
     entho = 1.0d0 / (gamma - 1.0d0)
 
     ! Floor the states (GPU convention, matches hll_mhd_fluxes; no-op for the
@@ -852,19 +852,19 @@ contains
   !>
   !> @return
   !> flux : The conserved_mhd_t of the fluxes
-  attributes(device) function riemann_mhd_fluxes(left, right, gamma, riemann) result(flux)
+  attributes(device) function riemann_mhd_fluxes(left, right, gamma, smallr, smallc, riemann) result(flux)
     type(primitive_mhd_t), intent(in) :: left, right
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc
     integer, value :: riemann
     type(conserved_mhd_t) :: flux
 
     if (riemann .eq. solver_hlld) then
-       flux = hlld_mhd_fluxes(left, right, gamma)
+       flux = hlld_mhd_fluxes(left, right, gamma, smallr, smallc)
     else if (riemann .eq. solver_hll) then
-       flux = hll_mhd_fluxes(left, right, gamma)
+       flux = hll_mhd_fluxes(left, right, gamma, smallr, smallc)
     else
        ! TODO: add solver_llf / solver_roe / solver_upwind here.
-       flux = hll_mhd_fluxes(left, right, gamma)   ! fall back to HLL
+       flux = hll_mhd_fluxes(left, right, gamma, smallr, smallc)   ! fall back to HLL
     endif
 
     return
@@ -885,12 +885,10 @@ contains
   !>
   !> @return
   !> E : The unscaled edge EMF
-  attributes(device) function riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma) result(E)
+  attributes(device) function riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc) result(E)
     type(primitive_mhd_t), intent(in) :: qLL, qLR, qRL, qRR
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc
     real(kind=dp) :: E
-    real(kind=dp), parameter :: smallr = 1d-10
-    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
     type(primitive_mhd_t) :: stateLL, stateLR, stateRL, stateRR
     real(kind=dp) :: smallp
     real(kind=dp) :: ELL, ERL, ELR, ERR, SL, SR, SB, ST
@@ -900,7 +898,7 @@ contains
     real(kind=dp) :: c2LL, c2LR, c2RL, c2RR
     real(kind=dp) :: d2LL, d2LR, d2RL, d2RR
 
-    smallp = smallc_squared / gamma
+    smallp = smallc**2 / gamma
 
     stateLL = qLL
     stateLR = qLR
@@ -974,8 +972,215 @@ contains
 
   ! ==========================================================================
   !> @brief
-  !> Dispatch GPU 2D MHD EMF solvers. Only 2D HLL is implemented for now; all
-  !> other solver ids intentionally fall back to 2D HLL until their ports are added.
+  !> GPU implementation of the 2D HLLD edge EMF solver. This ports CPU
+  !> riemann2d_hlld (godunov_utils.f90) for the already-rotated edge frame used
+  !> by cmp_mag_flx: velocity_x/Bx and velocity_y/By are the two directions in
+  !> the edge-normal plane, velocity_z/Bz is the edge-parallel component.
+  !>
+  !> @param[in] qLL   : Left-bottom corner state
+  !> @param[in] qLR   : Left-top corner state
+  !> @param[in] qRL   : Right-bottom corner state
+  !> @param[in] qRR   : Right-top corner state
+  !> @param[in] gamma : The adiabatic index
+  !> @param[in] smallr: Density floor
+  !> @param[in] smallc: Sound-speed floor
+  !>
+  !> @return
+  !> E : The unscaled edge EMF
+  attributes(device) function riemann2d_hlld_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
+       & switch_llf_dmin, switch_llf_pmin) result(E)
+    type(primitive_mhd_t), intent(in) :: qLL, qLR, qRL, qRR
+    real(kind=dp), value :: gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
+    real(kind=dp) :: E
+    type(primitive_mhd_t) :: stateLL, stateLR, stateRL, stateRR
+    real(kind=dp) :: smallp
+    real(kind=dp) :: ELL, ERL, ELR, ERR, SL, SR, SB, ST, SAL, SAR, SAT, SAB
+    real(kind=dp) :: cfastLLx, cfastRLx, cfastLRx, cfastRRx
+    real(kind=dp) :: cfastLLy, cfastRLy, cfastLRy, cfastRRy
+    real(kind=dp) :: calfvenR, calfvenL, calfvenT, calfvenB
+    real(kind=dp) :: rLL, rLR, rRL, rRR, pLL, pLR, pRL, pRR
+    real(kind=dp) :: uLL, uLR, uRL, uRR, vLL, vLR, vRL, vRR
+    real(kind=dp) :: ALL, ALR, ARL, ARR, BLL, BLR, BRL, BRR, CLL, CLR, CRL, CRR
+    real(kind=dp) :: PtotLL, PtotLR, PtotRL, PtotRR
+    real(kind=dp) :: rcLLx, rcLRx, rcRLx, rcRRx, rcLLy, rcLRy, rcRLy, rcRRy
+    real(kind=dp) :: ustar, vstar
+    real(kind=dp) :: rstarLLx, rstarLRx, rstarRLx, rstarRRx
+    real(kind=dp) :: rstarLLy, rstarLRy, rstarRLy, rstarRRy
+    real(kind=dp) :: rstarLL, rstarLR, rstarRL, rstarRR
+    real(kind=dp) :: AstarLL, AstarLR, AstarRL, AstarRR
+    real(kind=dp) :: BstarLL, BstarLR, BstarRL, BstarRR
+    real(kind=dp) :: EstarLLx, EstarLRx, EstarRLx, EstarRRx
+    real(kind=dp) :: EstarLLy, EstarLRy, EstarRLy, EstarRRy
+    real(kind=dp) :: EstarLL, EstarLR, EstarRL, EstarRR
+    real(kind=dp) :: AstarT, AstarB, BstarR, BstarL
+    real(kind=dp) :: b2LL, b2LR, b2RL, b2RR
+    real(kind=dp) :: c2LL, c2LR, c2RL, c2RR
+    real(kind=dp) :: d2LL, d2LR, d2RL, d2RR
+    real(kind=dp) :: rmin, pmin, Smax
+    logical :: switch_to_llf
+
+    smallp = smallc**2 / gamma
+
+    stateLL = qLL
+    stateLR = qLR
+    stateRL = qRL
+    stateRR = qRR
+
+    stateLL%density = max(stateLL%density, smallr)
+    stateLR%density = max(stateLR%density, smallr)
+    stateRL%density = max(stateRL%density, smallr)
+    stateRR%density = max(stateRR%density, smallr)
+    stateLL%pressure = max(stateLL%pressure, smallp * stateLL%density)
+    stateLR%pressure = max(stateLR%pressure, smallp * stateLR%density)
+    stateRL%pressure = max(stateRL%pressure, smallp * stateRL%density)
+    stateRR%pressure = max(stateRR%pressure, smallp * stateRR%density)
+
+    rLL = stateLL%density; pLL = stateLL%pressure
+    uLL = stateLL%velocity_x; vLL = stateLL%velocity_y
+    ALL = stateLL%Bx; BLL = stateLL%By; CLL = stateLL%Bz
+    rLR = stateLR%density; pLR = stateLR%pressure
+    uLR = stateLR%velocity_x; vLR = stateLR%velocity_y
+    ALR = stateLR%Bx; BLR = stateLR%By; CLR = stateLR%Bz
+    rRL = stateRL%density; pRL = stateRL%pressure
+    uRL = stateRL%velocity_x; vRL = stateRL%velocity_y
+    ARL = stateRL%Bx; BRL = stateRL%By; CRL = stateRL%Bz
+    rRR = stateRR%density; pRR = stateRR%pressure
+    uRR = stateRR%velocity_x; vRR = stateRR%velocity_y
+    ARR = stateRR%Bx; BRR = stateRR%By; CRR = stateRR%Bz
+
+    b2LL = compute_bsquared(ALL, BLL, CLL); c2LL = gamma*pLL/rLL
+    d2LL = 0.5d0*(b2LL/rLL + c2LL)
+    cfastLLx = sqrt(d2LL + sqrt(d2LL**2 - c2LL*ALL*ALL/rLL))
+    cfastLLy = sqrt(d2LL + sqrt(d2LL**2 - c2LL*BLL*BLL/rLL))
+    b2LR = compute_bsquared(ALR, BLR, CLR); c2LR = gamma*pLR/rLR
+    d2LR = 0.5d0*(b2LR/rLR + c2LR)
+    cfastLRx = sqrt(d2LR + sqrt(d2LR**2 - c2LR*ALR*ALR/rLR))
+    cfastLRy = sqrt(d2LR + sqrt(d2LR**2 - c2LR*BLR*BLR/rLR))
+    b2RL = compute_bsquared(ARL, BRL, CRL); c2RL = gamma*pRL/rRL
+    d2RL = 0.5d0*(b2RL/rRL + c2RL)
+    cfastRLx = sqrt(d2RL + sqrt(d2RL**2 - c2RL*ARL*ARL/rRL))
+    cfastRLy = sqrt(d2RL + sqrt(d2RL**2 - c2RL*BRL*BRL/rRL))
+    b2RR = compute_bsquared(ARR, BRR, CRR); c2RR = gamma*pRR/rRR
+    d2RR = 0.5d0*(b2RR/rRR + c2RR)
+    cfastRRx = sqrt(d2RR + sqrt(d2RR**2 - c2RR*ARR*ARR/rRR))
+    cfastRRy = sqrt(d2RR + sqrt(d2RR**2 - c2RR*BRR*BRR/rRR))
+
+    SL = min(uLL, uLR, uRL, uRR) - max(cfastLLx, cfastLRx, cfastRLx, cfastRRx)
+    SR = max(uLL, uLR, uRL, uRR) + max(cfastLLx, cfastLRx, cfastRLx, cfastRRx)
+    SB = min(vLL, vLR, vRL, vRR) - max(cfastLLy, cfastLRy, cfastRLy, cfastRRy)
+    ST = max(vLL, vLR, vRL, vRR) + max(cfastLLy, cfastLRy, cfastRLy, cfastRRy)
+
+    ELL = uLL*BLL - vLL*ALL
+    ELR = uLR*BLR - vLR*ALR
+    ERL = uRL*BRL - vRL*ARL
+    ERR = uRR*BRR - vRR*ARR
+
+    switch_to_llf = .false.
+    rmin = min(rLL, rLR, rRL, rRR)
+    pmin = min(pLL, pLR, pRL, pRR)
+    if (switch_llf_dmin > 0.0_dp) switch_to_llf = rmin < switch_llf_dmin
+    if (switch_llf_pmin > 0.0_dp) switch_to_llf = pmin < switch_llf_pmin
+    if (switch_to_llf) then
+       Smax = max(abs(SR), abs(ST), abs(SL), abs(SB))
+       E = 0.25_dp*(ERR + ERL + ELR + ELL) &
+            & + 0.5_dp*Smax*(stateRR%Bx - stateLL%Bx) &
+            & - 0.5_dp*Smax*(stateRR%By - stateLL%By)
+       return
+    endif
+
+    PtotLL = pLL + 0.5d0*(ALL*ALL + BLL*BLL + CLL*CLL)
+    PtotLR = pLR + 0.5d0*(ALR*ALR + BLR*BLR + CLR*CLR)
+    PtotRL = pRL + 0.5d0*(ARL*ARL + BRL*BRL + CRL*CRL)
+    PtotRR = pRR + 0.5d0*(ARR*ARR + BRR*BRR + CRR*CRR)
+
+    rcLLx = rLL*(uLL - SL); rcRLx = rRL*(SR - uRL)
+    rcLRx = rLR*(uLR - SL); rcRRx = rRR*(SR - uRR)
+    rcLLy = rLL*(vLL - SB); rcLRy = rLR*(ST - vLR)
+    rcRLy = rRL*(vRL - SB); rcRRy = rRR*(ST - vRR)
+
+    ustar = (rcLLx*uLL + rcLRx*uLR + rcRLx*uRL + rcRRx*uRR &
+         & + (PtotLL - PtotRL + PtotLR - PtotRR))/(rcLLx + rcLRx + rcRLx + rcRRx)
+    vstar = (rcLLy*vLL + rcLRy*vLR + rcRLy*vRL + rcRRy*vRR &
+         & + (PtotLL - PtotLR + PtotRL - PtotRR))/(rcLLy + rcLRy + rcRLy + rcRRy)
+
+    rstarLLx = rLL*(SL - uLL)/(SL - ustar); BstarLL = BLL*(SL - uLL)/(SL - ustar)
+    rstarLLy = rLL*(SB - vLL)/(SB - vstar); AstarLL = ALL*(SB - vLL)/(SB - vstar)
+    rstarLL  = rLL*(SL - uLL)/(SL - ustar)*(SB - vLL)/(SB - vstar)
+    EstarLLx = ustar*BstarLL - vLL*ALL
+    EstarLLy = uLL*BLL - vstar*AstarLL
+    EstarLL  = ustar*BstarLL - vstar*AstarLL
+
+    rstarLRx = rLR*(SL - uLR)/(SL - ustar); BstarLR = BLR*(SL - uLR)/(SL - ustar)
+    rstarLRy = rLR*(ST - vLR)/(ST - vstar); AstarLR = ALR*(ST - vLR)/(ST - vstar)
+    rstarLR  = rLR*(SL - uLR)/(SL - ustar)*(ST - vLR)/(ST - vstar)
+    EstarLRx = ustar*BstarLR - vLR*ALR
+    EstarLRy = uLR*BLR - vstar*AstarLR
+    EstarLR  = ustar*BstarLR - vstar*AstarLR
+
+    rstarRLx = rRL*(SR - uRL)/(SR - ustar); BstarRL = BRL*(SR - uRL)/(SR - ustar)
+    rstarRLy = rRL*(SB - vRL)/(SB - vstar); AstarRL = ARL*(SB - vRL)/(SB - vstar)
+    rstarRL  = rRL*(SR - uRL)/(SR - ustar)*(SB - vRL)/(SB - vstar)
+    EstarRLx = ustar*BstarRL - vRL*ARL
+    EstarRLy = uRL*BRL - vstar*AstarRL
+    EstarRL  = ustar*BstarRL - vstar*AstarRL
+
+    rstarRRx = rRR*(SR - uRR)/(SR - ustar); BstarRR = BRR*(SR - uRR)/(SR - ustar)
+    rstarRRy = rRR*(ST - vRR)/(ST - vstar); AstarRR = ARR*(ST - vRR)/(ST - vstar)
+    rstarRR  = rRR*(SR - uRR)/(SR - ustar)*(ST - vRR)/(ST - vstar)
+    EstarRRx = ustar*BstarRR - vRR*ARR
+    EstarRRy = uRR*BRR - vstar*AstarRR
+    EstarRR  = ustar*BstarRR - vstar*AstarRR
+
+    calfvenL = max(abs(ALR)/sqrt(rstarLRx), abs(AstarLR)/sqrt(rstarLR), &
+         &         abs(ALL)/sqrt(rstarLLx), abs(AstarLL)/sqrt(rstarLL), smallc)
+    calfvenR = max(abs(ARR)/sqrt(rstarRRx), abs(AstarRR)/sqrt(rstarRR), &
+         &         abs(ARL)/sqrt(rstarRLx), abs(AstarRL)/sqrt(rstarRL), smallc)
+    calfvenB = max(abs(BLL)/sqrt(rstarLLy), abs(BstarLL)/sqrt(rstarLL), &
+         &         abs(BRL)/sqrt(rstarRLy), abs(BstarRL)/sqrt(rstarRL), smallc)
+    calfvenT = max(abs(BLR)/sqrt(rstarLRy), abs(BstarLR)/sqrt(rstarLR), &
+         &         abs(BRR)/sqrt(rstarRRy), abs(BstarRR)/sqrt(rstarRR), smallc)
+    SAL = min(ustar - calfvenL, 0.0_dp); SAR = max(ustar + calfvenR, 0.0_dp)
+    SAB = min(vstar - calfvenB, 0.0_dp); SAT = max(vstar + calfvenT, 0.0_dp)
+    AstarT = (SAR*AstarRR - SAL*AstarLR)/(SAR - SAL)
+    AstarB = (SAR*AstarRL - SAL*AstarLL)/(SAR - SAL)
+    BstarR = (SAT*BstarRR - SAB*BstarRL)/(SAT - SAB)
+    BstarL = (SAT*BstarLR - SAB*BstarLL)/(SAT - SAB)
+
+    if (SB > 0.0_dp) then
+       if (SL > 0.0_dp) then
+          E = ELL
+       else if (SR < 0.0_dp) then
+          E = ERL
+       else
+          E = (SAR*EstarLLx - SAL*EstarRLx + SAR*SAL*(BRL - BLL))/(SAR - SAL)
+       endif
+    else if (ST < 0.0_dp) then
+       if (SL > 0.0_dp) then
+          E = ELR
+       else if (SR < 0.0_dp) then
+          E = ERR
+       else
+          E = (SAR*EstarLRx - SAL*EstarRRx + SAR*SAL*(BRR - BLR))/(SAR - SAL)
+       endif
+    else if (SL > 0.0_dp) then
+       E = (SAT*EstarLLy - SAB*EstarLRy - SAT*SAB*(ALR - ALL))/(SAT - SAB)
+    else if (SR < 0.0_dp) then
+       E = (SAT*EstarRLy - SAB*EstarRRy - SAT*SAB*(ARR - ARL))/(SAT - SAB)
+    else
+       E = (SAL*SAB*EstarRR - SAL*SAT*EstarRL - SAR*SAB*EstarLR + SAR*SAT*EstarLL) &
+            & /(SAR - SAL)/(SAT - SAB) &
+            & - SAT*SAB/(SAT - SAB)*(AstarT - AstarB) &
+            & + SAR*SAL/(SAR - SAL)*(BstarR - BstarL)
+    endif
+
+    return
+  end function riemann2d_hlld_emf
+  ! ==========================================================================
+
+  ! ==========================================================================
+  !> @brief
+  !> Dispatch GPU 2D MHD EMF solvers. HLLF and HLLD are implemented; other solver
+  !> ids intentionally fall back to 2D HLL until their ports are added.
   !>
   !> @param[in] qLL       : Left-bottom corner state
   !> @param[in] qLR       : Left-top corner state
@@ -986,17 +1191,21 @@ contains
   !>
   !> @return
   !> E : The unscaled edge EMF
-  attributes(device) function riemann2d_emf(qLL, qLR, qRL, qRR, gamma, riemann2d) result(E)
+  attributes(device) function riemann2d_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
+       & switch_llf_dmin, switch_llf_pmin, riemann2d) result(E)
     type(primitive_mhd_t), intent(in) :: qLL, qLR, qRL, qRR
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
     integer, value :: riemann2d
     real(kind=dp) :: E
 
-    if (riemann2d .eq. solver2d_hllf) then
-       E = riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma)
+    if (riemann2d .eq. solver2d_hlld) then
+       E = riemann2d_hlld_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
+            & switch_llf_dmin, switch_llf_pmin)
+    else if (riemann2d .eq. solver2d_hllf) then
+       E = riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc)
     else
-       ! TODO: add solver2d_hlld / hlla / simple here.
-       E = riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma)   ! fall back to 2D HLL
+       ! TODO: add solver2d_hlla / simple here.
+       E = riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc)   ! fall back to 2D HLL
     endif
 
     return
@@ -2119,7 +2328,7 @@ contains
   !>   * pressure formed AFTER subtracting emag = 0.5*(Bx^2+By^2+Bz^2).
   !>   * passive scalars q(ie+n)=uold(5+n)/rho.
   attributes(device) subroutine subgrid_conserved_2_primitive_mhd(grid, uold, bold, f, &
-       & constant_gravity, nbor, head_idx, block_idx, thread_idx, gamma, dt, local_mhd, scalar_sub, bf)
+       & constant_gravity, nbor, head_idx, block_idx, thread_idx, gamma, smallr, smallc, dt, local_mhd, scalar_sub, bf)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
@@ -2127,7 +2336,7 @@ contains
     real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
     integer(kind=4), value :: head_idx, block_idx, thread_idx
-    real(kind=dp), value :: gamma, dt
+    real(kind=dp), value :: gamma, smallr, smallc, dt
     type(subgrid_6x6x6cell_primitive_mhd), intent(inout) :: local_mhd
     real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nvar-5)
     type(subgrid_face_b_t), intent(inout) :: bf
@@ -2135,7 +2344,7 @@ contains
     integer :: work_idx, ind_nbor, ind_nbor_xm, ind_nbor_ym, ind_nbor_zm
     integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
     integer :: cell_idx, source_idx, subgrid_idx, work_size, n
-    real(kind=dp) :: invD, Ekin, emag, Bxc, Byc, Bzc, rho
+    real(kind=dp) :: invD, Ekin, emag, eint, smalle, Bxc, Byc, Bzc, rho
     real(kind=dp) :: b0(1:6)
 
     work_size = 2*nsubgrid+4
@@ -2206,9 +2415,9 @@ contains
        Byc = 0.5_dp*(b0(2) + b0(5))
        Bzc = 0.5_dp*(b0(3) + b0(6))
 
-       ! Hydro conversion + MHD energy correction (CPU ctoprim:1804-1845). No floors
-       ! here (the trace applies smallr/smallp); gravity predictor as in hydro.
-       rho  = uold(cell_idx, 1, source_idx)
+       ! Hydro conversion + MHD energy correction (CPU ctoprim:1804-1845).
+       ! Floor density and internal energy before trace/source terms see them.
+       rho  = max(uold(cell_idx, 1, source_idx), smallr)
        invD = 1.0_dp / rho
        local_mhd%density   (i, j, k) = rho
        local_mhd%velocity_x(i, j, k) = uold(cell_idx, 2, source_idx) * invD
@@ -2218,7 +2427,9 @@ contains
             &          uold(cell_idx,3,source_idx)*local_mhd%velocity_y(i,j,k) + &
             &          uold(cell_idx,4,source_idx)*local_mhd%velocity_z(i,j,k) )
        emag = 0.5_dp*( Bxc*Bxc + (Byc*Byc + Bzc*Bzc) )
-       local_mhd%pressure(i, j, k) = (gamma - 1.0_dp)*(uold(cell_idx,5,source_idx) - Ekin - emag)
+       smalle = smallc**2/gamma/(gamma - 1.0_dp)
+       eint = max(uold(cell_idx,5,source_idx) - Ekin - emag, smalle*rho)
+       local_mhd%pressure(i, j, k) = (gamma - 1.0_dp)*eint
        local_mhd%Bx(i, j, k) = Bxc
        local_mhd%By(i, j, k) = Byc
        local_mhd%Bz(i, j, k) = Bzc
@@ -2372,7 +2583,7 @@ contains
   !> density slot) is reproduced verbatim (flagged below) for bit-level CPU match.
   attributes(device) subroutine trace_3d_mhd(local_mhd, scalar_sub, bf, mhd_dbf_scratch, edge_e, &
        & mhd_corner_scratch, bslot, thread_idx, &
-       & left_x, right_x, left_y, right_y, left_z, right_z, gamma, dx, dt, slope, induction)
+       & left_x, right_x, left_y, right_y, left_z, right_z, gamma, smallr, smallc, dx, dt, slope, induction)
     type(subgrid_6x6x6cell_primitive_mhd), intent(in) :: local_mhd
     real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nvar-5)
     type(subgrid_face_b_t), intent(in) :: bf
@@ -2380,18 +2591,15 @@ contains
     type(subgrid_edge_e_t), intent(inout) :: edge_e
     type(subgrid_corner_state_t), device :: mhd_corner_scratch(1:4,*)
     integer, value :: bslot, thread_idx, slope
-    real(kind=dp), value :: gamma, dx, dt
+    real(kind=dp), value :: gamma, smallr, smallc, dx, dt
     logical, value :: induction
     type(subgrid_3x2x2cell_primitive_mhd), intent(inout) :: left_x, right_x
     type(subgrid_2x3x2cell_primitive_mhd), intent(inout) :: left_y, right_y
     type(subgrid_2x2x3cell_primitive_mhd), intent(inout) :: left_z, right_z
 
-    real(kind=dp), parameter :: smallr = 1d-10
-    real(kind=dp), parameter :: smallc = 1d-10
-    real(kind=dp), parameter :: smallp = smallr*smallc*smallc
     real(kind=dp), parameter :: half = 0.5_dp
     integer, parameter :: iqRT = 1, iqRB = 2, iqLT = 3, iqLB = 4
-    real(kind=dp) :: r, u, v, w, p, A, B, C, r0, p0, dtdx, rscal
+    real(kind=dp) :: r, u, v, w, p, A, B, C, r0, p0, dtdx, smallp, rscal
     real(kind=dp) :: drx,dux,dvx,dwx,dpx, dry,duy,dvy,dwy,dpy, drz,duz,dvz,dwz,dpz
     real(kind=dp) :: dBx,dCx, dAy,dCy, dAz,dBz
     real(kind=dp) :: AL,AR,BL,BR,CL,CR
@@ -2402,6 +2610,7 @@ contains
     integer :: work_idx, work_size, ix, iy, k, n
 
     dtdx = dt/dx
+    smallp = smallr*smallc*smallc
 
     ! ====================================================================
     ! Phase 1: raw edge-centred E over [1, 2*nsubgrid+3] (CPU trace3d:935-951).
@@ -2813,17 +3022,15 @@ contains
   !> hll_mhd_fluxes (B4) -- recomputed here (rather than modifying B4, which is
   !> frozen) so the passive-scalar HLL flux in riemann_driver_mhd uses the same
   !> SL/SR as the MHD-core flux. Floors match B4 (no-ops for realistic states).
-  attributes(device) subroutine hll_mhd_wavespeeds(left, right, gamma, SL, SR)
+  attributes(device) subroutine hll_mhd_wavespeeds(left, right, gamma, smallr, smallc, SL, SR)
     type(primitive_mhd_t), intent(in) :: left, right
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc
     real(kind=dp), intent(out) :: SL, SR
-    real(kind=dp), parameter :: smallr = 1d-10
-    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
     real(kind=dp) :: smallp, bx_mean, rl, rr, pl, pr, ul, ur
     real(kind=dp) :: blx, bly, blz, brx, bry, brz
     real(kind=dp) :: b2l, b2r, c2l, c2r, d2l, d2r, cfleft, cfright
 
-    smallp = smallc_squared / gamma
+    smallp = smallc**2 / gamma
     bx_mean = 0.5d0 * (left%Bx + right%Bx)
     rl = max(left%density, smallr);  rr = max(right%density, smallr)
     pl = max(left%pressure, smallp*rl); pr = max(right%pressure, smallp*rr)
@@ -2852,13 +3059,12 @@ contains
   !> B is advanced by constrained transport (the EMF curl in C5), not by these
   !> face fluxes (CPU guards the face-flux B update #if NDIM<3, godunov_fine:771).
   attributes(device) subroutine riemann_driver_mhd(left_x, right_x, left_y, right_y, &
-       & left_z, right_z, thread_idx, gamma, riemann)
+       & left_z, right_z, thread_idx, gamma, smallr, smallc, riemann)
     type(subgrid_3x2x2cell_primitive_mhd), intent(inout) :: left_x, right_x
     type(subgrid_2x3x2cell_primitive_mhd), intent(inout) :: left_y, right_y
     type(subgrid_2x2x3cell_primitive_mhd), intent(inout) :: left_z, right_z
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc
     integer, value :: riemann, thread_idx
-    real(kind=dp), parameter :: smallr = 1d-10
     integer :: work_idx, interface_array_size, i, j, k, n
     type(primitive_mhd_t) :: lft, rgt
     type(conserved_mhd_t) :: flux
@@ -2879,8 +3085,8 @@ contains
           rgt%velocity_z = right_x%velocity_z(i,j,k)
           rgt%Bx = right_x%Bx(i,j,k); rgt%By = right_x%By(i,j,k); rgt%Bz = right_x%Bz(i,j,k)
 
-          flux = riemann_mhd_fluxes(lft, rgt, gamma, riemann)
-          call hll_mhd_wavespeeds(lft, rgt, gamma, SL, SR)
+          flux = riemann_mhd_fluxes(lft, rgt, gamma, smallr, smallc, riemann)
+          call hll_mhd_wavespeeds(lft, rgt, gamma, smallr, smallc, SL, SR)
 
           left_x%density(i,j,k) = flux%density
           left_x%velocity_x(i,j,k) = flux%momentum_x
@@ -2906,8 +3112,8 @@ contains
           rgt%velocity_z = right_y%velocity_z(i,j,k)
           rgt%Bx = right_y%By(i,j,k); rgt%By = right_y%Bx(i,j,k); rgt%Bz = right_y%Bz(i,j,k)
 
-          flux = riemann_mhd_fluxes(lft, rgt, gamma, riemann)
-          call hll_mhd_wavespeeds(lft, rgt, gamma, SL, SR)
+          flux = riemann_mhd_fluxes(lft, rgt, gamma, smallr, smallc, riemann)
+          call hll_mhd_wavespeeds(lft, rgt, gamma, smallr, smallc, SL, SR)
 
           left_y%density(i,j,k) = flux%density
           left_y%velocity_y(i,j,k) = flux%momentum_x   ! normal momentum
@@ -2933,8 +3139,8 @@ contains
           rgt%velocity_z = right_z%velocity_y(i,j,k)
           rgt%Bx = right_z%Bz(i,j,k); rgt%By = right_z%Bx(i,j,k); rgt%Bz = right_z%By(i,j,k)
 
-          flux = riemann_mhd_fluxes(lft, rgt, gamma, riemann)
-          call hll_mhd_wavespeeds(lft, rgt, gamma, SL, SR)
+          flux = riemann_mhd_fluxes(lft, rgt, gamma, smallr, smallc, riemann)
+          call hll_mhd_wavespeeds(lft, rgt, gamma, smallr, smallc, SL, SR)
 
           left_z%density(i,j,k) = flux%density
           left_z%velocity_z(i,j,k) = flux%momentum_x   ! normal momentum
@@ -3010,11 +3216,12 @@ contains
   ! =========================================================================
   !> @brief (Stage C3 helper) Enforce the parallel-B continuity of cmp_mag_flx
   !> (umuscl.f90:1669-1685) on the four (already permuted) corner states, then
-  !> call the 2D HLL EMF solver (B5). Bx holds parallel-B-1 (bp1), By parallel-B-2
+  !> call the selected 2D EMF solver (HLLF/HLLD). Bx holds parallel-B-1 (bp1), By parallel-B-2
   !> (bp2); both are made single-valued across their respective edge directions.
-  attributes(device) function emf_solve(qLL, qLR, qRL, qRR, gamma, riemann2d) result(E)
+  attributes(device) function emf_solve(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
+       & switch_llf_dmin, switch_llf_pmin, riemann2d) result(E)
     type(primitive_mhd_t), intent(in) :: qLL, qLR, qRL, qRR
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
     integer, value :: riemann2d
     real(kind=dp) :: E
     type(primitive_mhd_t) :: sLL, sLR, sRL, sRR
@@ -3026,7 +3233,8 @@ contains
     sLL%Bx = b1_LL; sRL%Bx = b1_LL; sLR%Bx = b1_LR; sRR%Bx = b1_LR
     b2_LL = half*(qLL%By + qLR%By); b2_RL = half*(qRL%By + qRR%By)
     sLL%By = b2_LL; sLR%By = b2_LL; sRL%By = b2_RL; sRR%By = b2_RL
-    E = riemann2d_emf(sLL, sLR, sRL, sRR, gamma, riemann2d)
+    E = riemann2d_emf(sLL, sLR, sRL, sRR, gamma, smallr, smallc, &
+         & switch_llf_dmin, switch_llf_pmin, riemann2d)
   end function emf_solve
   ! =========================================================================
 
@@ -3044,10 +3252,11 @@ contains
   !>   Ey: qLL=qRT(X-1,Y,Z-1) qRL=qRB(X-1,Y,Z) qLR=qLT(X,Y,Z-1) qRR=qLB(X,Y,Z)
   !>   Ex: qLL=qRT(X,Y-1,Z-1) qRL=qLT(X,Y,Z-1) qLR=qRB(X,Y-1,Z) qRR=qLB(X,Y,Z)
   !> (note Ey swaps the qRL/qLR sources to qRB/qLT, the trickiest part).
-  attributes(device) subroutine cmp_mag_flx_mhd(mhd_corner_scratch, bslot, emf, thread_idx, gamma, riemann2d)
+  attributes(device) subroutine cmp_mag_flx_mhd(mhd_corner_scratch, bslot, emf, thread_idx, gamma, smallr, smallc, &
+       & switch_llf_dmin, switch_llf_pmin, riemann2d)
     type(subgrid_corner_state_t), device :: mhd_corner_scratch(1:4,*)
     integer, value :: bslot, thread_idx, riemann2d
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
     type(subgrid_emf_t), intent(inout) :: emf
     integer, parameter :: iqRT = 1, iqRB = 2, iqLT = 3, iqLB = 4
     integer :: work_idx, emf_size, I, J, K, X, Y, Z
@@ -3064,7 +3273,8 @@ contains
           qRL = gather_corner(mhd_corner_scratch, iqLT, bslot, X  , Y-1, Z, 3, 2,3,4, 6,7,8)
           qLR = gather_corner(mhd_corner_scratch, iqRB, bslot, X-1, Y  , Z, 3, 2,3,4, 6,7,8)
           qRR = gather_corner(mhd_corner_scratch, iqLB, bslot, X  , Y  , Z, 3, 2,3,4, 6,7,8)
-          emf%emfz(I,J,K) = emf_solve(qLL, qLR, qRL, qRR, gamma, riemann2d)
+          emf%emfz(I,J,K) = emf_solve(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
+               & switch_llf_dmin, switch_llf_pmin, riemann2d)
 
        else if (work_idx < 2*emf_size) then
           ! ---- EMF y (orientation 2): lp1=4 lp2=2 lor=3, bp1=8 bp2=6 bor=7 ----
@@ -3074,7 +3284,8 @@ contains
           qRL = gather_corner(mhd_corner_scratch, iqRB, bslot, X-1, Y, Z  , 2, 4,2,3, 8,6,7)
           qLR = gather_corner(mhd_corner_scratch, iqLT, bslot, X  , Y, Z-1, 2, 4,2,3, 8,6,7)
           qRR = gather_corner(mhd_corner_scratch, iqLB, bslot, X  , Y, Z  , 2, 4,2,3, 8,6,7)
-          emf%emfy(I,J,K) = emf_solve(qLL, qLR, qRL, qRR, gamma, riemann2d)
+          emf%emfy(I,J,K) = emf_solve(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
+               & switch_llf_dmin, switch_llf_pmin, riemann2d)
 
        else
           ! ---- EMF x (orientation 1): lp1=3 lp2=4 lor=2, bp1=7 bp2=8 bor=6 ----
@@ -3084,7 +3295,8 @@ contains
           qRL = gather_corner(mhd_corner_scratch, iqLT, bslot, X, Y  , Z-1, 1, 3,4,2, 7,8,6)
           qLR = gather_corner(mhd_corner_scratch, iqRB, bslot, X, Y-1, Z  , 1, 3,4,2, 7,8,6)
           qRR = gather_corner(mhd_corner_scratch, iqLB, bslot, X, Y  , Z  , 1, 3,4,2, 7,8,6)
-          emf%emfx(I,J,K) = emf_solve(qLL, qLR, qRL, qRR, gamma, riemann2d)
+          emf%emfx(I,J,K) = emf_solve(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
+               & switch_llf_dmin, switch_llf_pmin, riemann2d)
        end if
     end do
 
@@ -3860,7 +4072,8 @@ contains
   attributes(global) subroutine mhd_integrator_kernel(grid, uold, unew, bold, bnew, &
        & mhd_corner_scratch, mhd_dbf_scratch, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
-       & gamma, dt, dx, slope, slope_mag, riemann, riemann2d, induction, constant_gravity)
+       & gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
+       & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
     type(oct), device :: grid(*)
     integer, device :: father(*)
     integer, device :: nbor(1:subgridsize,*)
@@ -3874,7 +4087,8 @@ contains
     type(subgrid_face_db_t), device :: mhd_dbf_scratch(*)
     integer(kind=4), intent(in), value :: head_idx, num_subgrids
     integer, intent(in), value :: ngridmax, ilevel, levelmin, levelmax
-    real(kind=dp), intent(in), value :: gamma, dt, dx
+    real(kind=dp), intent(in), value :: gamma, smallr, smallc, dt, dx
+    real(kind=dp), intent(in), value :: switch_llf_dmin, switch_llf_pmin
     integer, intent(in), value :: slope, slope_mag, riemann, riemann2d
     logical, intent(in), value :: induction
 
@@ -3899,7 +4113,7 @@ contains
 
     ! B2: conserved -> primitive (+ cell-centred B + bf face buffer + scalars)
     call subgrid_conserved_2_primitive_mhd(grid, uold, bold, f, constant_gravity, nbor, &
-         & head_idx, block_idx, thread_idx, gamma, dt, local_mhd, scalar_subgrid, bf)
+         & head_idx, block_idx, thread_idx, gamma, smallr, smallc, dt, local_mhd, scalar_subgrid, bf)
 
     ! B3: face-B transverse slopes (dbf) over the subgrid -> global scratch
     call mhd_face_b_slopes_subgrid(bf, mhd_dbf_scratch, bslot, thread_idx, slope_mag)
@@ -3907,14 +4121,15 @@ contains
     ! C1: edge-E + MUSCL predictor + face-B predict + qm/qp + corner states
     call trace_3d_mhd(local_mhd, scalar_subgrid, bf, mhd_dbf_scratch, edge_e, &
          & mhd_corner_scratch, bslot, thread_idx, left_x, right_x, left_y, right_y, &
-         & left_z, right_z, gamma, dx, dt, slope, induction)
+         & left_z, right_z, gamma, smallr, smallc, dx, dt, slope, induction)
 
     ! C2: 1D MHD fluxes (written back into the left_* interface arrays)
     call riemann_driver_mhd(left_x, right_x, left_y, right_y, left_z, right_z, &
-         & thread_idx, gamma, riemann)
+         & thread_idx, gamma, smallr, smallc, riemann)
 
     ! C3: 2D EMF solve from the corner-state scratch -> emf subgrid
-    call cmp_mag_flx_mhd(mhd_corner_scratch, bslot, emf, thread_idx, gamma, riemann2d)
+    call cmp_mag_flx_mhd(mhd_corner_scratch, bslot, emf, thread_idx, gamma, smallr, smallc, &
+         & switch_llf_dmin, switch_llf_pmin, riemann2d)
 
     ! C4: zero fluxes + EMFs at refined boundaries (only if finer levels exist)
     if (ilevel < levelmax) then
@@ -4247,13 +4462,13 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine sync_hydro(uold, f, constant_gravity, head_idx, num_octs, gamma, dt, mhd)
+  attributes(global) subroutine sync_hydro(uold, f, constant_gravity, head_idx, num_octs, gamma, smallr, dt, mhd)
     real(kind=8), device :: constant_gravity(1:3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
-    real(kind=dp), intent(in), value :: gamma
+    real(kind=dp), intent(in), value :: gamma, smallr
     real(kind=8), intent(in), value :: dt
     logical, intent(in), value :: mhd
 
@@ -4261,7 +4476,6 @@ contains
     type(primitive_t) :: prim
     type(conserved_t) :: cons
     real(kind=dp) :: rho, mx, my, mz, ener
-    real(kind=dp), parameter :: smallr = 1d-10
 
     block_idx = blockIdx%x - 1
 
@@ -4326,21 +4540,20 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine grav_hydro(uold, unew, f, constant_gravity, head_idx, num_octs, gamma, dt, mhd)
+  attributes(global) subroutine grav_hydro(uold, unew, f, constant_gravity, head_idx, num_octs, gamma, smallr, dt, mhd)
     real(kind=8), device :: constant_gravity(1:3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
-    real(kind=dp), intent(in), value :: gamma
+    real(kind=dp), intent(in), value :: gamma, smallr
     real(kind=8), intent(in), value :: dt
     logical, intent(in), value :: mhd
 
     integer :: block_idx, cell_idx, oct_idx
     real(kind=dp) :: rho_old_new_ratio_dt
     real(kind=dp) :: d, mx, my, mz, e_prim, fact
-    real(kind=dp), parameter :: smallr = 1d-10
     type(primitive_t) :: prim
     type(conserved_t) :: cons
 
@@ -4413,7 +4626,7 @@ contains
   ! requires changing other files in the code. This should be done if OK for numerical accuracy.
   ! In this case, all the 'd0' should be changed to '_dp'
   attributes(global) subroutine cmpdt_kernel(grid, uold, bold, f, constant_gravity, &
-      & head_idx, num_octs, data_out, dx, gamma, courant_factor, mhd, induction)
+      & head_idx, num_octs, data_out, dx, gamma, smallr, smallc, courant_factor, mhd, induction)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -4422,7 +4635,7 @@ contains
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
     real(kind=8), device :: data_out(*) !mass, ekin, eint, emag, dt
-    real(kind=dp), value :: dx, gamma, courant_factor
+    real(kind=dp), value :: dx, gamma, smallr, smallc, courant_factor
     logical, value :: mhd, induction
 
     type(primitive_t) :: primitive
@@ -4435,7 +4648,6 @@ contains
     real(kind=8) :: vol_loc, mass_loc, ekin_loc, eint_loc, emag_loc, dt_loc
     real(kind=8) :: sound_speed, grav, ctot
     real(kind=8) :: a2, b2sq, c2v, pp, rinv
-    real(kind=dp), parameter :: smallc = 1d-10
 
     ! Thread and block id
     tid = threadIdx%x - 1
@@ -4489,7 +4701,7 @@ contains
              prim_mhd = mhd_conserved_2_primitive(conserved, &
                   & bold(cell_idx,1,oct_idx), bold(cell_idx,4,oct_idx), &
                   & bold(cell_idx,2,oct_idx), bold(cell_idx,5,oct_idx), &
-                  & bold(cell_idx,3,oct_idx), bold(cell_idx,6,oct_idx), gamma)
+                  & bold(cell_idx,3,oct_idx), bold(cell_idx,6,oct_idx), gamma, smallr, smallc)
              pp = max(prim_mhd%pressure, prim_mhd%density*smallc*smallc/gamma)
              b2sq = compute_bsquared(prim_mhd%Bx, prim_mhd%By, prim_mhd%Bz)
              emag_loc = 0.5d0*b2sq*vol_loc

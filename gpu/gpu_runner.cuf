@@ -135,12 +135,14 @@ contains
 
     integer(kind=4) :: head_idx, num_octs
     integer :: num_threads, num_blocks
-    real(kind=dp) :: gamma, dx, courant_factor
+    real(kind=dp) :: gamma, smallr, smallc, dx, courant_factor
     real(kind=8), device, dimension(5) :: d_data !mass, ekin, eint, emag, dt
     real(kind=8), dimension(5) :: h_data
 
     courant_factor = sim%r%courant_factor
     gamma = sim%r%gamma
+    smallr = sim%r%smallr
+    smallc = sim%r%smallc
     dx = sim%r%boxlen/2**ilevel
     dt = courant_factor*dx/sim%r%smallc
 
@@ -155,7 +157,7 @@ contains
     call nvtxStartRange("GPU cmpdt", color=0)!green
     call cmpdt_kernel<<<num_blocks, num_threads>>>(grid, uold, bold, f, &
         & constant_gravity, head_idx, num_octs, d_data, dx, gamma, &
-        & courant_factor, sim%r%mhd, sim%r%induction)
+        & smallr, smallc, courant_factor, sim%r%mhd, sim%r%induction)
     call nvtxEndRange()
 
     ! move results to host
@@ -246,9 +248,10 @@ contains
 
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
-    real(kind=dp) :: gamma
+    real(kind=dp) :: gamma, smallr
 
     gamma = real(sim%r%gamma, kind=dp)
+    smallr = real(sim%r%smallr, kind=dp)
 
     head_idx = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
@@ -258,7 +261,7 @@ contains
 
     call nvtxStartRange("GPU sync_hydro", color=0)!green
     call sync_hydro<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, f, constant_gravity, &
-         & head_idx, num_octs, gamma, dt, sim%r%mhd)
+         & head_idx, num_octs, gamma, smallr, dt, sim%r%mhd)
     call nvtxEndRange()
 
   end subroutine gpu_sync_hydro
@@ -280,10 +283,11 @@ contains
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
     real(kind=8) :: dt
-    real(kind=dp) :: gamma
+    real(kind=dp) :: gamma, smallr
 
     dt = 0.5 * sim%g%dtnew(ilevel)
     gamma = real(sim%r%gamma, kind=dp)
+    smallr = real(sim%r%smallr, kind=dp)
 
     head_idx = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
@@ -293,7 +297,7 @@ contains
 
     call nvtxStartRange("GPU grav_hydro", color=0)!green
     call grav_hydro<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, unew, f, constant_gravity, &
-         & head_idx, num_octs, gamma, dt, sim%r%mhd)
+         & head_idx, num_octs, gamma, smallr, dt, sim%r%mhd)
     call nvtxEndRange()
 
   end subroutine gpu_grav_hydro
@@ -320,7 +324,7 @@ contains
     !
     integer(kind=4) :: head_idx, num_subgrids
     integer :: threads_per_block, num_blocks
-    real(dp) :: dt, dx, gamma
+    real(dp) :: dt, dx, gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
     integer :: slope, riemann, slope_mag, riemann2d, istat
     logical :: induction
 
@@ -329,10 +333,14 @@ contains
     dt = sim%g%dtnew(ilevel)
     dx = sim%r%boxlen/2**ilevel
     gamma = sim%r%gamma
+    smallr = sim%r%smallr
+    smallc = sim%r%smallc
     slope = sim%r%slope_type
     riemann = sim%r%riemann
     slope_mag = sim%r%slope_mag_type
     riemann2d = sim%r%riemann2d
+    switch_llf_dmin = sim%r%switch_llf_dmin
+    switch_llf_pmin = sim%r%switch_llf_pmin
     induction = sim%r%induction
 
     head_idx = (sim%m%head(ilevel) - 1) / nsubgridtondim + 1
@@ -374,7 +382,8 @@ contains
        call mhd_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, bold, bnew, &
             & mhd_corner_scratch, mhd_dbf_scratch, f, father, nbor, &
             & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
-            & gamma, dt, dx, slope, slope_mag, riemann, riemann2d, induction, constant_gravity)
+            & gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
+            & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
     else
        call hydro_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
             & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
