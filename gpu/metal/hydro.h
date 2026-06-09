@@ -255,6 +255,8 @@ inline HConserved twoshock_fluxes(thread HPrimitive& L, thread HPrimitive& R, fl
     const float tiny = 1e-20f;
     L.density=max(L.density,1e-10f); R.density=max(R.density,1e-10f);
     L.pressure=max(L.pressure,tiny); R.pressure=max(R.pressure,tiny);
+    float pratio = max(L.pressure, R.pressure) / max(min(L.pressure, R.pressure), tiny);
+    if (pratio > 2.0f) return hllc_fluxes(L, R, gamma);
     float qa=(gamma+1.0f)/(2.0f*gamma), gp1=gamma+1.0f;
     float cl=sqrt(gamma*L.pressure*L.density), cr=sqrt(gamma*R.pressure*R.density);
     float ps=max((cr*L.pressure+cl*R.pressure+cr*cl*(L.velocity_x-R.velocity_x))/(cr+cl),tiny);
@@ -334,6 +336,13 @@ inline float local_ppm_avg(float ql,float qa,float qr,float lo,float hi) {
     return ql+0.5f*b*(lo+hi)+c*(lo*lo+lo*hi+hi*hi)/3.0f;
 }
 
+inline bool strong_pressure_jump(float a, float b, float c) {
+    const float tiny = 1e-20f;
+    float hi = max(a, max(b, c));
+    float lo = max(min(a, min(b, c)), tiny);
+    return hi / lo > 2.0f;
+}
+
 // Compact three-cell PPM reconstruction followed by characteristic tracing.
 // qplus is the cell's +x face and qminus its -x face.
 inline void local_ppm_trace(HPrimitive l,HPrimitive m,HPrimitive r,float gamma,float dtdx,
@@ -345,12 +354,8 @@ inline void local_ppm_trace(HPrimitive l,HPrimitive m,HPrimitive r,float gamma,f
     local_ppm_edges(l.velocity_y,m.velocity_y,r.velocity_y,vl,vr);
     local_ppm_edges(l.velocity_z,m.velocity_z,r.velocity_z,wl,wr);
     local_ppm_edges(l.pressure,m.pressure,r.pressure,pl,pr);
-    float pbase=min(l.pressure,r.pressure);
-    float etap=pbase>0.0f?abs(r.pressure-l.pressure)/pbase:1.0f;
     float cs=sqrt(gamma*max(m.pressure,smallp)/max(m.density,smallr));
-    float comp=l.velocity_x>r.velocity_x?(l.velocity_x-r.velocity_x)/cs:0.0f;
-    float alpha=l.velocity_x>r.velocity_x?max(clamp((etap-0.05f)/0.45f,0.0f,1.0f),
-                                              clamp((comp-0.1f)/0.9f,0.0f,1.0f)):0.0f;
+    const float alpha=0.0f;
     #define BLEND_EDGES(field,lo,hi) { float s=local_ppm_mc(l.field,m.field,r.field); \
         lo=(1.0f-alpha)*lo+alpha*(m.field-0.5f*s); hi=(1.0f-alpha)*hi+alpha*(m.field+0.5f*s); \
         float a,b; local_ppm_monotonize(lo,m.field,hi,a,b); lo=a;hi=b; }
@@ -411,6 +416,10 @@ inline void trace_cell_1d(HPrimitive l, HPrimitive m, HPrimitive r,
                           float gamma, float dtdx, int slope,
                           thread HPrimitive& qL, thread HPrimitive& qR) {
     if(slope==SLOPE_LOCAL_PPM) {
+        if (strong_pressure_jump(l.pressure, m.pressure, r.pressure)) {
+            trace_cell_1d(l, m, r, gamma, dtdx, 2, qL, qR);
+            return;
+        }
         local_ppm_trace(l,m,r,gamma,dtdx,qL,qR);
         return;
     }
@@ -520,11 +529,48 @@ inline HPrimitive hp_add(HPrimitive a, HPrimitive b, float s) {   // a + s*b
     return r;
 }
 
+inline HPrimitive local_ppm_half_slope(HPrimitive l, HPrimitive m, HPrimitive r) {
+    HPrimitive s;
+    s.density    = 0.5f * local_ppm_mc(l.density,    m.density,    r.density);
+    s.velocity_x = 0.5f * local_ppm_mc(l.velocity_x, m.velocity_x, r.velocity_x);
+    s.velocity_y = 0.5f * local_ppm_mc(l.velocity_y, m.velocity_y, r.velocity_y);
+    s.velocity_z = 0.5f * local_ppm_mc(l.velocity_z, m.velocity_z, r.velocity_z);
+    s.pressure   = 0.5f * local_ppm_mc(l.pressure,   m.pressure,   r.pressure);
+#if NHVAR > 5
+    s.scalar     = 0.5f * local_ppm_mc(l.scalar,     m.scalar,     r.scalar);
+#endif
+    return s;
+}
+
+inline HPrimitive transverse_source(HPrimitive m, HPrimitive s, float gamma, int dir) {
+    HPrimitive src;
+    float vdir = dir == 0 ? m.velocity_x : (dir == 1 ? m.velocity_y : m.velocity_z);
+    float svel = dir == 0 ? s.velocity_x : (dir == 1 ? s.velocity_y : s.velocity_z);
+    src.density = -vdir * s.density - svel * m.density;
+    src.velocity_x = -vdir * s.velocity_x - (dir == 0 ? s.pressure / m.density : 0.0f);
+    src.velocity_y = -vdir * s.velocity_y - (dir == 1 ? s.pressure / m.density : 0.0f);
+    src.velocity_z = -vdir * s.velocity_z - (dir == 2 ? s.pressure / m.density : 0.0f);
+    src.pressure = -vdir * s.pressure - svel * gamma * m.pressure;
+#if NHVAR > 5
+    src.scalar = -vdir * s.scalar;
+#endif
+    return src;
+}
+
+inline void add_transverse_source(thread HPrimitive& q, HPrimitive src, float dtdx, HPrimitive m) {
+    q = hp_add(q, src, dtdx);
+    if (q.density <= 0.0f || q.pressure <= 0.0f) q = m;
+}
+
 inline HTrace2 trace_cell_2d(thread const HPrimitive sg[36], int i, int j,
                              float gamma, float dtdx, int slope) {
     #define SG2(a,b) sg[(a)+6*(b)]
     HPrimitive m=SG2(i,j);
     if(slope==SLOPE_LOCAL_PPM) {
+        if (strong_pressure_jump(SG2(i-1,j).pressure, m.pressure, SG2(i+1,j).pressure) ||
+            strong_pressure_jump(SG2(i,j-1).pressure, m.pressure, SG2(i,j+1).pressure)) {
+            return trace_cell_2d(sg, i, j, gamma, dtdx, 2);
+        }
         HTrace2 t;
         local_ppm_trace(SG2(i-1,j),m,SG2(i+1,j),gamma,dtdx,t.qLx,t.qRx);
         HPrimitive l={SG2(i,j-1).density,SG2(i,j-1).velocity_y,SG2(i,j-1).velocity_z,SG2(i,j-1).velocity_x,SG2(i,j-1).pressure};
@@ -539,6 +585,14 @@ inline HTrace2 trace_cell_2d(thread const HPrimitive sg[36], int i, int j,
 #if NHVAR > 5
         t.qLy.scalar=p.scalar;t.qRy.scalar=n.scalar;
 #endif
+        HPrimitive sx = local_ppm_half_slope(SG2(i-1,j), m, SG2(i+1,j));
+        HPrimitive sy = local_ppm_half_slope(SG2(i,j-1), m, SG2(i,j+1));
+        HPrimitive srcx = transverse_source(m, sx, gamma, 0);
+        HPrimitive srcy = transverse_source(m, sy, gamma, 1);
+        add_transverse_source(t.qLx, srcy, dtdx, m);
+        add_transverse_source(t.qRx, srcy, dtdx, m);
+        add_transverse_source(t.qLy, srcx, dtdx, m);
+        add_transverse_source(t.qRy, srcx, dtdx, m);
         return t;
     }
     const float smallr=1e-10f,smallp=1e-30f;
@@ -575,6 +629,11 @@ inline HTrace trace_cell_3d(thread const HPrimitive sg[216], int i, int j, int k
     #define SG3(a,b,c) sg[(a) + 6*(b) + 36*(c)]
     HPrimitive m = SG3(i,j,k);
     if(slope==SLOPE_LOCAL_PPM) {
+        if (strong_pressure_jump(SG3(i-1,j,k).pressure, m.pressure, SG3(i+1,j,k).pressure) ||
+            strong_pressure_jump(SG3(i,j-1,k).pressure, m.pressure, SG3(i,j+1,k).pressure) ||
+            strong_pressure_jump(SG3(i,j,k-1).pressure, m.pressure, SG3(i,j,k+1).pressure)) {
+            return trace_cell_3d(sg, i, j, k, gamma, dtdx, 2);
+        }
         HTrace t;
         local_ppm_trace(SG3(i-1,j,k),m,SG3(i+1,j,k),gamma,dtdx,t.qLx,t.qRx);
         HPrimitive yl={SG3(i,j-1,k).density,SG3(i,j-1,k).velocity_y,SG3(i,j-1,k).velocity_z,SG3(i,j-1,k).velocity_x,SG3(i,j-1,k).pressure};
@@ -595,6 +654,21 @@ inline HTrace trace_cell_3d(thread const HPrimitive sg[216], int i, int j, int k
         HPrimitive zp,zn; local_ppm_trace(zl,zm,zr,gamma,dtdx,zp,zn);
         t.qLz={zp.density,zp.velocity_y,zp.velocity_z,zp.velocity_x,zp.pressure};
         t.qRz={zn.density,zn.velocity_y,zn.velocity_z,zn.velocity_x,zn.pressure};
+        HPrimitive sx = local_ppm_half_slope(SG3(i-1,j,k), m, SG3(i+1,j,k));
+        HPrimitive sy = local_ppm_half_slope(SG3(i,j-1,k), m, SG3(i,j+1,k));
+        HPrimitive sz = local_ppm_half_slope(SG3(i,j,k-1), m, SG3(i,j,k+1));
+        HPrimitive srcx = transverse_source(m, sx, gamma, 0);
+        HPrimitive srcy = transverse_source(m, sy, gamma, 1);
+        HPrimitive srcz = transverse_source(m, sz, gamma, 2);
+        HPrimitive srcyz = hp_add(srcy, srcz, 1.0f);
+        HPrimitive srcxz = hp_add(srcx, srcz, 1.0f);
+        HPrimitive srcxy = hp_add(srcx, srcy, 1.0f);
+        add_transverse_source(t.qLx, srcyz, dtdx, m);
+        add_transverse_source(t.qRx, srcyz, dtdx, m);
+        add_transverse_source(t.qLy, srcxz, dtdx, m);
+        add_transverse_source(t.qRy, srcxz, dtdx, m);
+        add_transverse_source(t.qLz, srcxy, dtdx, m);
+        add_transverse_source(t.qRz, srcxy, dtdx, m);
         return t;
     }
     HPrimitive sx, sy, sz;

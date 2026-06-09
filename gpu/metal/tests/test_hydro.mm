@@ -71,6 +71,8 @@ static C hll(P L,P R,double g,bool llf){
 
 static C twoshock(P L,P R,double g){
   const double tiny=1e-20; L.r=fmax(L.r,1e-10);R.r=fmax(R.r,1e-10);L.p=fmax(L.p,tiny);R.p=fmax(R.p,tiny);
+  double pratio=fmax(L.p,R.p)/fmax(fmin(L.p,R.p),tiny);
+  if(pratio>2.0) return hllc(L,R,g);
   double qa=(g+1)/(2*g),gp1=g+1,cl=sqrt(g*L.p*L.r),cr=sqrt(g*R.p*R.r);
   double ps=fmax((cr*L.p+cl*R.p+cr*cl*(L.u-R.u))/(cr+cl),tiny),old=ps,ubl=0,ubr=0,dl=0,dr=0;
   bool conv=false; for(int n=2;n<=8&&!conv;n++){double zl=cl*sqrt(1+qa*(ps/L.p-1)),zr=cr*sqrt(1+qa*(ps/R.p-1));
@@ -102,8 +104,7 @@ static double ppavg(double ql,double qa,double qr,double lo,double hi){double b=
 static void localtrace(P l,P m,P r,double g,double dtdx,P& qp,P& qm){
   double dl,dr,ul,ur,vl,vr,wl,wr,pl,pr;ppedges(l.r,m.r,r.r,dl,dr);ppedges(l.u,m.u,r.u,ul,ur);
   ppedges(l.v,m.v,r.v,vl,vr);ppedges(l.w,m.w,r.w,wl,wr);ppedges(l.p,m.p,r.p,pl,pr);
-  double cs=sqrt(g*fmax(m.p,1e-30)/fmax(m.r,1e-10)),base=fmin(l.p,r.p),eta=base>0?fabs(r.p-l.p)/base:1;
-  double comp=l.u>r.u?(l.u-r.u)/cs:0,alpha=l.u>r.u?fmax(fmin(fmax((eta-.05)/.45,0.0),1.0),fmin(fmax((comp-.1)/.9,0.0),1.0)):0;
+  double cs=sqrt(g*fmax(m.p,1e-30)/fmax(m.r,1e-10)),alpha=0;
   auto blend=[&](double a,double b,double c,double& lo,double& hi){double s=mc(a,b,c);lo=(1-alpha)*lo+alpha*(b-.5*s);hi=(1-alpha)*hi+alpha*(b+.5*s);double x,y;ppmono(lo,b,hi,x,y);lo=x;hi=y;};
   blend(l.r,m.r,r.r,dl,dr);blend(l.u,m.u,r.u,ul,ur);blend(l.v,m.v,r.v,vl,vr);blend(l.w,m.w,r.w,wl,wr);blend(l.p,m.p,r.p,pl,pr);
   if(dl<=0||dr<=0)dl=dr=m.r;if(pl<=0||pr<=0)pl=pr=m.p;
@@ -114,9 +115,26 @@ static void localtrace(P l,P m,P r,double g,double dtdx,P& qp,P& qm){
       if(wave==0||wave==2){double amp=(wave==0?-m.r*du/(2*cs):m.r*du/(2*cs))+dp/(2*cs*cs);od+=amp;ou+=(wave==0?-cs/m.r:cs/m.r)*amp;op+=cs*cs*amp;}
       else{od+=ppavg(dl,m.r,dr,a,b)-rg-dp/(cs*cs);ov+=ppavg(vl,m.v,vr,a,b)-vg;ow+=ppavg(wl,m.w,wr,a,b)-wg;}}
     P q={rg+od,ug+ou,vg+ov,wg+ow,pg+op};if(q.r<=0||q.p<=0)q=m;if(right)qp=q;else qm=q;}}
+static bool strongjump(double a,double b,double c){double tiny=1e-20,hi=fmax(a,fmax(b,c)),lo=fmax(fmin(a,fmin(b,c)),tiny);return hi/lo>2.0;}
+static P halfslope(P l,P m,P r){return {0.5*mc(l.r,m.r,r.r),0.5*mc(l.u,m.u,r.u),0.5*mc(l.v,m.v,r.v),0.5*mc(l.w,m.w,r.w),0.5*mc(l.p,m.p,r.p)};}
+static P transsrc(P m,P s,double g,int dir){
+  double vdir=dir==0?m.u:(dir==1?m.v:m.w),svel=dir==0?s.u:(dir==1?s.v:s.w);
+  return {-vdir*s.r-svel*m.r,
+          -vdir*s.u-(dir==0?s.p/m.r:0.0),
+          -vdir*s.v-(dir==1?s.p/m.r:0.0),
+          -vdir*s.w-(dir==2?s.p/m.r:0.0),
+          -vdir*s.p-svel*g*m.p};
+}
+static void addsrc(P& q,P src,double dtdx,P m){
+  q={q.r+dtdx*src.r,q.u+dtdx*src.u,q.v+dtdx*src.v,q.w+dtdx*src.w,q.p+dtdx*src.p};
+  if(q.r<=0||q.p<=0)q=m;
+}
 // host double replica of trace_cell_1d / godunov_oct_1d (the parity reference)
 static void trace1d(P l,P m,P r,double g,double dtdx,int slope,P& qL,P& qR){
-  if(slope==S_LOCAL_PPM){localtrace(l,m,r,g,dtdx,qL,qR);return;}
+  if(slope==S_LOCAL_PPM){
+    if(strongjump(l.p,m.p,r.p)){trace1d(l,m,r,g,dtdx,2,qL,qR);return;}
+    localtrace(l,m,r,g,dtdx,qL,qR);return;
+  }
   double smallr=1e-10, smallp=1e-10*(1e-10*1e-10);
   P s={0.5*moncen(l.r,m.r,r.r,slope),0.5*moncen(l.u,m.u,r.u,slope),
        0.5*moncen(l.v,m.v,r.v,slope),0.5*moncen(l.w,m.w,r.w,slope),0.5*moncen(l.p,m.p,r.p,slope)};
@@ -143,6 +161,10 @@ static Tr trace3d(const P* sg,int i,int j,int k,double g,double dtdx,int slope){
   #define G(a,b,c) sg[(a)+6*(b)+36*(c)]
   P m=G(i,j,k);
   if(slope==S_LOCAL_PPM){
+    if(strongjump(G(i-1,j,k).p,m.p,G(i+1,j,k).p)||
+       strongjump(G(i,j-1,k).p,m.p,G(i,j+1,k).p)||
+       strongjump(G(i,j,k-1).p,m.p,G(i,j,k+1).p))
+      return trace3d(sg,i,j,k,g,dtdx,2);
     Tr t;localtrace(G(i-1,j,k),m,G(i+1,j,k),g,dtdx,t.qLx,t.qRx);
     P a={G(i,j-1,k).r,G(i,j-1,k).v,G(i,j-1,k).w,G(i,j-1,k).u,G(i,j-1,k).p};
     P b={m.r,m.v,m.w,m.u,m.p},c={G(i,j+1,k).r,G(i,j+1,k).v,G(i,j+1,k).w,G(i,j+1,k).u,G(i,j+1,k).p},yp,yn;
@@ -150,6 +172,12 @@ static Tr trace3d(const P* sg,int i,int j,int k,double g,double dtdx,int slope){
     a={G(i,j,k-1).r,G(i,j,k-1).w,G(i,j,k-1).u,G(i,j,k-1).v,G(i,j,k-1).p};
     b={m.r,m.w,m.u,m.v,m.p};c={G(i,j,k+1).r,G(i,j,k+1).w,G(i,j,k+1).u,G(i,j,k+1).v,G(i,j,k+1).p};
     localtrace(a,b,c,g,dtdx,yp,yn);t.qLz={yp.r,yp.v,yp.w,yp.u,yp.p};t.qRz={yn.r,yn.v,yn.w,yn.u,yn.p};
+    P sx=halfslope(G(i-1,j,k),m,G(i+1,j,k)),sy=halfslope(G(i,j-1,k),m,G(i,j+1,k)),sz=halfslope(G(i,j,k-1),m,G(i,j,k+1));
+    P srcx=transsrc(m,sx,g,0),srcy=transsrc(m,sy,g,1),srcz=transsrc(m,sz,g,2);
+    P srcyz=padd(srcy,srcz,1),srcxz=padd(srcx,srcz,1),srcxy=padd(srcx,srcy,1);
+    addsrc(t.qLx,srcyz,dtdx,m);addsrc(t.qRx,srcyz,dtdx,m);
+    addsrc(t.qLy,srcxz,dtdx,m);addsrc(t.qRy,srcxz,dtdx,m);
+    addsrc(t.qLz,srcxy,dtdx,m);addsrc(t.qRz,srcxy,dtdx,m);
     return t;
   }
   P sx={0.5*moncen(G(i-1,j,k).r,m.r,G(i+1,j,k).r,slope),0.5*moncen(G(i-1,j,k).u,m.u,G(i+1,j,k).u,slope),0.5*moncen(G(i-1,j,k).v,m.v,G(i+1,j,k).v,slope),0.5*moncen(G(i-1,j,k).w,m.w,G(i+1,j,k).w,slope),0.5*moncen(G(i-1,j,k).p,m.p,G(i+1,j,k).p,slope)};
