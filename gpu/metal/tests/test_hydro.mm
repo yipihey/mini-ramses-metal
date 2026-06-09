@@ -13,7 +13,7 @@
 #endif
 #include "../../ramses_metal.h"   // TWOTONDIM/NHVAR/SUBGRIDSIZE/Oct/HydroParams/UH/IDX3
 // mirrors HydroParams (ramses_metal.h): doubles narrowed to float, 8B-ordered.
-struct HP { float gamma,dt,dx,smallr,smallc,courant,fp_scale;
+struct HP { float gamma,dt,dx,smallr,smallc,courant,dual_energy,fp_scale;
             int slope,riemann,head,num,ngridmax,ilevel,levelmin,levelmax; };
 static_assert(sizeof(HP)==sizeof(HydroParams), "HP must match HydroParams layout");
 
@@ -69,14 +69,54 @@ static C hll(P L,P R,double g,bool llf){
            hllf(sl,sr,lf.e,rf.e,Lc.e,Rc.e) };
 }
 
-enum { S_LLF=1, S_HLL=2, S_HLLC=3 };
+static C twoshock(P L,P R,double g){
+  const double tiny=1e-20; L.r=fmax(L.r,1e-10);R.r=fmax(R.r,1e-10);L.p=fmax(L.p,tiny);R.p=fmax(R.p,tiny);
+  double qa=(g+1)/(2*g),gp1=g+1,cl=sqrt(g*L.p*L.r),cr=sqrt(g*R.p*R.r);
+  double ps=fmax((cr*L.p+cl*R.p+cr*cl*(L.u-R.u))/(cr+cl),tiny),old=ps,ubl=0,ubr=0,dl=0,dr=0;
+  bool conv=false; for(int n=2;n<=8&&!conv;n++){double zl=cl*sqrt(1+qa*(ps/L.p-1)),zr=cr*sqrt(1+qa*(ps/R.p-1));
+    ubl=L.u-(ps-L.p)/zl;ubr=R.u+(ps-R.p)/zr;
+    dl=-4*zl*zl*zl/L.r/(4*zl*zl/L.r-gp1*(ps-L.p));dr=4*zr*zr*zr/R.r/(4*zr*zr/R.r-gp1*(ps-R.p));
+    ps=fmax(ps+(ubr-ubl)*dr*dl/(dr-dl),tiny);double d=ps-old;old=ps;conv=fabs(d/ps)<1e-14;}
+  double ub=ubl+(ubr-ubl)*dr/(dr-dl),sn=(-ub>=0)?1:-1;P q=sn<0?L:R;
+  double c0=sqrt(fmax(g*q.p/q.r,tiny)),z0=c0*q.r*sqrt(fmax(1+qa*(ps/q.p-1),tiny));
+  double db=1/(1/q.r-(ps-q.p)/fmax(z0*z0,tiny)),cb=sqrt(fmax(g*ps/db,tiny));
+  double l0,lbar;if(ps<q.p){l0=q.u*sn+c0;lbar=sn*ub+cb;}else{l0=q.u*sn+z0/q.r;lbar=l0;}
+  double frac=fmin(fmax((0-lbar)/fmax(l0-lbar,tiny),0.0),1.0),pb=q.p*frac+ps*(1-frac),dv=q.r*frac+db*(1-frac),uv=q.u*frac+ub*(1-frac);
+  if(lbar>=0){pb=ps;dv=db;uv=ub;}if(l0<0){pb=q.p;dv=q.r;uv=q.u;}P up=uv>0?L:R;
+  double e=pb/(g-1)+0.5*dv*mag2(uv,up.v,up.w),mass=dv*uv;
+  return {mass,mass*uv+pb,mass*up.v,mass*up.w,(e+pb)*uv};
+}
+enum { S_LLF=1, S_HLL=2, S_HLLC=3, S_TWOSHOCK=10, S_LOCAL_PPM=10 };
 static C rdispatch(P a, P b, double g, int riemann){
   if(riemann==S_HLL)  return hll(a,b,g,false);
   if(riemann==S_HLLC) return hllc(a,b,g);
+  if(riemann==S_TWOSHOCK) return twoshock(a,b,g);
   return hll(a,b,g,true);  // LLF
 }
+static double mm3(double a,double b,double c){return(a*b<=0||a*c<=0)?0:copysign(fmin(fabs(a),fmin(fabs(b),fabs(c))),a);}
+static double mc(double l,double m,double r){return mm3(2*(m-l),2*(r-m),0.5*(r-l));}
+static void ppmono(double ql,double q0,double qr,double& lo,double& hi){double dq=qr-ql,d=(q0-0.5*(ql+qr))*dq;
+  if((qr-q0)*(q0-ql)<=0){lo=hi=q0;}else if(d>dq*dq/6){lo=3*q0-2*qr;hi=qr;}else if(d<-dq*dq/6){lo=ql;hi=3*q0-2*ql;}else{lo=ql;hi=qr;}}
+static void ppedges(double qm,double q0,double qp,double& ql,double& qr){double s=0.25*(qp-qm),c=(qm-2*q0+qp)/12;ppmono(q0-s+c,q0,q0+s+c,ql,qr);}
+static double ppavg(double ql,double qa,double qr,double lo,double hi){double b=-4*ql+6*qa-2*qr,c=3*(ql-2*qa+qr);return ql+0.5*b*(lo+hi)+c*(lo*lo+lo*hi+hi*hi)/3;}
+static void localtrace(P l,P m,P r,double g,double dtdx,P& qp,P& qm){
+  double dl,dr,ul,ur,vl,vr,wl,wr,pl,pr;ppedges(l.r,m.r,r.r,dl,dr);ppedges(l.u,m.u,r.u,ul,ur);
+  ppedges(l.v,m.v,r.v,vl,vr);ppedges(l.w,m.w,r.w,wl,wr);ppedges(l.p,m.p,r.p,pl,pr);
+  double cs=sqrt(g*fmax(m.p,1e-30)/fmax(m.r,1e-10)),base=fmin(l.p,r.p),eta=base>0?fabs(r.p-l.p)/base:1;
+  double comp=l.u>r.u?(l.u-r.u)/cs:0,alpha=l.u>r.u?fmax(fmin(fmax((eta-.05)/.45,0.0),1.0),fmin(fmax((comp-.1)/.9,0.0),1.0)):0;
+  auto blend=[&](double a,double b,double c,double& lo,double& hi){double s=mc(a,b,c);lo=(1-alpha)*lo+alpha*(b-.5*s);hi=(1-alpha)*hi+alpha*(b+.5*s);double x,y;ppmono(lo,b,hi,x,y);lo=x;hi=y;};
+  blend(l.r,m.r,r.r,dl,dr);blend(l.u,m.u,r.u,ul,ur);blend(l.v,m.v,r.v,vl,vr);blend(l.w,m.w,r.w,wl,wr);blend(l.p,m.p,r.p,pl,pr);
+  if(dl<=0||dr<=0)dl=dr=m.r;if(pl<=0||pr<=0)pl=pr=m.p;
+  for(int side=0;side<2;side++){bool right=side==0;double rg=right?dr:dl,ug=right?ur:ul,vg=right?vr:vl,wg=right?wr:wl,pg=right?pr:pl;
+    double od=0,ou=0,ov=0,ow=0,op=0,lam[3]={m.u-cs,m.u,m.u+cs};
+    for(int wave=0;wave<3;wave++){bool active=right?lam[wave]>0:lam[wave]<0;if(!active)continue;double sig=fmin(fabs(lam[wave])*dtdx,1.0),a=right?1-sig:0,b=right?1:sig;
+      double du=ppavg(ul,m.u,ur,a,b)-ug,dp=ppavg(pl,m.p,pr,a,b)-pg;
+      if(wave==0||wave==2){double amp=(wave==0?-m.r*du/(2*cs):m.r*du/(2*cs))+dp/(2*cs*cs);od+=amp;ou+=(wave==0?-cs/m.r:cs/m.r)*amp;op+=cs*cs*amp;}
+      else{od+=ppavg(dl,m.r,dr,a,b)-rg-dp/(cs*cs);ov+=ppavg(vl,m.v,vr,a,b)-vg;ow+=ppavg(wl,m.w,wr,a,b)-wg;}}
+    P q={rg+od,ug+ou,vg+ov,wg+ow,pg+op};if(q.r<=0||q.p<=0)q=m;if(right)qp=q;else qm=q;}}
 // host double replica of trace_cell_1d / godunov_oct_1d (the parity reference)
 static void trace1d(P l,P m,P r,double g,double dtdx,int slope,P& qL,P& qR){
+  if(slope==S_LOCAL_PPM){localtrace(l,m,r,g,dtdx,qL,qR);return;}
   double smallr=1e-10, smallp=1e-10*(1e-10*1e-10);
   P s={0.5*moncen(l.r,m.r,r.r,slope),0.5*moncen(l.u,m.u,r.u,slope),
        0.5*moncen(l.v,m.v,r.v,slope),0.5*moncen(l.w,m.w,r.w,slope),0.5*moncen(l.p,m.p,r.p,slope)};
@@ -102,6 +142,16 @@ static Tr trace3d(const P* sg,int i,int j,int k,double g,double dtdx,int slope){
   double smallr=1e-10, smallp=1e-10*(1e-10*1e-10);
   #define G(a,b,c) sg[(a)+6*(b)+36*(c)]
   P m=G(i,j,k);
+  if(slope==S_LOCAL_PPM){
+    Tr t;localtrace(G(i-1,j,k),m,G(i+1,j,k),g,dtdx,t.qLx,t.qRx);
+    P a={G(i,j-1,k).r,G(i,j-1,k).v,G(i,j-1,k).w,G(i,j-1,k).u,G(i,j-1,k).p};
+    P b={m.r,m.v,m.w,m.u,m.p},c={G(i,j+1,k).r,G(i,j+1,k).v,G(i,j+1,k).w,G(i,j+1,k).u,G(i,j+1,k).p},yp,yn;
+    localtrace(a,b,c,g,dtdx,yp,yn);t.qLy={yp.r,yp.w,yp.u,yp.v,yp.p};t.qRy={yn.r,yn.w,yn.u,yn.v,yn.p};
+    a={G(i,j,k-1).r,G(i,j,k-1).w,G(i,j,k-1).u,G(i,j,k-1).v,G(i,j,k-1).p};
+    b={m.r,m.w,m.u,m.v,m.p};c={G(i,j,k+1).r,G(i,j,k+1).w,G(i,j,k+1).u,G(i,j,k+1).v,G(i,j,k+1).p};
+    localtrace(a,b,c,g,dtdx,yp,yn);t.qLz={yp.r,yp.v,yp.w,yp.u,yp.p};t.qRz={yn.r,yn.v,yn.w,yn.u,yn.p};
+    return t;
+  }
   P sx={0.5*moncen(G(i-1,j,k).r,m.r,G(i+1,j,k).r,slope),0.5*moncen(G(i-1,j,k).u,m.u,G(i+1,j,k).u,slope),0.5*moncen(G(i-1,j,k).v,m.v,G(i+1,j,k).v,slope),0.5*moncen(G(i-1,j,k).w,m.w,G(i+1,j,k).w,slope),0.5*moncen(G(i-1,j,k).p,m.p,G(i+1,j,k).p,slope)};
   P sy={0.5*moncen(G(i,j-1,k).r,m.r,G(i,j+1,k).r,slope),0.5*moncen(G(i,j-1,k).u,m.u,G(i,j+1,k).u,slope),0.5*moncen(G(i,j-1,k).v,m.v,G(i,j+1,k).v,slope),0.5*moncen(G(i,j-1,k).w,m.w,G(i,j+1,k).w,slope),0.5*moncen(G(i,j-1,k).p,m.p,G(i,j+1,k).p,slope)};
   P sz={0.5*moncen(G(i,j,k-1).r,m.r,G(i,j,k+1).r,slope),0.5*moncen(G(i,j,k-1).u,m.u,G(i,j,k+1).u,slope),0.5*moncen(G(i,j,k-1).v,m.v,G(i,j,k+1).v,slope),0.5*moncen(G(i,j,k-1).w,m.w,G(i,j,k+1).w,slope),0.5*moncen(G(i,j,k-1).p,m.p,G(i,j,k+1).p,slope)};
@@ -123,6 +173,15 @@ static C cad(C a,C b){ return {a.d+b.d,a.mx+b.mx,a.my+b.my,a.mz+b.mz,a.e+b.e}; }
 static C fx_(P L,P R,double g,int riem){ return rdispatch(L,R,g,riem); }
 static C fy_(P L,P R,double g,int riem){ P Lr={L.r,L.v,L.w,L.u,L.p},Rr={R.r,R.v,R.w,R.u,R.p}; C f=rdispatch(Lr,Rr,g,riem); return {f.d,f.mz,f.mx,f.my,f.e}; }
 static C fz_(P L,P R,double g,int riem){ P Lr={L.r,L.w,L.u,L.v,L.p},Rr={R.r,R.w,R.u,R.v,R.p}; C f=rdispatch(Lr,Rr,g,riem); return {f.d,f.my,f.mz,f.mx,f.e}; }
+static void expand2(const P* sg2,P* sg3){for(int k=0;k<6;k++)for(int j=0;j<6;j++)for(int i=0;i<6;i++)sg3[i+6*j+36*k]=sg2[i+6*j];}
+static void god2d(const P* sg,double g,double dtdx,int slope,int riem,C du[4]){
+  P s3[216];expand2(sg,s3);
+  for(int cj=0;cj<2;cj++)for(int ci=0;ci<2;ci++){int I=ci+2,J=cj+2,K=2;
+    C fxl=fx_(trace3d(s3,I-1,J,K,g,dtdx,slope).qLx,trace3d(s3,I,J,K,g,dtdx,slope).qRx,g,riem);
+    C fxr=fx_(trace3d(s3,I,J,K,g,dtdx,slope).qLx,trace3d(s3,I+1,J,K,g,dtdx,slope).qRx,g,riem);
+    C fyl=fy_(trace3d(s3,I,J-1,K,g,dtdx,slope).qLy,trace3d(s3,I,J,K,g,dtdx,slope).qRy,g,riem);
+    C fyr=fy_(trace3d(s3,I,J,K,g,dtdx,slope).qLy,trace3d(s3,I,J+1,K,g,dtdx,slope).qRy,g,riem);
+    du[ci+2*cj]=cad(cdf(fxl,fxr,dtdx),cdf(fyl,fyr,dtdx));}}
 static void god3d(const P* sg,double g,double dtdx,int slope,int riem,C du[8]){
   for(int ck=0;ck<2;ck++)for(int cj=0;cj<2;cj++)for(int ci=0;ci<2;ci++){
     int I=ci+2,J=cj+2,K=ck+2;
@@ -143,6 +202,15 @@ static void god1d_amr(P sg[6], bool ref[6], double g,double dtdx,int slope,int r
   for(int a=0;a<3;++a){ fx[a]=rdispatch(qL[a],qR[a+1],g,riem); if(ref[a+1]||ref[a+2]) fx[a]=C{0,0,0,0,0}; }
   du[0]=cdf(fx[0],fx[1],dtdx); du[1]=cdf(fx[1],fx[2],dtdx);
   bnd[0]=fx[0]; bnd[1]=fx[2];
+}
+static void god2d_amr(const P* sg,const bool* ref,double g,double dtdx,int slope,int riem,C du[4],C bnd[4]){
+  P s3[216];expand2(sg,s3);C fx[3][2],fy[2][3];int K=2;
+  for(int cj=0;cj<2;cj++){int J=cj+2;for(int a=0;a<3;a++){C f=fx_(trace3d(s3,a+1,J,K,g,dtdx,slope).qLx,trace3d(s3,a+2,J,K,g,dtdx,slope).qRx,g,riem);
+    if(ref[(a+1)+6*J]||ref[(a+2)+6*J])f=C{0,0,0,0,0};fx[a][cj]=f;}}
+  for(int ci=0;ci<2;ci++){int I=ci+2;for(int b=0;b<3;b++){C f=fy_(trace3d(s3,I,b+1,K,g,dtdx,slope).qLy,trace3d(s3,I,b+2,K,g,dtdx,slope).qRy,g,riem);
+    if(ref[I+6*(b+1)]||ref[I+6*(b+2)])f=C{0,0,0,0,0};fy[ci][b]=f;}}
+  for(int cj=0;cj<2;cj++)for(int ci=0;ci<2;ci++)du[ci+2*cj]=cad(cdf(fx[ci][cj],fx[ci+1][cj],dtdx),cdf(fy[ci][cj],fy[ci][cj+1],dtdx));
+  bnd[0]=cad(fx[0][0],fx[0][1]);bnd[1]=cad(fx[2][0],fx[2][1]);bnd[2]=cad(fy[0][0],fy[1][0]);bnd[3]=cad(fy[0][2],fy[1][2]);
 }
 static void god3d_amr(const P* sg, const bool* ref, double g,double dtdx,int slope,int riem, C du[8], C bnd[6]){
   #define RI(a,b,c) ((a)+6*(b)+36*(c))
@@ -264,6 +332,10 @@ int main(int argc, char** argv) {
         // smooth ramp with transverse velocity (moncen, HLL) — exercises slopes + advection
         { P sg[6]; for(int c=0;c<6;c++){ double x=c; sg[c]={1.0+0.1*x, 0.2, 0.3, -0.1, 1.0+0.05*x}; }
           cmp_god("rampHLL", sg, 1.4, 0.15, 2, S_HLL); }
+        // compact one-ghost PPM + characteristic trace + two-shock flux
+        { P sg[6]; for(int c=0;c<6;c++){ double x=c-2.5;
+            sg[c]={1.0+0.08*sin(0.7*x),0.25+0.04*cos(0.5*x),0.1,-0.06,1.0+0.05*sin(0.9*x)}; }
+          cmp_god("localPPM", sg, 1.4, 0.12, S_LOCAL_PPM, S_TWOSHOCK); }
         // uniform state -> zero update (LLF)
         { P sg[6]; for(int c=0;c<6;c++) sg[c]={1.3,0.4,-0.2,0.1,0.9};
           float gpu[10]; run_god1d(sg,1.4,0.2,2,S_LLF,gpu);
@@ -292,6 +364,16 @@ int main(int argc, char** argv) {
           double ref[40]; for(int n=0;n<8;n++){ ref[n*5]=du[n].d;ref[n*5+1]=du[n].mx;ref[n*5+2]=du[n].my;ref[n*5+3]=du[n].mz;ref[n*5+4]=du[n].e; }
           const char* vn[5]={"d","mx","my","mz","e"};
           for(int n=0;n<8;n++)for(int vv=0;vv<5;vv++){ char b[40]; snprintf(b,sizeof b,"g3d.c%d.%s",n,vn[vv]); chk(b,gpu[n*5+vv],ref[n*5+vv],RF); } }
+        // rotated Local PPM traces in all three directions
+        { P sg[216];
+          for(int k=0;k<6;k++)for(int j=0;j<6;j++)for(int i=0;i<6;i++){
+            double x=i-2.5,y=j-2.5,z=k-2.5;
+            sg[i+6*j+36*k]={1.0+0.03*x+0.02*sin(y),0.15+0.02*y,-0.08+0.015*z,0.04+0.01*x,
+                             0.9+0.025*z+0.01*cos(x)}; }
+          float gpu[40]; run_god3d(sg,1.4,0.08,S_LOCAL_PPM,S_TWOSHOCK,gpu);
+          C du[8]; god3d(sg,1.4,0.08,S_LOCAL_PPM,S_TWOSHOCK,du);
+          double ref[40]; for(int n=0;n<8;n++){ref[n*5]=du[n].d;ref[n*5+1]=du[n].mx;ref[n*5+2]=du[n].my;ref[n*5+3]=du[n].mz;ref[n*5+4]=du[n].e;}
+          for(int i=0;i<40;i++){char b[40];snprintf(b,sizeof b,"g3d.local.%d",i);chk(b,gpu[i],ref[i],2e-4);} }
         // 3D uniform -> zero update
         { P sg[216]; for(int c=0;c<216;c++) sg[c]={1.1,0.3,-0.2,0.15,0.7};
           float gpu[40]; run_god3d(sg,1.4,0.2,2,S_HLLC,gpu);
@@ -318,13 +400,13 @@ int main(int argc, char** argv) {
             center_cube += 9;
 #endif
             const int center = center_cube + 1;
-            const int mxcube = (NDIM==1) ? 0 : 12;   // -x neighbour cube slot (0-based)
+            const int mxcube = (NDIM==1) ? 0 : (NDIM==2 ? 3 : 12);
 
             double gam=1.4, dt=0.1, dx=0.5, dtdx=dt/dx, halfdt=0.5*dt; float fp=(float)(1<<20);
-            int slope=2, riem=S_HLLC;
+            int slope=S_LOCAL_PPM, riem=S_TWOSHOCK;
             auto genprim=[&](int o,int c)->P{ return { 1.0+0.05*o+0.01*c, 0.1*o-0.05*c,
                                                        0.02*o, -0.03*c, 0.8+0.03*o+0.02*c }; };
-            auto genfg=[&](int o,int c,int d)->double{ return d==1?0.01*o:d==2?-0.02*c:0.005*(o+c); };
+            auto genfg=[&](int o,int c,int d)->double{ if(d>NDIM)return 0.0; return d==1?0.01*o:d==2?-0.02*c:0.005*(o+c); };
             auto loadp=[&](int o,int c)->P{ P qq=genprim(o,c);
                 qq.u+=genfg(o,c,1)*halfdt; qq.v+=genfg(o,c,2)*halfdt; qq.w+=genfg(o,c,3)*halfdt; return qq; };
 
@@ -385,6 +467,10 @@ int main(int argc, char** argv) {
             auto build=[&](bool mxCache, P sg[6], bool ref[6]){ for(int sx=0;sx<6;++sx){
                 int cube=sx/2; int o=(mxCache&&cube==mxcube)?CACHE:cube+1;
                 sg[sx]=loadp(o,1+(sx&1)); ref[sx]=false; } };
+#elif NDIM==2
+            auto build=[&](bool mxCache,P sg[36],bool ref[36]){for(int sy=0;sy<6;sy++)for(int sx=0;sx<6;sx++){
+                int cube=(sx/2)+3*(sy/2),o=(mxCache&&cube==mxcube)?CACHE:cube+1;
+                sg[sx+6*sy]=loadp(o,1+(sx&1)+2*(sy&1));ref[sx+6*sy]=false;}};
 #else
             auto build=[&](bool mxCache, P sg[216], bool ref[216]){
                 for(int sz=0;sz<6;++sz)for(int sy=0;sy<6;++sy)for(int sx=0;sx<6;++sx){
@@ -395,6 +481,8 @@ int main(int argc, char** argv) {
             setNB(false); dispatch();
 #if NDIM==1
             { P sg[6]; bool ref[6]; build(false,sg,ref); C du[2],bnd[2]; god1d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd); compdu("gint",du); }
+#elif NDIM==2
+            { P sg[36];bool ref[36];build(false,sg,ref);C du[4],bnd[4];god2d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd);compdu("gint",du); }
 #else
             { P sg[216]; bool ref[216]; build(false,sg,ref); C du[8],bnd[6]; god3d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd); compdu("gint",du); }
 #endif
@@ -403,6 +491,8 @@ int main(int argc, char** argv) {
                 int src = mxcube+1;                 // real oct in the -x slot
 #if NDIM==1
                 int rc=2, ridx=1;                   // sx=1 -> cell 2, subgrid idx 1
+#elif NDIM==2
+                int rc=2,ridx=1+6*2;
 #else
                 int rc=2, ridx=1+6*2+36*2;          // (sx=1,sy=2,sz=2) -> cell 2, idx 85
 #endif
@@ -410,6 +500,8 @@ int main(int argc, char** argv) {
                 setNB(false); dispatch();
 #if NDIM==1
                 { P sg[6]; bool ref[6]; build(false,sg,ref); ref[ridx]=true; C du[2],bnd[2]; god1d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd); compdu("gintR",du); }
+#elif NDIM==2
+                { P sg[36];bool ref[36];build(false,sg,ref);ref[ridx]=true;C du[4],bnd[4];god2d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd);compdu("gintR",du); }
 #else
                 { P sg[216]; bool ref[216]; build(false,sg,ref); ref[ridx]=true; C du[8],bnd[6]; god3d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd); compdu("gintR",du); }
 #endif
@@ -421,6 +513,8 @@ int main(int argc, char** argv) {
                 double w = dtdx/(double)TWOTONDIM;
 #if NDIM==1
                 P sg[6]; bool ref[6]; build(true,sg,ref); C du[2],bnd[2]; god1d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd);
+#elif NDIM==2
+                P sg[36];bool ref[36];build(true,sg,ref);C du[4],bnd[4];god2d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd);
 #else
                 P sg[216]; bool ref[216]; build(true,sg,ref); C du[8],bnd[6]; god3d_amr(sg,ref,gam,dtdx,slope,riem,du,bnd);
 #endif
@@ -503,7 +597,7 @@ int main(int argc, char** argv) {
             auto UHc=[&](int c,int v,int o){ return ((o-1)*NHVAR+(v-1))*TWOTONDIM+(c-1); };
             auto IDX3c=[&](int c,int d,int o){ return ((o-1)*3+(d-1))*TWOTONDIM+(c-1); };
             auto gp=[&](int o,int c)->P{ return {1.0+0.1*o+0.02*c, 0.2*o-0.1*c, 0.05*o, -0.04*c, 0.9+0.05*o+0.03*c}; };
-            auto gf=[&](int o,int c,int d)->double{ return d==1?0.3*o:d==2?-0.2*c:0.1*(o-c); };
+            auto gf=[&](int o,int c,int d)->double{ if(d>NDIM)return 0.0; return d==1?0.3*o:d==2?-0.2*c:0.1*(o-c); };
             for(int o=1;o<=no;++o)for(int c=1;c<=TWOTONDIM;++c){ P qq=gp(o,c); C cc=p2c(qq,gam);
                 Uo[UHc(c,1,o)]=cc.d;Uo[UHc(c,2,o)]=cc.mx;Uo[UHc(c,3,o)]=cc.my;Uo[UHc(c,4,o)]=cc.mz;Uo[UHc(c,5,o)]=cc.e;
                 // unew starts from a DIFFERENT (post-godunov-like) state so rho_new!=rho_old
@@ -538,7 +632,7 @@ int main(int argc, char** argv) {
             auto UHc=[&](int c,int v,int o){ return ((o-1)*NHVAR+(v-1))*TWOTONDIM+(c-1); };
             auto IDX3c=[&](int c,int d,int o){ return ((o-1)*3+(d-1))*TWOTONDIM+(c-1); };
             auto gp=[&](int o,int c)->P{ return {1.0+0.1*o+0.02*c, 0.2*o-0.1*c, 0.05*o, -0.04*c, 0.9+0.05*o+0.03*c}; };
-            auto gf=[&](int o,int c,int d)->double{ return d==1?0.3*o:d==2?-0.2*c:0.1*(o-c); };
+            auto gf=[&](int o,int c,int d)->double{ if(d>NDIM)return 0.0; return d==1?0.3*o:d==2?-0.2*c:0.1*(o-c); };
             for(int o=1;o<=no;++o)for(int c=1;c<=TWOTONDIM;++c){ P qq=gp(o,c); C co=p2c(qq,gam);
                 Uo[UHc(c,1,o)]=co.d;
                 P qn={qq.r*1.1, qq.u*0.9, qq.v, qq.w, qq.p*1.05}; C cn=p2c(qn,gam);
@@ -573,7 +667,7 @@ int main(int argc, char** argv) {
             auto UHc=[&](int c,int v,int o){ return ((o-1)*NHVAR+(v-1))*TWOTONDIM+(c-1); };
             auto IDX3c=[&](int c,int d,int o){ return ((o-1)*3+(d-1))*TWOTONDIM+(c-1); };
             auto gp=[&](int o,int c)->P{ return {0.5+0.2*o+0.05*c, 0.3*o, -0.1*c, 0.05, 0.6+0.1*o+0.04*c}; };
-            auto gf=[&](int o,int c,int d)->double{ return d==1?0.2*o:d==2?0.05*c:0.0; };
+            auto gf=[&](int o,int c,int d)->double{ if(d>NDIM)return 0.0; return d==1?0.2*o:d==2?0.05*c:0.0; };
             memset(G,0,(size_t)no*sizeof(Oct));
             G[1].refined[0]=1;   // oct 2 cell 1 refined -> skipped
             for(int o=1;o<=no;++o)for(int c=1;c<=TWOTONDIM;++c){ P qq=gp(o,c); C cc=p2c(qq,gam);

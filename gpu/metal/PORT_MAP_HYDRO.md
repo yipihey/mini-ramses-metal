@@ -15,7 +15,10 @@ wired — see the hydro test `RamsesNG.jl/.../test/hydro_sedov.jl`).
 
 ## The scheme (confirmed)
 Second-order **unsplit MUSCL-Hancock**, **HLLC** Riemann solver (LLF/HLL also
-available), slope limiters 0=1st-order / 1=minmod / 2=moncen. EOS: ideal gas,
+available), slope limiters 0=1st-order / 1=minmod / 2=moncen. The Metal path
+also supports the compact one-ghost **Local PPM** characteristic trace with
+`slope_type=10` and the matching two-shock solver with `riemann='twoshock'`
+(solver id 10). EOS: ideal gas,
 `gamma=1.4` default. Conservative state `uold/unew(twotondim, nvar, noct)`,
 variable order `nvar = [ρ, ρu_x, ρu_y, ρu_z, E]` (= 5; +nener/passive scalars
 deferred). Per-oct stencil = the oct's 2×2×2 cells + a 2-cell halo gathered from
@@ -36,7 +39,10 @@ Device math (pure, fp32, unit-testable in isolation):
 - [x] magnitude_squared, compute_pressure/energy, sound_speed           → hydro.h
 - [x] slope_minmod, slope_moncen                                        → hydro.h
 - [x] conserved_2_primitive, primitive_2_conserved                      → hydro.h
-- [x] hll_flux, hll_fluxes, hllc_fluxes, riemann_fluxes                 → hydro.h
+- [x] hll_flux, hll_fluxes, hllc_fluxes, twoshock_fluxes, riemann_fluxes → hydro.h
+- [x] local_ppm_trace (3-cell parabolic reconstruction, shock blend,
+      characteristic time trace; one ghost cell in every direction)     → hydro.h
+- [x] native 1D/2D/3D Local PPM Godunov and AMR reflux paths            → hydro.h/hydro.metal
 Simple whole-array kernels:
 - [x] set_unew_kernel, set_uold_kernel  (uold<->unew copy)              → hydro.metal
 - [x] upload_kernel       (restriction: avg 8 children -> parent cell)  → hydro.metal
@@ -90,4 +96,5 @@ input, check vs a host double-precision replica of the SAME formula or an analyt
 value) — NO full RAMSES runs to infer correctness. End-to-end parity comes from
 the C-API Sedov/tube diff (CPU lib vs Metal lib) once the pipeline is assembled.
 - [x] test_hydro: EOS round-trip, HLL/HLLC/LLF vs host-double replica +
-      identical-state→physical-flux, slope limiters, set_unew/set_uold copy.
+      identical-state→physical-flux, slope limiters, Local PPM+two-shock
+      1D/2D/3D updates, AMR flux zeroing/reflux, set_unew/set_uold copy.

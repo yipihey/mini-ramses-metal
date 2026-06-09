@@ -299,6 +299,10 @@ typedef struct {
 #define SOLVER_LLF  1
 #define SOLVER_HLL  2
 #define SOLVER_HLLC 3
+#define SOLVER_TWOSHOCK 10
+
+// Compact one-ghost PPM reconstruction + characteristic trace.
+#define SLOPE_LOCAL_PPM 10
 
 // Per-level hydro launch params (mirrors the `value` args of the CUDA kernels).
 // All reals fp32 (Metal has no double); the bridge narrows the Fortran doubles.
@@ -311,8 +315,8 @@ typedef struct {
     float courant_factor;  // CFL number (0.5)
     float dual_energy;     // entropy/dual-energy switch (>=0 enables P_s recovery in cold flow; <0 off)
     float fp_scale;        // 2^FP_SHIFT for the reproducible coarse-fine reflux atomics
-    int   slope_type;      // 0=1st order, 1=minmod, 2=moncen
-    int   riemann;         // SOLVER_LLF / SOLVER_HLL / SOLVER_HLLC
+    int   slope_type;      // 0=1st order, 1=minmod, 2=moncen, 10=Local PPM
+    int   riemann;         // SOLVER_LLF / SOLVER_HLL / SOLVER_HLLC / SOLVER_TWOSHOCK
     int   head_idx;        // 1-based first oct of this level
     int   num_octs;        // octs at this level
     int   ngridmax;        // real-oct bound (cache/ghost octs are beyond)

@@ -250,12 +250,149 @@ inline HConserved hllc_fluxes(thread HPrimitive& L, thread HPrimitive& R, float 
     return flux;
 }
 
+// van Leer two-shock solver used by the Local PPM reference implementation.
+inline HConserved twoshock_fluxes(thread HPrimitive& L, thread HPrimitive& R, float gamma) {
+    const float tiny = 1e-20f;
+    L.density=max(L.density,1e-10f); R.density=max(R.density,1e-10f);
+    L.pressure=max(L.pressure,tiny); R.pressure=max(R.pressure,tiny);
+    float qa=(gamma+1.0f)/(2.0f*gamma), gp1=gamma+1.0f;
+    float cl=sqrt(gamma*L.pressure*L.density), cr=sqrt(gamma*R.pressure*R.density);
+    float ps=max((cr*L.pressure+cl*R.pressure+cr*cl*(L.velocity_x-R.velocity_x))/(cr+cl),tiny);
+    float old_ps=ps, ubl=0.0f, ubr=0.0f, dpdul=0.0f, dpdur=0.0f;
+    bool converged=false;
+    for(int n=2;n<=8;++n) if(!converged) {
+        float zl=cl*sqrt(1.0f+qa*(ps/L.pressure-1.0f));
+        float zr=cr*sqrt(1.0f+qa*(ps/R.pressure-1.0f));
+        ubl=L.velocity_x-(ps-L.pressure)/zl;
+        ubr=R.velocity_x+(ps-R.pressure)/zr;
+        dpdul=-4.0f*zl*zl*zl/L.density/(4.0f*zl*zl/L.density-gp1*(ps-L.pressure));
+        dpdur= 4.0f*zr*zr*zr/R.density/(4.0f*zr*zr/R.density-gp1*(ps-R.pressure));
+        ps=max(ps+(ubr-ubl)*dpdur*dpdul/(dpdur-dpdul),tiny);
+        float delta=ps-old_ps; old_ps=ps;
+        converged=abs(delta/ps)<1e-7f;
+    }
+    float pbar=ps;
+    float ubar=ubl+(ubr-ubl)*dpdur/(dpdur-dpdul);
+    float sn=(-ubar>=0.0f)?1.0f:-1.0f;
+    HPrimitive q0=sn<0.0f?L:R;
+    float c0=sqrt(max(gamma*q0.pressure/q0.density,tiny));
+    float z0=c0*q0.density*sqrt(max(1.0f+qa*(pbar/q0.pressure-1.0f),tiny));
+    float dbar=1.0f/(1.0f/q0.density-(pbar-q0.pressure)/max(z0*z0,tiny));
+    float cbar=sqrt(max(gamma*pbar/dbar,tiny));
+    float l0, lbar;
+    if(pbar<q0.pressure) { l0=q0.velocity_x*sn+c0; lbar=sn*ubar+cbar; }
+    else { l0=q0.velocity_x*sn+z0/q0.density; lbar=l0; }
+    float width=max(l0-lbar,tiny);
+    float frac=clamp((0.0f-lbar)/width,0.0f,1.0f);
+    float pbv=q0.pressure*frac+pbar*(1.0f-frac);
+    float dbv=q0.density*frac+dbar*(1.0f-frac);
+    float ubv=q0.velocity_x*frac+ubar*(1.0f-frac);
+    if(lbar>=0.0f){pbv=pbar;dbv=dbar;ubv=ubar;}
+    if(l0<0.0f){pbv=q0.pressure;dbv=q0.density;ubv=q0.velocity_x;}
+    HPrimitive up=ubv>0.0f?L:R;
+    float etot=pbv/(gamma-1.0f)+0.5f*dbv*magnitude_squared(ubv,up.velocity_y,up.velocity_z);
+    HConserved flux;
+    flux.density=dbv*ubv;
+    flux.momentum_x=flux.density*ubv+pbv;
+    flux.momentum_y=flux.density*up.velocity_y;
+    flux.momentum_z=flux.density*up.velocity_z;
+    flux.energy=(etot+pbv)*ubv;
+#if NHVAR > 5
+    flux.scalar=flux.density*up.scalar;
+#endif
+    return flux;
+}
+
 // Dispatch (:782).  Unknown -> LLF, as in CUDA.
 inline HConserved riemann_fluxes(thread HPrimitive& L, thread HPrimitive& R,
                                  float gamma, int riemann) {
     if (riemann == SOLVER_HLL)       return hll_fluxes(L, R, gamma, false);
     else if (riemann == SOLVER_HLLC) return hllc_fluxes(L, R, gamma);
+    else if (riemann == SOLVER_TWOSHOCK) return twoshock_fluxes(L, R, gamma);
     else                             return hll_fluxes(L, R, gamma, true);  // LLF
+}
+
+inline float local_ppm_minmod3(float a,float b,float c) {
+    return (a*b<=0.0f||a*c<=0.0f)?0.0f:copysign(min(abs(a),min(abs(b),abs(c))),a);
+}
+inline float local_ppm_mc(float l,float m,float r) {
+    return local_ppm_minmod3(2.0f*(m-l),2.0f*(r-m),0.5f*(r-l));
+}
+inline void local_ppm_monotonize(float ql,float q0,float qr,thread float& lo,thread float& hi) {
+    float dq=qr-ql, diff=(q0-0.5f*(ql+qr))*dq;
+    if((qr-q0)*(q0-ql)<=0.0f){lo=q0;hi=q0;}
+    else if(diff>dq*dq/6.0f){lo=3.0f*q0-2.0f*qr;hi=qr;}
+    else if(diff<-dq*dq/6.0f){lo=ql;hi=3.0f*q0-2.0f*ql;}
+    else {lo=ql;hi=qr;}
+}
+inline void local_ppm_edges(float qm,float q0,float qp,thread float& ql,thread float& qr) {
+    float slope=0.25f*(qp-qm), curve=(qm-2.0f*q0+qp)/12.0f;
+    local_ppm_monotonize(q0-slope+curve,q0,q0+slope+curve,ql,qr);
+}
+inline float local_ppm_avg(float ql,float qa,float qr,float lo,float hi) {
+    float b=-4.0f*ql+6.0f*qa-2.0f*qr, c=3.0f*(ql-2.0f*qa+qr);
+    return ql+0.5f*b*(lo+hi)+c*(lo*lo+lo*hi+hi*hi)/3.0f;
+}
+
+// Compact three-cell PPM reconstruction followed by characteristic tracing.
+// qplus is the cell's +x face and qminus its -x face.
+inline void local_ppm_trace(HPrimitive l,HPrimitive m,HPrimitive r,float gamma,float dtdx,
+                            thread HPrimitive& qplus,thread HPrimitive& qminus) {
+    const float smallr=1e-10f, smallp=1e-30f;
+    float dl,dr,ul,ur,vl,vr,wl,wr,pl,pr;
+    local_ppm_edges(l.density,m.density,r.density,dl,dr);
+    local_ppm_edges(l.velocity_x,m.velocity_x,r.velocity_x,ul,ur);
+    local_ppm_edges(l.velocity_y,m.velocity_y,r.velocity_y,vl,vr);
+    local_ppm_edges(l.velocity_z,m.velocity_z,r.velocity_z,wl,wr);
+    local_ppm_edges(l.pressure,m.pressure,r.pressure,pl,pr);
+    float pbase=min(l.pressure,r.pressure);
+    float etap=pbase>0.0f?abs(r.pressure-l.pressure)/pbase:1.0f;
+    float cs=sqrt(gamma*max(m.pressure,smallp)/max(m.density,smallr));
+    float comp=l.velocity_x>r.velocity_x?(l.velocity_x-r.velocity_x)/cs:0.0f;
+    float alpha=l.velocity_x>r.velocity_x?max(clamp((etap-0.05f)/0.45f,0.0f,1.0f),
+                                              clamp((comp-0.1f)/0.9f,0.0f,1.0f)):0.0f;
+    #define BLEND_EDGES(field,lo,hi) { float s=local_ppm_mc(l.field,m.field,r.field); \
+        lo=(1.0f-alpha)*lo+alpha*(m.field-0.5f*s); hi=(1.0f-alpha)*hi+alpha*(m.field+0.5f*s); \
+        float a,b; local_ppm_monotonize(lo,m.field,hi,a,b); lo=a;hi=b; }
+    BLEND_EDGES(density,dl,dr) BLEND_EDGES(velocity_x,ul,ur)
+    BLEND_EDGES(velocity_y,vl,vr) BLEND_EDGES(velocity_z,wl,wr)
+    BLEND_EDGES(pressure,pl,pr)
+    #undef BLEND_EDGES
+    if(dl<=0.0f||dr<=0.0f){dl=m.density;dr=m.density;}
+    if(pl<=0.0f||pr<=0.0f){pl=m.pressure;pr=m.pressure;}
+    dl=max(dl,smallr);dr=max(dr,smallr);pl=max(pl,smallp);pr=max(pr,smallp);
+
+    for(int side=0;side<2;++side) {
+        bool right=side==0;
+        float rg=right?dr:dl, ug=right?ur:ul, vg=right?vr:vl, wg=right?wr:wl, pg=right?pr:pl;
+        float od=0.0f,ou=0.0f,ov=0.0f,ow=0.0f,op=0.0f;
+        float lambda[3]={m.velocity_x-cs,m.velocity_x,m.velocity_x+cs};
+        for(int wave=0;wave<3;++wave) {
+            bool active=right?(lambda[wave]>0.0f):(lambda[wave]<0.0f);
+            if(!active) continue;
+            float sigma=min(abs(lambda[wave])*dtdx,1.0f), a=right?1.0f-sigma:0.0f, b=right?1.0f:sigma;
+            float du=local_ppm_avg(ul,m.velocity_x,ur,a,b)-ug;
+            float dp=local_ppm_avg(pl,m.pressure,pr,a,b)-pg;
+            if(wave==0||wave==2) {
+                float amp=(wave==0?-m.density*du/(2.0f*cs):m.density*du/(2.0f*cs))+dp/(2.0f*cs*cs);
+                od+=amp;ou+=(wave==0?-cs/m.density:cs/m.density)*amp;op+=cs*cs*amp;
+            } else {
+                od+=local_ppm_avg(dl,m.density,dr,a,b)-rg-dp/(cs*cs);
+                ov+=local_ppm_avg(vl,m.velocity_y,vr,a,b)-vg;
+                ow+=local_ppm_avg(wl,m.velocity_z,wr,a,b)-wg;
+            }
+        }
+        HPrimitive q={rg+od,ug+ou,vg+ov,wg+ow,pg+op};
+        if(q.density<=0.0f||q.pressure<=0.0f) q=m;
+#if NHVAR > 5
+        float sl,sr; local_ppm_edges(l.scalar,m.scalar,r.scalar,sl,sr);
+        float geom=right?sr:sl, lam=m.velocity_x;
+        bool active=right?(lam>0.0f):(lam<0.0f);
+        if(active){float sig=min(abs(lam)*dtdx,1.0f);q.scalar=local_ppm_avg(sl,m.scalar,sr,right?1.0f-sig:0.0f,right?1.0f:sig);}
+        else q.scalar=geom;
+#endif
+        if(right) qplus=q; else qminus=q;
+    }
 }
 
 //----------------------------------------------------------------------------
@@ -273,6 +410,10 @@ inline HConserved riemann_fluxes(thread HPrimitive& L, thread HPrimitive& R,
 inline void trace_cell_1d(HPrimitive l, HPrimitive m, HPrimitive r,
                           float gamma, float dtdx, int slope,
                           thread HPrimitive& qL, thread HPrimitive& qR) {
+    if(slope==SLOPE_LOCAL_PPM) {
+        local_ppm_trace(l,m,r,gamma,dtdx,qL,qR);
+        return;
+    }
     const float smallr = 1e-10f;
     const float smallp = 1e-10f * (1e-10f * 1e-10f);   // smallr*smallc_squared (trace_3d:417)
 
@@ -366,6 +507,7 @@ inline void godunov_oct_1d(thread const HPrimitive sg[6], float gamma, float dtd
 // velocity triple (the riemann_driver permutation, gpu_hydro.cuf:858-909).
 //----------------------------------------------------------------------------
 struct HTrace { HPrimitive qLx, qRx, qLy, qRy, qLz, qRz; };
+struct HTrace2 { HPrimitive qLx, qRx, qLy, qRy; };
 
 inline HPrimitive hp_add(HPrimitive a, HPrimitive b, float s) {   // a + s*b
     HPrimitive r;
@@ -378,12 +520,83 @@ inline HPrimitive hp_add(HPrimitive a, HPrimitive b, float s) {   // a + s*b
     return r;
 }
 
+inline HTrace2 trace_cell_2d(thread const HPrimitive sg[36], int i, int j,
+                             float gamma, float dtdx, int slope) {
+    #define SG2(a,b) sg[(a)+6*(b)]
+    HPrimitive m=SG2(i,j);
+    if(slope==SLOPE_LOCAL_PPM) {
+        HTrace2 t;
+        local_ppm_trace(SG2(i-1,j),m,SG2(i+1,j),gamma,dtdx,t.qLx,t.qRx);
+        HPrimitive l={SG2(i,j-1).density,SG2(i,j-1).velocity_y,SG2(i,j-1).velocity_z,SG2(i,j-1).velocity_x,SG2(i,j-1).pressure};
+        HPrimitive c={m.density,m.velocity_y,m.velocity_z,m.velocity_x,m.pressure};
+        HPrimitive r={SG2(i,j+1).density,SG2(i,j+1).velocity_y,SG2(i,j+1).velocity_z,SG2(i,j+1).velocity_x,SG2(i,j+1).pressure};
+#if NHVAR > 5
+        l.scalar=SG2(i,j-1).scalar;c.scalar=m.scalar;r.scalar=SG2(i,j+1).scalar;
+#endif
+        HPrimitive p,n;local_ppm_trace(l,c,r,gamma,dtdx,p,n);
+        t.qLy={p.density,p.velocity_z,p.velocity_x,p.velocity_y,p.pressure};
+        t.qRy={n.density,n.velocity_z,n.velocity_x,n.velocity_y,n.pressure};
+#if NHVAR > 5
+        t.qLy.scalar=p.scalar;t.qRy.scalar=n.scalar;
+#endif
+        return t;
+    }
+    const float smallr=1e-10f,smallp=1e-30f;
+    HPrimitive sx,sy;
+    #define SLOPE2(field) sx.field=0.5f*slope_moncen(SG2(i-1,j).field,m.field,SG2(i+1,j).field,slope); \
+                          sy.field=0.5f*slope_moncen(SG2(i,j-1).field,m.field,SG2(i,j+1).field,slope)
+    SLOPE2(density);SLOPE2(velocity_x);SLOPE2(velocity_y);SLOPE2(velocity_z);SLOPE2(pressure);
+#if NHVAR > 5
+    SLOPE2(scalar);
+#endif
+    #undef SLOPE2
+    float divu=sx.velocity_x+sy.velocity_y;
+    HPrimitive src;
+    src.density=-m.velocity_x*sx.density-m.velocity_y*sy.density-divu*m.density;
+    src.velocity_x=-m.velocity_x*sx.velocity_x-m.velocity_y*sy.velocity_x-sx.pressure/m.density;
+    src.velocity_y=-m.velocity_x*sx.velocity_y-m.velocity_y*sy.velocity_y-sy.pressure/m.density;
+    src.velocity_z=-m.velocity_x*sx.velocity_z-m.velocity_y*sy.velocity_z;
+    src.pressure=-m.velocity_x*sx.pressure-m.velocity_y*sy.pressure-divu*gamma*m.pressure;
+#if NHVAR > 5
+    src.scalar=-m.velocity_x*sx.scalar-m.velocity_y*sy.scalar;
+#endif
+    HPrimitive p=hp_add(m,src,dtdx);HTrace2 t;
+    t.qLx=hp_add(p,sx,1);t.qRx=hp_add(p,sx,-1);t.qLy=hp_add(p,sy,1);t.qRy=hp_add(p,sy,-1);
+    thread HPrimitive* q[4]={&t.qLx,&t.qRx,&t.qLy,&t.qRy};
+    for(int n=0;n<4;n++){if(q[n]->density<smallr)q[n]->density=m.density;if(q[n]->pressure<smallp)q[n]->pressure=m.pressure;}
+    #undef SG2
+    return t;
+}
+
 // Trace one subgrid cell (i,j,k) (1<=i,j,k<=4): all 6 face interface states.
 inline HTrace trace_cell_3d(thread const HPrimitive sg[216], int i, int j, int k,
                             float gamma, float dtdx, int slope) {
     const float smallr = 1e-10f, smallp = 1e-10f * (1e-10f * 1e-10f);
     #define SG3(a,b,c) sg[(a) + 6*(b) + 36*(c)]
     HPrimitive m = SG3(i,j,k);
+    if(slope==SLOPE_LOCAL_PPM) {
+        HTrace t;
+        local_ppm_trace(SG3(i-1,j,k),m,SG3(i+1,j,k),gamma,dtdx,t.qLx,t.qRx);
+        HPrimitive yl={SG3(i,j-1,k).density,SG3(i,j-1,k).velocity_y,SG3(i,j-1,k).velocity_z,SG3(i,j-1,k).velocity_x,SG3(i,j-1,k).pressure};
+        HPrimitive ym={m.density,m.velocity_y,m.velocity_z,m.velocity_x,m.pressure};
+        HPrimitive yr={SG3(i,j+1,k).density,SG3(i,j+1,k).velocity_y,SG3(i,j+1,k).velocity_z,SG3(i,j+1,k).velocity_x,SG3(i,j+1,k).pressure};
+#if NHVAR > 5
+        yl.scalar=SG3(i,j-1,k).scalar;ym.scalar=m.scalar;yr.scalar=SG3(i,j+1,k).scalar;
+#endif
+        HPrimitive yp,yn; local_ppm_trace(yl,ym,yr,gamma,dtdx,yp,yn);
+        t.qLy={yp.density,yp.velocity_z,yp.velocity_x,yp.velocity_y,yp.pressure};
+        t.qRy={yn.density,yn.velocity_z,yn.velocity_x,yn.velocity_y,yn.pressure};
+        HPrimitive zl={SG3(i,j,k-1).density,SG3(i,j,k-1).velocity_z,SG3(i,j,k-1).velocity_x,SG3(i,j,k-1).velocity_y,SG3(i,j,k-1).pressure};
+        HPrimitive zm={m.density,m.velocity_z,m.velocity_x,m.velocity_y,m.pressure};
+        HPrimitive zr={SG3(i,j,k+1).density,SG3(i,j,k+1).velocity_z,SG3(i,j,k+1).velocity_x,SG3(i,j,k+1).velocity_y,SG3(i,j,k+1).pressure};
+#if NHVAR > 5
+        zl.scalar=SG3(i,j,k-1).scalar;zm.scalar=m.scalar;zr.scalar=SG3(i,j,k+1).scalar;
+#endif
+        HPrimitive zp,zn; local_ppm_trace(zl,zm,zr,gamma,dtdx,zp,zn);
+        t.qLz={zp.density,zp.velocity_y,zp.velocity_z,zp.velocity_x,zp.pressure};
+        t.qRz={zn.density,zn.velocity_y,zn.velocity_z,zn.velocity_x,zn.pressure};
+        return t;
+    }
     HPrimitive sx, sy, sz;
     sx.density   =0.5f*slope_moncen(SG3(i-1,j,k).density,   m.density,   SG3(i+1,j,k).density,   slope);
     sx.velocity_x=0.5f*slope_moncen(SG3(i-1,j,k).velocity_x,m.velocity_x,SG3(i+1,j,k).velocity_x,slope);
@@ -478,6 +691,17 @@ inline HConserved cadd(HConserved a, HConserved b) {
     return r;
 }
 
+inline void godunov_oct_2d(thread const HPrimitive sg[36],float gamma,float dtdx,
+                           int slope,int riemann,thread HConserved du[4]) {
+    for(int cj=0;cj<2;cj++)for(int ci=0;ci<2;ci++){int I=ci+2,J=cj+2;
+        HConserved fxl=flux_x(trace_cell_2d(sg,I-1,J,gamma,dtdx,slope).qLx,trace_cell_2d(sg,I,J,gamma,dtdx,slope).qRx,gamma,riemann);
+        HConserved fxr=flux_x(trace_cell_2d(sg,I,J,gamma,dtdx,slope).qLx,trace_cell_2d(sg,I+1,J,gamma,dtdx,slope).qRx,gamma,riemann);
+        HConserved fyl=flux_y(trace_cell_2d(sg,I,J-1,gamma,dtdx,slope).qLy,trace_cell_2d(sg,I,J,gamma,dtdx,slope).qRy,gamma,riemann);
+        HConserved fyr=flux_y(trace_cell_2d(sg,I,J,gamma,dtdx,slope).qLy,trace_cell_2d(sg,I,J+1,gamma,dtdx,slope).qRy,gamma,riemann);
+        du[ci+2*cj]=cadd(cdiff(fxl,fxr,dtdx),cdiff(fyl,fyr,dtdx));
+    }
+}
+
 // du for the 8 central cells (cell index = 1 + ci + 2*cj + 4*ck, ci,cj,ck in {0,1}).
 inline void godunov_oct_3d(thread const HPrimitive sg[216], float gamma, float dtdx,
                            int slope, int riemann, thread HConserved du[8]) {
@@ -527,6 +751,26 @@ inline void godunov_oct_1d_amr(thread const HPrimitive sg[6], thread const bool 
     du[1] = cdiff(fx[1], fx[2], dtdx);               // central cell 3 (sg index 3)
     bnd[0] = fx[0];                                   // -x boundary
     bnd[1] = fx[2];                                   // +x boundary
+}
+
+inline void godunov_oct_2d_amr(thread const HPrimitive sg[36],thread const bool ref[36],
+                               float gamma,float dtdx,int slope,int riemann,
+                               thread HConserved du[4],thread HConserved bnd[4]) {
+    #define RIDX2(a,b) ((a)+6*(b))
+    HConserved fx[3][2],fy[2][3];
+    for(int cj=0;cj<2;cj++){int J=cj+2;for(int a=0;a<3;a++){
+        HConserved f=flux_x(trace_cell_2d(sg,a+1,J,gamma,dtdx,slope).qLx,
+                            trace_cell_2d(sg,a+2,J,gamma,dtdx,slope).qRx,gamma,riemann);
+        if(ref[RIDX2(a+1,J)]||ref[RIDX2(a+2,J)])f=czero();fx[a][cj]=f;}}
+    for(int ci=0;ci<2;ci++){int I=ci+2;for(int b=0;b<3;b++){
+        HConserved f=flux_y(trace_cell_2d(sg,I,b+1,gamma,dtdx,slope).qLy,
+                            trace_cell_2d(sg,I,b+2,gamma,dtdx,slope).qRy,gamma,riemann);
+        if(ref[RIDX2(I,b+1)]||ref[RIDX2(I,b+2)])f=czero();fy[ci][b]=f;}}
+    for(int cj=0;cj<2;cj++)for(int ci=0;ci<2;ci++)
+        du[ci+2*cj]=cadd(cdiff(fx[ci][cj],fx[ci+1][cj],dtdx),cdiff(fy[ci][cj],fy[ci][cj+1],dtdx));
+    bnd[0]=cadd(fx[0][0],fx[0][1]);bnd[1]=cadd(fx[2][0],fx[2][1]);
+    bnd[2]=cadd(fy[0][0],fy[1][0]);bnd[3]=cadd(fy[0][2],fy[1][2]);
+    #undef RIDX2
 }
 
 inline void godunov_oct_3d_amr(thread const HPrimitive sg[216], thread const bool ref[216],

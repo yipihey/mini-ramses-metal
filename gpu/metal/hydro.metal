@@ -81,8 +81,10 @@ kernel void upload(device const Oct*         grid   [[buffer(0)]],
 // coarse_cell_update).  On a uniform level (no refined cells, no cache octs)
 // this reduces EXACTLY to the plain Godunov update -- the reflux is a no-op.
 //----------------------------------------------------------------------------
-#if   NDIM == 1
+#if NDIM == 1
 #define SG_N 6
+#elif NDIM == 2
+#define SG_N 36
 #else
 #define SG_N 216
 #endif
@@ -163,6 +165,16 @@ kernel void hydro_godunov(device const float*       uold     [[buffer(0)]],
     }
     HConserved du[2], bnd[2];
     godunov_oct_1d_amr(sg, ref, gamma, dtdx, P.slope_type, P.riemann, du, bnd);
+#elif NDIM == 2
+    for(int sy=0;sy<6;sy++)for(int sx=0;sx<6;sx++){
+        int cube=(sx/2)+3*(sy/2);
+        int nb=nbor[(oct-1)*SUBGRIDSIZE+cube];if(nb<=0)nb=oct;
+        int cell=1+(sx&1)+2*(sy&1),idx=sx+6*sy;
+        sg[idx]=load_cell_prim(uold,fgrav,cell,nb,gamma,halfdt,P.dual_energy);
+        ref[idx]=grid[nb-1].refined[cell-1]!=0;
+    }
+    HConserved du[4],bnd[4];
+    godunov_oct_2d_amr(sg,ref,gamma,dtdx,P.slope_type,P.riemann,du,bnd);
 #else
     for (int sz = 0; sz < 6; ++sz)
     for (int sy = 0; sy < 6; ++sy)
@@ -197,6 +209,8 @@ kernel void hydro_godunov(device const float*       uold     [[buffer(0)]],
     int base = (oct-1)*SUBGRIDSIZE;
 #if NDIM == 1
     const int cube[2] = {0, 2};                     // -x, +x  (center cube = 1)
+#elif NDIM == 2
+    const int cube[4]={3,5,1,7};                 // -x,+x,-y,+y (center=4)
 #else
     const int cube[6] = {12, 14, 10, 16, 4, 22};    // -x,+x,-y,+y,-z,+z (center = 13)
 #endif

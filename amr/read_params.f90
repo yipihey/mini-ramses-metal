@@ -1384,6 +1384,7 @@ subroutine m_read_params(pst)
   if(riemann=='llf')s%r%riemann=solver_llf
   if(riemann=='hll')s%r%riemann=solver_hll
   if(riemann=='hllc')s%r%riemann=solver_hllc
+  if(riemann=='twoshock')s%r%riemann=solver_twoshock
 #endif
 #ifdef MHD
   if(riemann=='llf')s%r%riemann=solver_llf

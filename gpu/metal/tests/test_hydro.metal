@@ -67,7 +67,7 @@ kernel void interpol_test(device const float* in  [[buffer(0)]],
     HConserved u1[1 + 2*NDIM];
     for (int j = 0; j < 1 + 2*NDIM; ++j) { int o = 3 + j*5; u1[j] = {in[o],in[o+1],in[o+2],in[o+3],in[o+4]}; }
     HConserved u2[TWOTONDIM];
-    interpol_hydro_oct(u1, nv, nt, smallr, u2);
+    interpol_hydro_oct(u1, nv, nt, smallr, 1.4f, -1.0f, u2);
     for (int c = 0; c < TWOTONDIM; ++c) { int o = c*5;
         out[o]=u2[c].density; out[o+1]=u2[c].momentum_x; out[o+2]=u2[c].momentum_y;
         out[o+3]=u2[c].momentum_z; out[o+4]=u2[c].energy; }

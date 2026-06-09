@@ -33,6 +33,7 @@ module hydro_parameters
   integer,parameter::solver_hlld=4
   integer,parameter::solver_roe=5
   integer,parameter::solver_upwind=6
+  integer,parameter::solver_twoshock=10
 
   integer,parameter::solver2d_llf=1
   integer,parameter::solver2d_hllf=2
