@@ -3005,9 +3005,12 @@ contains
   !> 1D solver: HLLD upwinds by the (HLLD) mass flux fdens (CPU riemann_hlld:1240-
   !> 1244, fgdnv(s)=fgdnv(1)*qleft/qright); HLL (and the fall-throughs) use the full
   !> HLL flux on (rho*u*s) with the same SL/SR as the MHD core (CPU riemann_hll_mhd).
-  attributes(device) function mhd_scalar_flux(riemann, fdens, SL, SR, rhoL, uL, sL, rhoR, uR, sR) result(fs)
+  attributes(device) function mhd_scalar_flux(riemann, fdens, speed_l, speed_r, rhoL, uL, sL, rhoR, uR, sR) result(fs)
+    ! NB: Fortran is case-insensitive, so the wave speeds cannot be named SL/SR
+    ! alongside the scalar values sL/sR (duplicate dummy); they follow the
+    ! hll_flux speed_l/speed_r naming instead.
     integer, value :: riemann
-    real(kind=dp), value :: fdens, SL, SR, rhoL, uL, sL, rhoR, uR, sR
+    real(kind=dp), value :: fdens, speed_l, speed_r, rhoL, uL, sL, rhoR, uR, sR
     real(kind=dp) :: fs
     if (riemann .eq. solver_hlld) then
        if (fdens > 0.0_dp) then
@@ -3016,7 +3019,7 @@ contains
           fs = fdens*sR
        endif
     else
-       fs = hll_flux(SL, SR, rhoL*uL*sL, rhoR*uR*sR, rhoL*sL, rhoR*sR)
+       fs = hll_flux(speed_l, speed_r, rhoL*uL*sL, rhoR*uR*sR, rhoL*sL, rhoR*sR)
     endif
   end function mhd_scalar_flux
   ! =========================================================================
