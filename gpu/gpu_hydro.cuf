@@ -49,24 +49,6 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: pressure
   end type subgrid_2x2x3cell_primitive
 
-  ! ==========================================================================
-  ! MHD shared-memory working buffers for the cube ("rock") integrator. The
-  ! face-B (subgrid_face_b_t), edge-E (subgrid_edge_e_t), output EMFs (the
-  ! anisotropic subgrid_2x3x3/3x2x3/3x3x2edge_primitive family) and the four
-  ! 2D-Riemann corner states per oct edge (the subgrid_*edge_corner family) are
-  ! the MHD analogs of subgrid_6x6x6cell_primitive and the interface arrays
-  ! above. They are defined just after the MHD cell types below and are consumed
-  ! by the cube mhd_integrator_kernel. ALL of them live in shared memory -- the
-  ! kernel needs NO global scratch (see the resident-budget block before
-  ! hydro_integrator_kernel and mhd_plan.md Stage B1): the corner states are
-  ! stored on the consumed edge lattice (18 edges/orientation at nsubgrid=1)
-  ! rather than the full 6^3 cell lattice, and the face-B transverse slopes
-  ! (dbf) are recomputed inline in the trace from the shared bf (the limiter is
-  ! the pure function face_b_tvd_slope). MHD is built on the cube integrator
-  ! only -- NOT the plane-sweep paper kernel. The named-field MHD cell types
-  ! (conserved_mhd_t / primitive_mhd_t) below are kept as device registers.
-  ! ==========================================================================
-
   !> @brief
   !> A simple type for holding the conserved variables of a cell
   type, public :: conserved_t
@@ -88,16 +70,6 @@ module hydro_device
   end type primitive_t
 
 #ifdef MHD
-  ! ==========================================================================
-  ! MHD cell types (Stage B1). These extend the hydro conserved_t / primitive_t
-  ! with the three *cell-centred* magnetic field components. They use named
-  ! fields (NOT arrays), exactly like conserved_t / primitive_t, to keep device
-  ! register pressure low. The cell-centred B is the 0.5*(B_left + B_right)
-  ! average of the face-centred field (see mhd_conserved_2_primitive below and
-  ! CPU ctoprim, umuscl.f90:1720). Currently unused: they are wired into the MHD
-  ! integrator in later stages (B2+).
-  ! ==========================================================================
-
   !> @brief
   !> A simple type for holding the conserved variables of an MHD cell
   type, public :: conserved_mhd_t
@@ -124,29 +96,8 @@ module hydro_device
      real(kind=dp) :: Bz
   end type primitive_mhd_t
 
-  ! ==========================================================================
-  ! MHD cube subgrid working types (Stage B1), restored for the cube ("rock")
-  ! integrator. Naming map to the CPU work arrays (hydro_commons.f90
-  ! hydro_kernel_t):
-  !   subgrid_face_b_t       <-> h%bf   (face-centred B, low faces per cell)
-  !   subgrid_edge_e_t       <-> h%Ex / h%Ey / h%Ez       (edge-centred E)
-  !   subgrid_2x3x3edge_primitive <-> h%emfx \
-  !   subgrid_3x2x3edge_primitive <-> h%emfy  } (output EMFs, *dt/dx; v4.1
-  !   subgrid_3x3x2edge_primitive <-> h%emfz /  anisotropic edge family)
-  !   subgrid_2x3x3edge_corner    <-> h%qRT/h%qRB/h%qLT/h%qLB \  (4 corner
-  !   subgrid_3x2x3edge_corner    <->   restricted to the edges  } states per
-  !   subgrid_3x3x2edge_corner    <->   the 2D solve consumes   /  oct edge)
-  ! (CPU h%dbf has no stored analog: the face-B transverse slopes are
-  ! recomputed inline in the trace via face_b_tvd_slope -- they are a pure
-  ! 3-point function of the shared bf, so storing them buys nothing.)
-  ! ==========================================================================
-
   !> @brief
-  !> Face-centred magnetic field subgrid (CPU h%bf). bx(i,j,k) is the LOW-x face
-  !> of cell (i,j,k), built face-continuous by ctoprim (umuscl.f90:1762-1802);
-  !> likewise by/bz in y/z. A cell's high face is its +1 neighbour's low face,
-  !> so the plain 6^3 cell range covers every face the integrator reads (the
-  !> high face of the last ghost cell is never consumed).
+  !> Face-centred magnetic field subgrid (CPU h%bf).
   type, public :: subgrid_face_b_t
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: bx
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: by
@@ -154,13 +105,7 @@ module hydro_device
   end type subgrid_face_b_t
 
   !> @brief
-  !> Edge-centred electric field subgrid (CPU h%Ex/h%Ey/h%Ez). Anisotropic exact
-  !> extents (the hydro interface-array philosophy): the trace predictor (phase
-  !> 2, cells [1,2*nsubgrid+2]^3) reads Ex at (ix, iy..iy+1, k..k+1), so Ex
-  !> needs [1,2*nsubgrid+2] along its own axis and [1,2*nsubgrid+3] transverse;
-  !> likewise Ey/Ez. (The CPU allocates the full cell range instead,
-  !> hydro_commons.f90:95-97 -- the values outside these extents were computed
-  !> but never read.)
+  !> Edge-centred electric field subgrid (CPU h%Ex/h%Ey/h%Ez). 
   type, public :: subgrid_edge_e_t
      real(kind=dp), dimension(1:2*nsubgrid+2, 1:2*nsubgrid+3, 1:2*nsubgrid+3) :: Ex
      real(kind=dp), dimension(1:2*nsubgrid+3, 1:2*nsubgrid+2, 1:2*nsubgrid+3) :: Ey
@@ -168,19 +113,7 @@ module hydro_device
   end type subgrid_edge_e_t
 
   !> @brief
-  !> Anisotropic edge-EMF primitive family (v4.1; CPU h%emfx/h%emfy/h%emfz).
-  !> These edge electric field values feed the constrained-transport update,
-  !> which consumes EMFs on the EDGES of the oct: an oct has exactly
-  !> 3x3x2 = 18 edges parallel to a given dimension (3x3 edge lines in the
-  !> transverse plane x 2*nsubgrid segments along the edge direction). One type
-  !> per edge orientation -- the edge analog of the hydro 3x2x2 interface family
-  !> (the faces of an oct normal to one dimension). They REPLACE the former
-  !> isotropic subgrid_emf_t (3x3x3 per component), which over-allocated the
-  !> segment index along the edge direction (only 2*nsubgrid values are consumed
-  !> by C5/C6). C3 writes them (2D Riemann output, raw E), C4 zeros them at
-  !> refined edges, C5 (CT curl) and C6 (coarse/fine EMF correction) read them.
-  !> NOTE: they must be stored *dt/dx-scaled in the CT stage (CPU `emfz=Ez*dt/dx`),
-  !> exactly like the hydro fluxes, or B drifts by a constant factor.
+  !> Anisotropic edge-EMF primitive family (CPU h%emfx/h%emfy/h%emfz).
   type, public :: subgrid_2x3x3edge_primitive   ! edges parallel to x (emfx)
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid) :: edge_e
   end type subgrid_2x3x3edge_primitive
@@ -192,28 +125,7 @@ module hydro_device
   end type subgrid_3x3x2edge_primitive
 
   !> @brief
-  !> Anisotropic edge corner-state family (CPU h%qRT/h%qRB/h%qLT/h%qLB,
-  !> restricted to the edges the 2D solve consumes). Same edge geometry as the
-  !> edge-EMF primitives above -- 3x3x2 = 18 edges per orientation at nsubgrid=1
-  !> -- with a leading corner-slot index iqLL/iqRL/iqLR/iqRR: the four cell
-  !> corners meeting at the edge, in the 2D solver's left/right x bottom/top
-  !> frame. trace_3d_mhd (C1) writes each cell's corner value into the slot of
-  !> the ONE edge that consumes it (each cell corner feeds exactly one edge --
-  !> the write-side inverse of the CPU cmp_mag_flx gather shifts,
-  !> umuscl.f90:220-258); cmp_mag_flx_mhd (C3) then reads the four slots of its
-  !> edge at the same (I,J,K), shift-free. Components are stored in the PHYSICAL
-  !> frame like the CPU arrays; the per-orientation permutation into the 2D
-  !> solver frame happens at the read (gather_corner_x/y/z), mirroring the CPU's
-  !> permuted array-section arguments. The edge-PARALLEL velocity is not stored
-  !> (u for x-edges, v for y-edges, w for z-edges): neither 2D EMF solver
-  !> (riemann2d_hll_emf / riemann2d_hlld_emf) consumes it -- a future solver
-  !> that needs it must add the field back here.
-  !> These replace the former cell-indexed subgrid_corner_state_t, which stored
-  !> all 4 corners x 3 orientations over the full 6^3 subgrid (165888 B/block)
-  !> and had to SPILL to a global mhd_corner_scratch array sized by the level's
-  !> oct count (~tens of GB at production grids). Restricted to the consumed
-  !> edge lattice the corners are 12096 B/block total and live in shared memory
-  !> -- no global scratch, mirroring the hydro kernel.
+  !> Anisotropic edge corner-state family (CPU h%qRT/h%qRB/h%qLT/h%qLB)
   type, public :: subgrid_2x3x3edge_corner   ! edges parallel to x (feed emfx)
      real(kind=dp), dimension(1:4, 0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid) :: density
      real(kind=dp), dimension(1:4, 0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid) :: velocity_y
@@ -242,24 +154,8 @@ module hydro_device
      real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bz
   end type subgrid_3x3x2edge_corner
 
-  ! ==========================================================================
-  ! MHD interface state / flux subgrid types (Stage C2). These are the
-  ! MHD-widened analogs of the hydro subgrid_3x2x2cell_primitive /
-  ! subgrid_2x3x2cell_primitive / subgrid_2x2x3cell_primitive interface arrays.
-  ! As in the hydro kernel one array holds the qm/qp reconstructed *interface
-  ! states* on input to the Riemann driver and is then overwritten with the
-  ! conserved *fluxes* on output. The MHD version carries, in addition to the
-  ! five hydro fields, the three cell-centred magnetic field components (needed
-  ! as Riemann input -- the normal B is single-valued / face-predicted, the two
-  ! transverse B are cell +/- half*dbf) and the passive scalars (1:nvar-5). The
-  ! 3D constrained-transport scheme advances the face-B entirely via the EMF curl
-  ! (Stage C5 / godunov_fine.f90:820-862), so the transverse-B advection fluxes
-  ! fgdnv(7:8) that cmpflxm returns are NOT consumed at NDIM=3 (the cell-update of
-  ! B from face fluxes is guarded #if NDIM<3 in the CPU, godunov_fine.f90:771-787);
-  ! the Bx/By/Bz slots therefore hold the (discarded) magnetic fluxes after the
-  ! Riemann step while the consumed flux slots are density/momentum/energy and the
-  ! passive scalars at ie+1..nprim. Same anisotropic shapes as the hydro types.
-  ! ==========================================================================
+  !> @brief
+  !> MHD interface state / flux subgrid types.
   type, public :: subgrid_3x2x2cell_primitive_mhd
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: density
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_x
@@ -3002,9 +2898,7 @@ contains
           corner_x%By(iqRR,ix-2,iy-2,k-2) = BL + (   -dBLz)
           corner_x%Bz(iqRR,ix-2,iy-2,k-2) = CL + (-dCLy   )
           if (corner_x%density (iqRR,ix-2,iy-2,k-2) < smallr) corner_x%density (iqRR,ix-2,iy-2,k-2) = r
-          ! NOTE: reproduces the CPU typo at umuscl.f90:1284 (pressure-floor branch
-          ! writes the density slot, not pressure) verbatim for bit-level CPU match.
-          if (corner_x%pressure(iqRR,ix-2,iy-2,k-2) < smallp) corner_x%density(iqRR,ix-2,iy-2,k-2) = p
+          if (corner_x%pressure(iqRR,ix-2,iy-2,k-2) < smallp) corner_x%pressure(iqRR,ix-2,iy-2,k-2) = p
        end if
 
        ! ---- Y-edge corner states (orientation 2) (CPU trace3d:1290-1353) ------
