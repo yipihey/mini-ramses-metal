@@ -1,3 +1,6 @@
+# cmake build directory
+build/
+
 # ignore everything in bin except "official" Makefiles
 bin/*
 !bin/Makefile

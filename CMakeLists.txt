@@ -96,11 +96,7 @@ set(EXEC ramses${NDIM}d)
 
 # Compute NION from per-species counts when RTZ is on
 if(RTZ)
-    math(EXPR NION
-        "${N_HYDROGEN_IONS} + ${N_H2} + ${N_HELIUM_IONS} + \
-         ${N_CARBON_IONS} + ${N_NITROGEN_IONS} + ${N_OXYGEN_IONS} + \
-         ${N_NEON_IONS} + ${N_MAGNESIUM_IONS} + ${N_SILICON_IONS} + \
-         ${N_SULFUR_IONS} + ${N_IRON_IONS}")
+    math(EXPR NION "${N_HYDROGEN_IONS} + ${N_H2} + ${N_HELIUM_IONS} + ${N_CARBON_IONS} + ${N_NITROGEN_IONS} + ${N_OXYGEN_IONS} + ${N_NEON_IONS} + ${N_MAGNESIUM_IONS} + ${N_SILICON_IONS} + ${N_SULFUR_IONS} + ${N_IRON_IONS}")
 endif()
 
 # NVAR = 5 (hydro) + NENER + NPSCAL + NMETAL + NION
@@ -518,6 +514,7 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
                 -o ${cub_f_radix}
         DEPENDS ${cub_c_radix}
                 ${CMAKE_SOURCE_DIR}/gpu/cub_module_radix_sort.cuf
+        BYPRODUCTS ${CMAKE_BINARY_DIR}/cub_module.mod
         COMMENT "Compiling cub_module_radix_sort.cuf (nvfortran)"
         VERBATIM
     )
@@ -529,6 +526,7 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
                 -o ${cub_f_scan}
         DEPENDS ${cub_c_scan}
                 ${CMAKE_SOURCE_DIR}/gpu/cub_inclusive_scan.cuf
+        BYPRODUCTS ${CMAKE_BINARY_DIR}/cub_inclusive_scan_mod.mod
         COMMENT "Compiling cub_inclusive_scan.cuf (nvfortran)"
         VERBATIM
     )
