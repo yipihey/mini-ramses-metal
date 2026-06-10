@@ -427,6 +427,32 @@ contains
   ! =========================================================================
 
   ! =========================================================================
+  ! this is the same as init_global_swap_table_kernel but uses a grid stride loop
+  ! that can be unrolled by the compiler. it needs to be launched with 1/8 the number
+  ! of threads as the original kernel. A speedup is acheived when num_octs >= 500k.
+  ! with 2M octs this kernels is ~3x faster than the original.
+  attributes(global) subroutine init_global_swap_table_kernel_u8(swap_global, head_idx, num_octs)
+    integer(kind=4), device :: swap_global(*)
+    integer(kind=4), intent(in), value :: head_idx
+    integer(kind=4), intent(in), value :: num_octs
+
+    integer :: i, i0, i1, di, ii
+
+    i0 = (threadIdx%x - 1) + (blockIdx%x - 1)*blockDim%x
+    i1 = num_octs - 1
+    di = blockDim%x*gridDim%x
+    ii = i0 + head_idx
+
+    !$acc do seq unroll(8)
+    do i = i0,i1,di
+      swap_global(ii) = ii
+      ii = ii + di
+    end do
+
+  end subroutine init_global_swap_table_kernel_u8
+  ! =========================================================================
+
+  ! =========================================================================
   attributes(global) subroutine init_prefix_sum_level(grid, swap_global, prefix_sum, head_idx, num_octs, ilevel)
     type(oct), device :: grid(*)
     integer(kind=4), device :: swap_global(*)
@@ -487,7 +513,57 @@ contains
 
   end subroutine init_prefix_sum_bit
   ! =========================================================================
+  ! =========================================================================
+  attributes(global) subroutine gather_keys(grid, swap_global, head_idx, num_octs, hkeys)
+    implicit none
+    type(oct), device :: grid(*)
+    integer(kind=4), device :: swap_global(*)
+    integer(kind=4), intent(in), value :: head_idx
+    integer(kind=4), intent(in), value :: num_octs
+    integer(kind=8), device :: hkeys(*)
 
+    integer :: oct_idx, thread_idx, block_idx, old_oct_idx
+
+    ! Compute the thread and block idx
+    thread_idx = threadIdx%x - 1
+    block_idx = blockIdx%x - 1
+
+    ! Compute new oct idx
+    oct_idx = thread_idx + block_idx * blockDim%x
+    if (oct_idx >= num_octs) return
+    oct_idx = head_idx + oct_idx
+
+    ! Get old oct idx
+    old_oct_idx = swap_global(oct_idx)
+
+    ! Set prefix_sum to value of bit at position ibit
+    hkeys(oct_idx) = grid(old_oct_idx)%hkey(1)
+
+  end subroutine gather_keys
+  ! =========================================================================
+
+  ! =========================================================================
+  attributes(global) subroutine gather_keys_2(grid, swap_global, head_idx, num_octs, hkeys)
+    implicit none
+    type(oct), device :: grid(*)
+    integer(kind=4), device :: swap_global(*)
+    integer(kind=4), intent(in), value :: head_idx
+    integer(kind=4), intent(in), value :: num_octs
+    integer(kind=8), device :: hkeys(*)
+    !
+    integer(kind=8), i, i0, i1, di
+
+    i0 = threadIdx%x + blockDim%x * ( blockIdx%x - 1 ) + head_idx - 1
+    i1 = num_octs + head_idx - 1
+    di = gridDim%x*blockDim%x
+
+    !$acc do seq unroll(8)
+    do i = i0,i1,di
+      hkeys(i) = grid(swap_global(i))%hkey(1) 
+    end do
+
+  end subroutine gather_keys_2
+  ! =========================================================================
   ! =========================================================================
   attributes(global) subroutine compute_local_swap_table(swap_local, swap_global, prefix_sum, head_idx, num_octs)
     integer(kind=4), device :: swap_local(*)
