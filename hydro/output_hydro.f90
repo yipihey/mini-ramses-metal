@@ -321,7 +321,7 @@ subroutine file_descriptor_hydro(r,filename,write_bkp_file)
             write(ilun,'("variable #",I2,": xHeIII")')ivar
             ivar=ivar+1
           endif
-          do while(ivar.lt.r%iions+nion)
+          do while(ivar+5-ie.lt.r%iions+nion)
             write(ilun,'("variable #",I2,": x_unused")')ivar
             ivar=ivar+1
           end do
