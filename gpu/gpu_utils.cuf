@@ -19,36 +19,23 @@ module gpu_utils
   !> Contains a 6 by 6 by 6 subgrid of primitive variables. Intended to act as a subgrid
   !> where the inner 2 by 2 by 2 cells are "real" and the outer 2 cells are ghost/halo cells.
   !> Can either be used on it's own or allocated in shared memory. Note that it is zero
-  !> indexed to make 1D to 3D indexing easier
+  !> indexed to make 1D to 3D indexing easier.
+  !> Under MHD it additionally carries the *cell-centred* magnetic field
+  !> (Bx, By, Bz) computed as 0.5*(B_left + B_right) per axis from the
+  !> face-centred B field.
   type, public :: subgrid_6x6x6cell_primitive
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: density
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_x
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_y
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_z
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: pressure
-     logical      , dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: refined
-  end type subgrid_6x6x6cell_primitive
-
 #ifdef MHD
-  !> @brief
-  !> MHD counterpart of subgrid_6x6x6cell_primitive: a 6 by 6 by 6 subgrid of
-  !> primitive variables that additionally carries the *cell-centred* magnetic
-  !> field (Bx, By, Bz) computed as 0.5*(B_left + B_right) per axis from the
-  !> face-centred B field. Same 0-indexed layout and same `refined` mask as the
-  !> hydro version. Used by the (future) cube MHD integrator kernel in place of
-  !> subgrid_6x6x6cell_primitive.
-  type, public :: subgrid_6x6x6cell_primitive_mhd
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: density
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_x
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_y
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_z
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: pressure
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: Bx
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: By
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: Bz
-     logical      , dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: refined
-  end type subgrid_6x6x6cell_primitive_mhd
 #endif
+     logical      , dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: refined
+  end type subgrid_6x6x6cell_primitive
 
   !> @brief
   !> Contains a 6 by 6 by 6 subgrid of conserved variables. Intended to act as a subgrid

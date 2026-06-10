@@ -27,13 +27,20 @@ module hydro_device
   !> @brief
   !> Contains a 3 x 3 x 3 subgrid of primitive variables. Intended to act as a subgrid
   !> for interface states and fluxes. Note that it is zero indexed to make 1D to 3D
-  !> indexing easier
+  !> indexing easier. Under MHD the interface states additionally carry the
+  !> magnetic field (Bx, By, Bz) and the passive scalars.
   type, public :: subgrid_3x2x2cell_primitive
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: density
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_x
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_y
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_z
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: pressure
+#ifdef MHD
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: By
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: Bz
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1, 1:nscalar_mhd) :: scalar
+#endif
   end type subgrid_3x2x2cell_primitive
   type, public :: subgrid_2x3x2cell_primitive
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: density
@@ -41,6 +48,12 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_y
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_z
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: pressure
+#ifdef MHD
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: By
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bz
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:nscalar_mhd) :: scalar
+#endif
   end type subgrid_2x3x2cell_primitive
   type, public :: subgrid_2x2x3cell_primitive
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: density
@@ -48,55 +61,47 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_y
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_z
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: pressure
+#ifdef MHD
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: By
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: Bz
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:nscalar_mhd) :: scalar
+#endif
   end type subgrid_2x2x3cell_primitive
 
   !> @brief
-  !> A simple type for holding the conserved variables of a cell
+  !> A simple type for holding the conserved variables of a cell.
+  !> Under MHD it also carries the cell-centred magnetic field.
   type, public :: conserved_t
      real(kind=dp) :: density
      real(kind=dp) :: momentum_x
      real(kind=dp) :: momentum_y
      real(kind=dp) :: momentum_z
      real(kind=dp) :: energy
+#ifdef MHD
+     real(kind=dp) :: Bx
+     real(kind=dp) :: By
+     real(kind=dp) :: Bz
+#endif
   end type conserved_t
 
   !> @brief
-  !> A simple type for holding the primitive variables of a cell
+  !> A simple type for holding the primitive variables of a cell.
+  !> Under MHD it also carries the cell-centred magnetic field.
   type, public :: primitive_t
      real(kind=dp) :: density
      real(kind=dp) :: velocity_x
      real(kind=dp) :: velocity_y
      real(kind=dp) :: velocity_z
      real(kind=dp) :: pressure
+#ifdef MHD
+     real(kind=dp) :: Bx
+     real(kind=dp) :: By
+     real(kind=dp) :: Bz
+#endif
   end type primitive_t
 
 #ifdef MHD
-  !> @brief
-  !> A simple type for holding the conserved variables of an MHD cell
-  type, public :: conserved_mhd_t
-     real(kind=dp) :: density
-     real(kind=dp) :: momentum_x
-     real(kind=dp) :: momentum_y
-     real(kind=dp) :: momentum_z
-     real(kind=dp) :: energy
-     real(kind=dp) :: Bx
-     real(kind=dp) :: By
-     real(kind=dp) :: Bz
-  end type conserved_mhd_t
-
-  !> @brief
-  !> A simple type for holding the primitive variables of an MHD cell
-  type, public :: primitive_mhd_t
-     real(kind=dp) :: density
-     real(kind=dp) :: velocity_x
-     real(kind=dp) :: velocity_y
-     real(kind=dp) :: velocity_z
-     real(kind=dp) :: pressure
-     real(kind=dp) :: Bx
-     real(kind=dp) :: By
-     real(kind=dp) :: Bz
-  end type primitive_mhd_t
-
   !> @brief
   !> Face-centred magnetic field subgrid (CPU h%bf).
   type, public :: subgrid_face_b_t
@@ -155,41 +160,6 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: Bz
   end type subgrid_3x3x2edge_corner
 
-  !> @brief
-  !> MHD interface state / flux subgrid types.
-  type, public :: subgrid_3x2x2cell_primitive_mhd
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: density
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_x
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_y
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_z
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: pressure
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: Bx
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: By
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: Bz
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1, 1:nscalar_mhd) :: scalar
-  end type subgrid_3x2x2cell_primitive_mhd
-  type, public :: subgrid_2x3x2cell_primitive_mhd
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: density
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_x
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_y
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_z
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: pressure
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bx
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: By
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bz
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:nscalar_mhd) :: scalar
-  end type subgrid_2x3x2cell_primitive_mhd
-  type, public :: subgrid_2x2x3cell_primitive_mhd
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: density
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_x
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_y
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_z
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: pressure
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: Bx
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: By
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: Bz
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:nscalar_mhd) :: scalar
-  end type subgrid_2x2x3cell_primitive_mhd
 #endif
 
 contains
@@ -492,12 +462,12 @@ contains
   !> @param[in] smallc    : Sound-speed floor
   !>
   !> @return
-  !> A primitive_mhd_t with cell-centred B and gas pressure
+  !> A primitive_t with cell-centred B and gas pressure
   attributes(device) function mhd_conserved_2_primitive(conserved, bxl, bxr, byl, byr, bzl, bzr, gamma, smallr, smallc) result(primitive)
     type(conserved_t), intent(in) :: conserved
     real(kind=dp), value :: bxl, bxr, byl, byr, bzl, bzr
     real(kind=dp), value :: gamma, smallr, smallc
-    type(primitive_mhd_t) :: primitive
+    type(primitive_t) :: primitive
     real(kind=dp) :: momentum_squared, emag, eint, smalle
 
     primitive%density    = max(conserved%density, smallr)
@@ -532,11 +502,11 @@ contains
   !> @param[in] gamma     : The adiabatic index
   !>
   !> @return
-  !> A conserved_mhd_t with total energy (incl. magnetic) and cell-centred B
+  !> A conserved_t with total energy (incl. magnetic) and cell-centred B
   attributes(device) function mhd_primitive_2_conserved(primitive, gamma) result(conserved)
-    type(primitive_mhd_t), intent(in) :: primitive
+    type(primitive_t), intent(in) :: primitive
     real(kind=dp), value :: gamma
-    type(conserved_mhd_t) :: conserved
+    type(conserved_t) :: conserved
     real(kind=dp) :: velocity_squared, emag
 
     conserved%density    = primitive%density
@@ -566,13 +536,13 @@ contains
   !> @param[in] gamma : The adiabatic index
   !>
   !> @return
-  !> flux : The conserved_mhd_t of the HLL MHD fluxes
+  !> flux : The conserved_t of the HLL MHD fluxes
   attributes(device) function hll_mhd_fluxes(left, right, gamma, smallr, smallc) result(flux)
-    type(primitive_mhd_t), intent(in) :: left, right
+    type(primitive_t), intent(in) :: left, right
     real(kind=dp), value :: gamma, smallr, smallc
-    type(conserved_mhd_t) :: flux
-    type(primitive_mhd_t) :: left_state, right_state
-    type(conserved_mhd_t) :: left_state_c, right_state_c, left_fluxes, right_fluxes
+    type(conserved_t) :: flux
+    type(primitive_t) :: left_state, right_state
+    type(conserved_t) :: left_state_c, right_state_c, left_fluxes, right_fluxes
     real(kind=dp) :: smallp
     real(kind=dp) :: bx_mean
     real(kind=dp) :: rl, rr, pl, pr, ul, ur, vl, vr, wl, wr
@@ -682,7 +652,7 @@ contains
   !> @brief
   !> GPU implementation of the HLLD MHD Riemann solver (Miyoshi & Kusano 2005,
   !> JCP 208, 315). Direct port of CPU riemann_hlld (godunov_utils.f90:967-1249),
-  !> x as the normal direction (callers rotate y/z). Returns the conserved_mhd_t
+  !> x as the normal direction (callers rotate y/z). Returns the conserved_t
   !> Godunov flux with the SAME field mapping as hll_mhd_fluxes (Bx flux = 0, By/Bz
   !> are the transverse-B fluxes), so it is a drop-in alternative in the dispatcher.
   !> The two-state-per-side structure (acoustic star + Alfven double-star) resolves
@@ -696,12 +666,12 @@ contains
   !> @param[in] gamma : The adiabatic index
   !>
   !> @return
-  !> flux : The conserved_mhd_t of the HLLD MHD fluxes
+  !> flux : The conserved_t of the HLLD MHD fluxes
   attributes(device) function hlld_mhd_fluxes(left, right, gamma, smallr, smallc) result(flux)
-    type(primitive_mhd_t), intent(in) :: left, right
+    type(primitive_t), intent(in) :: left, right
     real(kind=dp), value :: gamma, smallr, smallc
-    type(conserved_mhd_t) :: flux
-    type(primitive_mhd_t) :: ls, rs
+    type(conserved_t) :: flux
+    type(primitive_t) :: ls, rs
     real(kind=dp) :: smallp, entho, A, sgnm
     real(kind=dp) :: rl, ul, vl, wl, Pl, Bl, Cl, ekinl, emagl, etotl, Ptotl, vdotBl
     real(kind=dp) :: rr, ur, vr, wr, Pr, Br, Cr, ekinr, emagr, etotr, Ptotr, vdotBr
@@ -842,12 +812,12 @@ contains
   !> @param[in] riemann : Solver id
   !>
   !> @return
-  !> flux : The conserved_mhd_t of the fluxes
+  !> flux : The conserved_t of the fluxes
   attributes(device) function riemann_mhd_fluxes(left, right, gamma, smallr, smallc, riemann) result(flux)
-    type(primitive_mhd_t), intent(in) :: left, right
+    type(primitive_t), intent(in) :: left, right
     real(kind=dp), value :: gamma, smallr, smallc
     integer, value :: riemann
-    type(conserved_mhd_t) :: flux
+    type(conserved_t) :: flux
 
     if (riemann .eq. solver_hlld) then
        flux = hlld_mhd_fluxes(left, right, gamma, smallr, smallc)
@@ -877,10 +847,10 @@ contains
   !> @return
   !> E : The unscaled edge EMF
   attributes(device) function riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc) result(E)
-    type(primitive_mhd_t), intent(in) :: qLL, qLR, qRL, qRR
+    type(primitive_t), intent(in) :: qLL, qLR, qRL, qRR
     real(kind=dp), value :: gamma, smallr, smallc
     real(kind=dp) :: E
-    type(primitive_mhd_t) :: stateLL, stateLR, stateRL, stateRR
+    type(primitive_t) :: stateLL, stateLR, stateRL, stateRR
     real(kind=dp) :: smallp
     real(kind=dp) :: ELL, ERL, ELR, ERR, SL, SR, SB, ST
     real(kind=dp) :: cLLx, cRLx, cLRx, cRRx, cLLy, cRLy, cLRy, cRRy
@@ -980,10 +950,10 @@ contains
   !> E : The unscaled edge EMF
   attributes(device) function riemann2d_hlld_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
        & switch_llf_dmin, switch_llf_pmin) result(E)
-    type(primitive_mhd_t), intent(in) :: qLL, qLR, qRL, qRR
+    type(primitive_t), intent(in) :: qLL, qLR, qRL, qRR
     real(kind=dp), value :: gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
     real(kind=dp) :: E
-    type(primitive_mhd_t) :: stateLL, stateLR, stateRL, stateRR
+    type(primitive_t) :: stateLL, stateLR, stateRL, stateRR
     real(kind=dp) :: smallp
     real(kind=dp) :: ELL, ERL, ELR, ERR, SL, SR, SB, ST, SAL, SAR, SAT, SAB
     real(kind=dp) :: cfastLLx, cfastRLx, cfastLRx, cfastRRx
@@ -1184,7 +1154,7 @@ contains
   !> E : The unscaled edge EMF
   attributes(device) function riemann2d_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
        & switch_llf_dmin, switch_llf_pmin, riemann2d) result(E)
-    type(primitive_mhd_t), intent(in) :: qLL, qLR, qRL, qRR
+    type(primitive_t), intent(in) :: qLL, qLR, qRL, qRR
     real(kind=dp), value :: gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
     integer, value :: riemann2d
     real(kind=dp) :: E
@@ -2318,7 +2288,7 @@ contains
     integer(kind=4), device :: nbor(1:subgridsize,*)
     integer(kind=4), value :: head_idx, block_idx, thread_idx
     real(kind=dp), value :: gamma, smallr, smallc, dt
-    type(subgrid_6x6x6cell_primitive_mhd), intent(inout) :: local_mhd
+    type(subgrid_6x6x6cell_primitive), intent(inout) :: local_mhd
     real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
     type(subgrid_face_b_t), intent(inout) :: bf
 
@@ -2492,10 +2462,10 @@ contains
   !> @param[out] dscal_x, dscal_y, dscal_z : The limited half*dq scalar slopes
   attributes(device) subroutine compute_tvd_slopes_mhd(local_mhd, scalar_sub, ix, iy, k, slope, &
        & slopes_x, slopes_y, slopes_z, dscal_x, dscal_y, dscal_z)
-    type(subgrid_6x6x6cell_primitive_mhd), intent(in) :: local_mhd
+    type(subgrid_6x6x6cell_primitive), intent(in) :: local_mhd
     real(kind=dp), intent(in) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
     integer, value :: ix, iy, k, slope
-    type(primitive_mhd_t), intent(out) :: slopes_x, slopes_y, slopes_z
+    type(primitive_t), intent(out) :: slopes_x, slopes_y, slopes_z
     real(kind=dp), intent(out) :: dscal_x(1:nscalar_mhd), dscal_y(1:nscalar_mhd), dscal_z(1:nscalar_mhd)
 
     real(kind=dp), parameter :: half = 0.5_dp
@@ -2578,7 +2548,7 @@ contains
        & corner_x, corner_y, corner_z, thread_idx, &
        & left_x, right_x, left_y, right_y, left_z, right_z, gamma, smallr, smallc, &
        & dx, dt, slope, slope_mag, induction)
-    type(subgrid_6x6x6cell_primitive_mhd), intent(in) :: local_mhd
+    type(subgrid_6x6x6cell_primitive), intent(in) :: local_mhd
     real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
     type(subgrid_face_b_t), intent(in) :: bf
     type(subgrid_edge_e_t), intent(inout) :: edge_e
@@ -2588,16 +2558,16 @@ contains
     integer, value :: thread_idx, slope, slope_mag
     real(kind=dp), value :: gamma, smallr, smallc, dx, dt
     logical, value :: induction
-    type(subgrid_3x2x2cell_primitive_mhd), intent(inout) :: left_x, right_x
-    type(subgrid_2x3x2cell_primitive_mhd), intent(inout) :: left_y, right_y
-    type(subgrid_2x2x3cell_primitive_mhd), intent(inout) :: left_z, right_z
+    type(subgrid_3x2x2cell_primitive), intent(inout) :: left_x, right_x
+    type(subgrid_2x3x2cell_primitive), intent(inout) :: left_y, right_y
+    type(subgrid_2x2x3cell_primitive), intent(inout) :: left_z, right_z
 
     real(kind=dp), parameter :: half = 0.5_dp
     integer, parameter :: iqLL = 1, iqRL = 2, iqLR = 3, iqRR = 4
     real(kind=dp) :: r, u, v, w, p, A, B, C, r0, p0, dtdx, smallp, rscal
     real(kind=dp) :: drx,dux,dvx,dwx,dpx, dry,duy,dvy,dwy,dpy, drz,duz,dvz,dwz,dpz
     real(kind=dp) :: dBx,dCx, dAy,dCy, dAz,dBz
-    type(primitive_mhd_t) :: slopes_x, slopes_y, slopes_z
+    type(primitive_t) :: slopes_x, slopes_y, slopes_z
     real(kind=dp) :: dscal_x(1:nscalar_mhd), dscal_y(1:nscalar_mhd), dscal_z(1:nscalar_mhd)
     real(kind=dp) :: AL,AR,BL,BR,CL,CR
     real(kind=dp) :: dALy,dARy,dALz,dARz,dBLx,dBRx,dBLz,dBRz,dCLx,dCRx,dCLy,dCRy
@@ -3067,7 +3037,7 @@ contains
   !> frozen) so the passive-scalar HLL flux in riemann_driver_mhd uses the same
   !> SL/SR as the MHD-core flux. Floors match B4 (no-ops for realistic states).
   attributes(device) subroutine hll_mhd_wavespeeds(left, right, gamma, smallr, smallc, SL, SR)
-    type(primitive_mhd_t), intent(in) :: left, right
+    type(primitive_t), intent(in) :: left, right
     real(kind=dp), value :: gamma, smallr, smallc
     real(kind=dp), intent(out) :: SL, SR
     real(kind=dp) :: smallp, bx_mean, rl, rr, pl, pr, ul, ur
@@ -3104,14 +3074,14 @@ contains
   !> face fluxes (CPU guards the face-flux B update #if NDIM<3, godunov_fine:771).
   attributes(device) subroutine riemann_driver_mhd(left_x, right_x, left_y, right_y, &
        & left_z, right_z, thread_idx, gamma, smallr, smallc, riemann)
-    type(subgrid_3x2x2cell_primitive_mhd), intent(inout) :: left_x, right_x
-    type(subgrid_2x3x2cell_primitive_mhd), intent(inout) :: left_y, right_y
-    type(subgrid_2x2x3cell_primitive_mhd), intent(inout) :: left_z, right_z
+    type(subgrid_3x2x2cell_primitive), intent(inout) :: left_x, right_x
+    type(subgrid_2x3x2cell_primitive), intent(inout) :: left_y, right_y
+    type(subgrid_2x2x3cell_primitive), intent(inout) :: left_z, right_z
     real(kind=dp), value :: gamma, smallr, smallc
     integer, value :: riemann, thread_idx
     integer :: work_idx, interface_array_size, i, j, k, n
-    type(primitive_mhd_t) :: lft, rgt
-    type(conserved_mhd_t) :: flux
+    type(primitive_t) :: lft, rgt
+    type(conserved_t) :: flux
     real(kind=dp) :: SL, SR, sLin, sRin
 
     interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
@@ -3218,7 +3188,7 @@ contains
   attributes(device) function gather_corner_x(c, islot, I, J, K) result(q)
     type(subgrid_2x3x3edge_corner), intent(in) :: c
     integer, value :: islot, I, J, K
-    type(primitive_mhd_t) :: q
+    type(primitive_t) :: q
     ! Orientation 1 (Ex): lp1=3, lp2=4, lor=2; bp1=7, bp2=8, bor=6.
     q%density    = c%density(I,J,K,islot)
     q%pressure   = c%pressure(I,J,K,islot)
@@ -3233,7 +3203,7 @@ contains
   attributes(device) function gather_corner_y(c, islot, I, J, K) result(q)
     type(subgrid_3x2x3edge_corner), intent(in) :: c
     integer, value :: islot, I, J, K
-    type(primitive_mhd_t) :: q
+    type(primitive_t) :: q
     ! Orientation 2 (Ey): lp1=4, lp2=2, lor=3; bp1=8, bp2=6, bor=7.
     q%density    = c%density(I,J,K,islot)
     q%pressure   = c%pressure(I,J,K,islot)
@@ -3248,7 +3218,7 @@ contains
   attributes(device) function gather_corner_z(c, islot, I, J, K) result(q)
     type(subgrid_3x3x2edge_corner), intent(in) :: c
     integer, value :: islot, I, J, K
-    type(primitive_mhd_t) :: q
+    type(primitive_t) :: q
     ! Orientation 3 (Ez): lp1=2, lp2=3, lor=4; bp1=6, bp2=7, bor=8 (identity).
     q%density    = c%density(I,J,K,islot)
     q%pressure   = c%pressure(I,J,K,islot)
@@ -3268,11 +3238,11 @@ contains
   !> (bp2); both are made single-valued across their respective edge directions.
   attributes(device) function emf_solve(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
        & switch_llf_dmin, switch_llf_pmin, riemann2d) result(E)
-    type(primitive_mhd_t), intent(in) :: qLL, qLR, qRL, qRR
+    type(primitive_t), intent(in) :: qLL, qLR, qRL, qRR
     real(kind=dp), value :: gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
     integer, value :: riemann2d
     real(kind=dp) :: E
-    type(primitive_mhd_t) :: sLL, sLR, sRL, sRR
+    type(primitive_t) :: sLL, sLR, sRL, sRR
     real(kind=dp) :: b1_LL, b1_LR, b2_LL, b2_RL
     real(kind=dp), parameter :: half = 0.5_dp
 
@@ -3313,7 +3283,7 @@ contains
     type(subgrid_3x3x2edge_primitive), intent(inout) :: emfz
     integer, parameter :: iqLL = 1, iqRL = 2, iqLR = 3, iqRR = 4
     integer :: work_idx, emf_size, I, J, K
-    type(primitive_mhd_t) :: qLL, qLR, qRL, qRR
+    type(primitive_t) :: qLL, qLR, qRL, qRR
 
     ! 18 edges per orientation (v4.1 edge family): 3x3 edge lines in the
     ! transverse plane x 2*nsubgrid segments along the edge direction.
@@ -3366,10 +3336,10 @@ contains
   !> fluxes, for CPU fidelity) at faces touching a refined cell. Same refined-mask
   !> stencil as the hydro zero_fine_fluxes (CPU godunov_fine.f90:648-664).
   attributes(device) subroutine zero_fine_fluxes_mhd(local_mhd, fluxes_x, fluxes_y, fluxes_z, thread_idx)
-    type(subgrid_6x6x6cell_primitive_mhd), intent(in) :: local_mhd
-    type(subgrid_3x2x2cell_primitive_mhd), intent(inout) :: fluxes_x
-    type(subgrid_2x3x2cell_primitive_mhd), intent(inout) :: fluxes_y
-    type(subgrid_2x2x3cell_primitive_mhd), intent(inout) :: fluxes_z
+    type(subgrid_6x6x6cell_primitive), intent(in) :: local_mhd
+    type(subgrid_3x2x2cell_primitive), intent(inout) :: fluxes_x
+    type(subgrid_2x3x2cell_primitive), intent(inout) :: fluxes_y
+    type(subgrid_2x2x3cell_primitive), intent(inout) :: fluxes_z
     integer, value :: thread_idx
     integer :: work_idx, interface_array_size, i, j, k, n
 
@@ -3425,9 +3395,9 @@ contains
   !> gating the consumers) keeps C5/C6 and the coarse/fine Part-1 correction
   !> bit-identical to the CPU. Called from the kernel only when induction.
   attributes(device) subroutine zero_euler_fluxes_mhd(fluxes_x, fluxes_y, fluxes_z, thread_idx)
-    type(subgrid_3x2x2cell_primitive_mhd), intent(inout) :: fluxes_x
-    type(subgrid_2x3x2cell_primitive_mhd), intent(inout) :: fluxes_y
-    type(subgrid_2x2x3cell_primitive_mhd), intent(inout) :: fluxes_z
+    type(subgrid_3x2x2cell_primitive), intent(inout) :: fluxes_x
+    type(subgrid_2x3x2cell_primitive), intent(inout) :: fluxes_y
+    type(subgrid_2x2x3cell_primitive), intent(inout) :: fluxes_z
     integer, value :: thread_idx
     integer :: work_idx, interface_array_size, i, j, k, n
 
@@ -3476,7 +3446,7 @@ contains
   !> is at subgrid corner (X,Y,Z)=(I+2,J+2,K+2); the
   !> four cells are the CPU okloc(i3-+..) neighbours mapped to the subgrid.
   attributes(device) subroutine zero_fine_emf(local_mhd, emfx, emfy, emfz, thread_idx)
-    type(subgrid_6x6x6cell_primitive_mhd), intent(in) :: local_mhd
+    type(subgrid_6x6x6cell_primitive), intent(in) :: local_mhd
     type(subgrid_2x3x3edge_primitive), intent(inout) :: emfx
     type(subgrid_3x2x3edge_primitive), intent(inout) :: emfy
     type(subgrid_3x3x2edge_primitive), intent(inout) :: emfz
@@ -3528,9 +3498,9 @@ contains
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     real(kind=dp), device :: bnew(1:twotondim,1:6,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
-    type(subgrid_3x2x2cell_primitive_mhd), intent(in) :: fluxes_x
-    type(subgrid_2x3x2cell_primitive_mhd), intent(in) :: fluxes_y
-    type(subgrid_2x2x3cell_primitive_mhd), intent(in) :: fluxes_z
+    type(subgrid_3x2x2cell_primitive), intent(in) :: fluxes_x
+    type(subgrid_2x3x2cell_primitive), intent(in) :: fluxes_y
+    type(subgrid_2x2x3cell_primitive), intent(in) :: fluxes_z
     type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
     type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
     type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
@@ -3668,9 +3638,9 @@ contains
     integer, device :: nbor(1:subgridsize,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     real(kind=dp), device :: bnew(1:twotondim,1:6,*)
-    type(subgrid_3x2x2cell_primitive_mhd), intent(in) :: fluxes_x
-    type(subgrid_2x3x2cell_primitive_mhd), intent(in) :: fluxes_y
-    type(subgrid_2x2x3cell_primitive_mhd), intent(in) :: fluxes_z
+    type(subgrid_3x2x2cell_primitive), intent(in) :: fluxes_x
+    type(subgrid_2x3x2cell_primitive), intent(in) :: fluxes_y
+    type(subgrid_2x2x3cell_primitive), intent(in) :: fluxes_z
     type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
     type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
     type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
@@ -4024,7 +3994,7 @@ contains
   !      former mhd_dbf_scratch global array. Cheaper than the round-trip.
   !
   ! Resident shared per block (nsubgrid=1, nvar=8, FP64; logical = 4 B):
-  !   (A) subgrid_6x6x6cell_primitive_mhd  8*216*8 + 216*4         = 14688 B
+  !   (A) subgrid_6x6x6cell_primitive  8*216*8 + 216*4         = 14688 B
   !       scalar_subgrid (nvar-5=3)        3*216*8                 =  5184 B
   !   (B) subgrid_face_b_t (bf)            3*216*8                 =  5184 B
   !   (D) subgrid_edge_e_t (exact extents) 3*(4*5*5)*8             =  2400 B
@@ -4174,7 +4144,7 @@ contains
 
     ! Resident shared buffers -- the whole working set. See the budget block
     ! above: 46320 B at nsubgrid=1, nvar=8 -> fits the 48 KB static limit.
-    type(subgrid_6x6x6cell_primitive_mhd), shared :: local_mhd
+    type(subgrid_6x6x6cell_primitive), shared :: local_mhd
     real(kind=dp), shared :: scalar_subgrid(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
     type(subgrid_face_b_t), shared :: bf
     type(subgrid_edge_e_t), shared :: edge_e
@@ -4184,9 +4154,9 @@ contains
     type(subgrid_2x3x3edge_corner), shared :: corner_x
     type(subgrid_3x2x3edge_corner), shared :: corner_y
     type(subgrid_3x3x2edge_corner), shared :: corner_z
-    type(subgrid_3x2x2cell_primitive_mhd), shared :: left_x, right_x
-    type(subgrid_2x3x2cell_primitive_mhd), shared :: left_y, right_y
-    type(subgrid_2x2x3cell_primitive_mhd), shared :: left_z, right_z
+    type(subgrid_3x2x2cell_primitive), shared :: left_x, right_x
+    type(subgrid_2x3x2cell_primitive), shared :: left_y, right_y
+    type(subgrid_2x2x3cell_primitive), shared :: left_z, right_z
     real(kind=dp) :: dtdx
     integer :: block_idx, thread_idx
 
@@ -4780,7 +4750,7 @@ contains
     type(primitive_t) :: primitive
     type(conserved_t) :: conserved
 #ifdef MHD
-    type(primitive_mhd_t) :: prim_mhd
+    type(primitive_t) :: prim_mhd
 #endif
     integer :: info
     integer :: tid, bid ! The index of the thread and the block
