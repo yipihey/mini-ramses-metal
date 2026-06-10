@@ -201,9 +201,17 @@ subroutine m_read_rt_params(pst)
   end do
 
   !-------------------------------------------------
-  ! Read the namelist file
+  ! Read the namelist file (or the C-API override, set by ramses_init so the
+  ! library drives this without argv — mirrors amr/read_params.f90).
   !-------------------------------------------------
-  CALL getarg(1,infile)
+  block
+    use capi_commons, only: capi_nml_path
+    if (len_trim(capi_nml_path) > 0) then
+       infile = trim(capi_nml_path)
+    else
+       CALL getarg(1,infile)
+    end if
+  end block
   namelist_file=TRIM(infile)
   INQUIRE(file=infile,exist=nml_ok)
   if(.not. nml_ok)then

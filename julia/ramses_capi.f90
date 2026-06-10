@@ -16,7 +16,7 @@
 module ramses_capi
   use iso_c_binding
   use amr_parameters,  only: ndim, dp, twotondim, threetondim
-  use ramses_commons,  only: ramses_t, pst_t
+  use ramses_commons,  only: ramses_t, pst_t, capi_time_cap_active, capi_time_cap_target
   use capi_commons,    only: capi_nml_path, capi_nrestart, capi_setup_only, &
                              capi_last_state, capi_reg, capi_register, CAPI_MAXSTATE, &
                              capi_inject, capi_inject_n, capi_inject_idp, capi_inject_xp, &
@@ -201,6 +201,21 @@ contains
     s%g%dtnew(ilevel) = real(dtnew, dp)
     s%g%dtold(ilevel) = real(dtold, dp)
   end subroutine ramses_set_dt
+
+  subroutine ramses_set_time_cap(handle, active, target_time) bind(C, name="ramses_set_time_cap")
+    integer(c_int), value :: handle, active
+    real(c_double), value :: target_time
+    type(ramses_t), pointer :: s
+    capi_time_cap_active = .false.
+    capi_time_cap_target = 0.0_dp
+    if (handle < 1 .or. handle > CAPI_MAXSTATE) return
+    s => capi_reg(handle)%p
+    if (.not. associated(s)) return
+    if (active /= 0) then
+       capi_time_cap_active = .true.
+       capi_time_cap_target = real(target_time, dp)
+    end if
+  end subroutine ramses_set_time_cap
 
   ! Per-particle BINDING level (the level L whose headp(L)..tailp(L) contiguous
   ! range contains the particle — i.e. the subcycle depth kick_drift uses), keyed
@@ -734,6 +749,21 @@ contains
     aexp  = real(s%g%aexp, c_double)
   end subroutine ramses_get_dt
 
+  subroutine ramses_get_time(handle, t, texp, aexp, nstep) bind(C, name="ramses_get_time")
+    integer(c_int), value :: handle
+    real(c_double), intent(out) :: t, texp, aexp
+    integer(c_int), intent(out) :: nstep
+    type(ramses_t), pointer :: s
+    t = 0.0_c_double; texp = 0.0_c_double; aexp = 0.0_c_double; nstep = 0_c_int
+    if (handle < 1 .or. handle > CAPI_MAXSTATE) return
+    s => capi_reg(handle)%p
+    if (.not. associated(s)) return
+    t     = real(s%g%t, c_double)
+    texp  = real(s%g%texp, c_double)
+    aexp  = real(s%g%aexp, c_double)
+    nstep = int(s%g%nstep, c_int)
+  end subroutine ramses_get_time
+
 #ifdef _METAL
   ! GPU gravity for one level (deposit's GPU side runs in m_rho_fine; this does
   ! the grouped-multigrid Poisson + 4th-order gradient on the device).
@@ -839,6 +869,149 @@ contains
     phi_int(1:twotondim) = real(phint(1:twotondim), c_double)
     deallocate(m%phi, m%phi_old)
   end subroutine ramses_interpol_phi_kernel
+
+  !--------------------------------------------------------------------------
+  ! Radiative transfer (RAMSES-RT) slice — ADR-0006 Phase 4 (RamsesNG.jl).
+  ! Exposes the M1 photon state (m%rtuold/m%rtunew, nrtvar = nrtgrp*(1+ndim)
+  ! per-group density+flux) and the per-level RT step (rt_setup mirrors the
+  ! amr_step preamble: rtunew <- rtuold + emissivity; rt_step subcycles the
+  ! hyperbolic solve + non-eq photo-chemistry to g%dtnew(ilevel)).  The state
+  ! arrays exist only in -DRT builds, so their accessors are guarded; in a
+  ! non-RT build they return 0 / no-op (the Julia side gates on ramses_nrtvar).
+  ! Ionization fractions ride as hydro passive scalars (uold ivar 5+1..5+NION),
+  ! already reachable through ramses_get_hydro.
+  !--------------------------------------------------------------------------
+  function ramses_nrtvar() result(nv) bind(C, name="ramses_nrtvar")
+    use rt_parameters, only: nrtvar
+    integer(c_int) :: nv
+#ifdef RT
+    nv = nrtvar
+#else
+    nv = 0
+#endif
+  end function ramses_nrtvar
+
+  ! GETTER for one RT variable: m%rtuold(:,ivar,:) (field=0) / m%rtunew (field=1)
+  ! at ilevel, ivar in 1..nrtvar.  Layout matches ramses_get_hydro.
+  function ramses_get_rt(handle, field, ivar, ilevel, nmax, ckey, val) result(noct) &
+       bind(C, name="ramses_get_rt")
+    use rt_parameters, only: nrtvar
+    integer(c_int), value :: handle, field, ivar, ilevel, nmax
+    integer(c_int), intent(out) :: ckey(*)     ! ndim*nmax
+    real(c_double), intent(out) :: val(*)       ! twotondim*nmax
+    integer(c_int) :: noct
+#ifdef RT
+    type(ramses_t), pointer :: s
+    integer :: o, c, j, d, hd, no
+    noct = 0
+    if (handle < 1 .or. handle > CAPI_MAXSTATE) return
+    if (ivar < 1 .or. ivar > nrtvar) return
+    s => capi_reg(handle)%p
+    if (.not. associated(s)) return
+    hd = s%m%head(ilevel)
+    no = min(s%m%noct(ilevel), nmax)
+    do j = 1, no
+       o = hd + j - 1
+       do d = 1, ndim
+          ckey(ndim*(j-1)+d) = s%m%grid(o)%ckey(d)
+       end do
+       do c = 1, twotondim
+          if (field == 0) then
+             val(twotondim*(j-1)+c) = real(s%m%rtuold(c, ivar, o), c_double)
+          else
+             val(twotondim*(j-1)+c) = real(s%m%rtunew(c, ivar, o), c_double)
+          end if
+       end do
+    end do
+    noct = no
+#else
+    noct = 0
+#endif
+  end function ramses_get_rt
+
+  ! SETTER (inverse of ramses_get_rt): write m%rtuold/m%rtunew(:,ivar,:) at
+  ! ilevel from caller arrays, matched by ckey via the grid hash.
+  function ramses_set_rt(handle, field, ivar, ilevel, n, ckey, val) result(nset) &
+       bind(C, name="ramses_set_rt")
+    use hash, only: hash_getp
+    use rt_parameters, only: nrtvar
+    integer(c_int), value :: handle, field, ivar, ilevel, n
+    integer(c_int), intent(in) :: ckey(*)      ! ndim*n
+    real(c_double), intent(in) :: val(*)        ! twotondim*n
+    integer(c_int) :: nset
+#ifdef RT
+    type(ramses_t), pointer :: s
+    integer :: j, c, o, d
+    integer(8) :: hkey(0:ndim)
+    nset = 0
+    if (handle < 1 .or. handle > CAPI_MAXSTATE) return
+    if (ivar < 1 .or. ivar > nrtvar) return
+    s => capi_reg(handle)%p
+    if (.not. associated(s)) return
+    do j = 1, n
+       hkey(0) = ilevel
+       do d = 1, ndim
+          hkey(d) = ckey(ndim*(j-1)+d)
+       end do
+       o = hash_getp(s%m%grid_dict, hkey)
+       if (o <= 0) cycle
+       do c = 1, twotondim
+          if (field == 0) then
+             s%m%rtuold(c, ivar, o) = real(val(twotondim*(j-1)+c), dp)
+          else
+             s%m%rtunew(c, ivar, o) = real(val(twotondim*(j-1)+c), dp)
+          end if
+       end do
+       nset = nset + 1
+    end do
+#else
+    nset = 0
+#endif
+  end function ramses_set_rt
+
+  ! The amr_step RT preamble for one level: rtunew <- rtuold, then the stellar/
+  ! source emissivity (amr_step.f90 "Set rtunew equal to rtuold" block).
+  subroutine ramses_rt_setup(handle, ilevel) bind(C, name="ramses_rt_setup")
+    use rt_godunov_fine_module, only: r_set_rtunew, r_set_emissivity
+    integer(c_int), value :: handle, ilevel
+#ifdef RT
+    type(pst_t) :: pst
+    logical :: ok
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    call r_set_rtunew(pst, ilevel, 1)
+    call r_set_emissivity(pst, ilevel, 1)
+#endif
+  end subroutine ramses_rt_setup
+
+  ! Per-coarse-step RT/chemistry constant updates (update_time.f90:94): the
+  ! reduced speed of light, the cross-section×c tables (signc — WITHOUT this
+  ! the photo-chemistry sees zero cross sections), Compton/UV constants.  Call
+  ! once after init and once per outer step when driving rt_step directly.
+  subroutine ramses_rt_neq_updates(handle, nstep) bind(C, name="ramses_rt_neq_updates")
+    use update_rt_c_module, only: r_rt_neq_updates
+    integer(c_int), value :: handle, nstep
+#ifdef RT
+    type(pst_t) :: pst
+    logical :: ok
+    integer :: ns
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    ns = nstep
+    call r_rt_neq_updates(pst, ns, 1)
+#endif
+  end subroutine ramses_rt_neq_updates
+
+  ! One RT step at ilevel: subcycles the M1 hyperbolic solve (+ photo-chemistry
+  ! when neq_chem) to the current g%dtnew(ilevel) — set it via ramses_set_dt.
+  subroutine ramses_rt_step(handle, ilevel) bind(C, name="ramses_rt_step")
+    use rt_step_module, only: m_rt_step
+    integer(c_int), value :: handle, ilevel
+#ifdef RT
+    type(pst_t) :: pst
+    logical :: ok
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+    call m_rt_step(pst, ilevel)
+#endif
+  end subroutine ramses_rt_step
 
   !--------------------------------------------------------------------------
   ! Precision / shape contract.  The Julia bindings call this on load and abort
