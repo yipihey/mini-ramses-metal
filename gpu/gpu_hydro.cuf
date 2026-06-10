@@ -588,7 +588,7 @@ contains
     momentum_squared = magnitude_squared(conserved%momentum_x, conserved%momentum_y, conserved%momentum_z)
     emag = compute_emag(primitive%Bx, primitive%By, primitive%Bz)
     smalle = smallc**2/gamma/(gamma - 1.0_dp)
-    eint = max(conserved%energy - 0.5d0*momentum_squared/primitive%density - emag, smalle*primitive%density)
+    eint = max(conserved%energy - 0.5_dp*momentum_squared/primitive%density - emag, smalle*primitive%density)
     primitive%pressure = (gamma - 1.d0) * eint
     return
   end function mhd_conserved_2_primitive
@@ -797,7 +797,7 @@ contains
 
     ! Enforce continuity of the normal magnetic field (CPU :1006-1008).
     A = 0.5d0*(ls%Bx + rs%Bx)
-    sgnm = sign(1.0d0, A)
+    sgnm = sign(1.0_dp, A)
 
     ! Left variables (CPU :1011-1025). %By/%Bz are the transverse B (Bl,Cl).
     rl = ls%density; ul = ls%velocity_x; vl = ls%velocity_y; wl = ls%velocity_z
