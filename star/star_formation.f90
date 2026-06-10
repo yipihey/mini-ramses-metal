@@ -14,6 +14,9 @@ recursive subroutine r_star_formation(pst,ilevel,input_size,output,output_size)
   use ramses_commons, only: pst_t
   use mdl_parameters
   use SED_module,only: update_SED_group_props
+#ifdef _CUDA
+  use gpu_runner, only: gpu_star_formation
+#endif
   implicit none
   type(pst_t)::pst
   integer,VALUE::input_size
@@ -29,7 +32,11 @@ recursive subroutine r_star_formation(pst,ilevel,input_size,output,output_size)
      call mdl_get_reply(pst%s%mdl,rID,output_size,next_output)
      output%mass=output%mass+next_output%mass
   else
+#ifdef _CUDA
+     call gpu_star_formation(pst%s,ilevel,output%mass)
+#else
      call star_formation(pst%s%r,pst%s%g,pst%s%m,pst%s%star,ilevel,output%mass)
+#endif
 
      ! Check if radiadion advection should be turned on
      if(pst%s%r%rt .and. .not. pst%s%r%rt_advect .and. pst%s%star%npart_tot .gt. 0) then

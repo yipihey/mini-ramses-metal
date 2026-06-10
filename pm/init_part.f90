@@ -113,7 +113,7 @@ subroutine init_part(r,g,m,p)
   allocate(hkeyp(1:r%npartmax))
 #endif
   ! Prefix sum arrays
-  scan_size = max(r%npartmax, m%ngridmax + m%ncachemax)
+  scan_size = max(r%npartmax, (m%ngridmax + m%ncachemax) * twotondim)
   call ensure_scan_capacity_part(scan_size, r%part_dep_algo)
 #endif
 end subroutine init_part
@@ -126,6 +126,10 @@ subroutine init_star(r,g,p)
   use amr_commons, only: run_t,global_t
   use pm_parameters, only: STAR_TYPE
   use pm_commons, only: part_t
+#ifdef _CUDA
+  use gpu_runner
+  use cudafor
+#endif
   implicit none
   type(run_t)::r
   type(global_t)::g
@@ -160,6 +164,16 @@ subroutine init_star(r,g,p)
   ! No particle just yet
   p%headp=1
   p%tailp=0
+
+#ifdef _CUDA
+  allocate(star_xp    (1:r%nstarmax, 1:ndim))
+  allocate(star_vp    (1:r%nstarmax, 1:ndim))
+  allocate(star_mp    (1:r%nstarmax))
+  allocate(star_tp    (1:r%nstarmax))
+  allocate(star_zp    (1:r%nstarmax))
+  allocate(star_levelp(1:r%nstarmax))
+  allocate(star_idp   (1:r%nstarmax))
+#endif
 end subroutine init_star
 !#########################################################################
 !#########################################################################

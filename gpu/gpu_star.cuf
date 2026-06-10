@@ -1,0 +1,259 @@
+!> Star formation CUDA kernels.
+module star_device
+  use amr_parameters, only: ndim, twotondim, dp, i8b
+  use hydro_parameters, only: nvar
+  use oct_commons, only: oct
+  use gpu_utils
+  use cudafor
+  use curand_device
+
+  implicit none
+
+contains
+
+!> Pass 1: Count potential stars per cell (one star per site).
+attributes(global) subroutine count_star_formation_kernel( &
+     & grid, uold, prefix_sum, &
+     & head_idx, num_octs, ilevel, d0, dx, vol, factG, &
+     & mstar, ivar_refine, var_cut_refine, &
+     & dt, seed, aexp, gamma, smallc, smallr, &
+     & sf_model, eps_star, sgs_turb, iturb)
+
+  type(oct), device :: grid(*)
+  real(kind=dp), device :: uold(1:twotondim, 1:nvar, *)
+  integer(kind=4), device :: prefix_sum(*)
+  integer(kind=4), intent(in), value :: head_idx, num_octs, ilevel
+  real(kind=8), intent(in), value :: d0, dx, vol, factG, mstar
+  integer(kind=4), intent(in), value :: ivar_refine
+  real(kind=8), intent(in), value :: var_cut_refine
+  real(kind=8), intent(in), value :: dt, aexp, gamma, smallc, smallr
+  integer(kind=i8b), intent(in), value :: seed
+  integer(kind=4), intent(in), value :: sf_model
+  real(kind=8), intent(in), value :: eps_star
+  logical, intent(in), value :: sgs_turb
+  integer(kind=4), intent(in), value :: iturb
+
+  integer :: tid, igrid, ind, icell_global, nstar
+  real(kind=8) :: d, mask, p, cs2, sigma2, t_ff, sfr_ff, t_dyn, alpha_vir, Mach2, b_turb, sigs, scrit
+  real(kind=8) :: mcell, mgas, PoissMean
+  type(curandStateXORWOW) :: state
+  logical :: ok
+
+  tid = (blockIdx%x - 1) * blockDim%x + threadIdx%x - 1
+  if (tid >= num_octs * twotondim) return
+
+  igrid = head_idx + tid / twotondim
+  ind   = mod(tid, twotondim) + 1
+
+  ! Leaf cell check
+  ok = .not. grid(igrid)%refined(ind)
+  
+  ! Density threshold
+  d = uold(ind, 1, igrid)
+  ok = ok .and. (d > d0)
+
+  ! Zoom mask
+  if (ivar_refine > 0) then
+     mask = uold(ind, ivar_refine, igrid) / d
+     ok = ok .and. (mask > var_cut_refine)
+  endif
+
+  nstar = 0
+  if (ok) then
+
+     ! Kinetic energy, pressure, sound speed and turbulence
+     ekin = 0.5_dp * uold(ind, 2, igrid)**2 / d + &
+          & 0.5_dp * uold(ind, 3, igrid)**2 / d + &
+          & 0.5_dp * uold(ind, 4, igrid)**2 / d
+     p = (gamma - 1_dp) * (uold(ind, 5, igrid) - ekin)
+     cs2 = max(gamma * p / d, smallc**2)
+     sigma2 = 0d0
+     if (sgs_turb) then
+        sigma2 = uold(ind, iturb, igrid) * 2d0 / 3d0 / d
+     endif
+
+     ! SF model logic
+     select case (sf_model)
+     case(1)
+        sfr_ff = eps_star
+     case(2)
+        t_dyn = dx / (2d0 * sqrt(3d0 * (sigma2 + cs2)))
+        t_ff = 0.5427d0 / sqrt(factG * d)
+        sfr_ff = eps_star * exp(-1.6d0 * t_ff / t_dyn)
+     case(3)
+        alpha_vir = (15d0 * (sigma2 + cs2)) / (3.141592653589793d0 * factG * d * dx**2)
+        Mach2 = max(sigma2 / cs2, smallr)
+        b_turb = 1.0
+        sigs = log(1d0 + b_turb**2 * Mach2)
+        scrit = log(alpha_vir * (1d0 + (2d0 * Mach2**2 / (1d0 + Mach2))))
+        sfr_ff = (eps_star / 2d0) * exp(3d0 / 8d0 * sigs) * (2d0 - erfc_dev((sigs - scrit) / sqrt(2d0 * sigs)))
+     case default
+        sfr_ff = 0d0
+     end select
+
+     mcell = d * vol
+     t_ff = 0.5427d0 / sqrt(factG * d)
+     mgas = dt * (sfr_ff / t_ff) * mcell
+     PoissMean = mgas / mstar
+
+     ! Initialize RNG inline
+     call curand_init(seed, int(tid, 8), 0_8, state)
+     nstar = curand_poisson(state, PoissMean)
+
+     ! Cap nstar to avoid emptying the cell
+     if (real(nstar, 8) * mstar > 0.9d0 * mcell) then
+        nstar = int(0.9d0 * mcell / mstar)
+     endif
+  endif
+
+  ! Store 1 if star formed, else 0 (one star per site)
+  icell_global = (igrid - 1) * twotondim + ind
+  if (nstar > 0) then
+     prefix_sum(icell_global) = 1
+  else
+     prefix_sum(icell_global) = 0
+  endif
+
+end subroutine count_star_formation_kernel
+
+!> Pass 2: Create star particles and update gas.
+attributes(global) subroutine star_formation_kernel( &
+     & grid, uold, star_xp, star_vp, star_mp, star_tp, star_zp, star_levelp, star_idp, &
+     & prefix_sum, d_skip, leading, &
+     & head_idx, num_octs, ilevel, dx, vol, mstar, &
+     & npart_old, npart_tot_old, &
+     & dt, seed, aexp, gamma, metal, z_ave, ientropy, dual_energy, imetal, &
+     & nstarmax, d0, factG, ivar_refine, var_cut_refine, smallc, smallr, sf_model, eps_star, sgs_turb, iturb)
+
+  integer(kind=8), intent(in), value :: leading
+  type(oct), device :: grid(*)
+  real(kind=dp), device :: uold(1:twotondim, 1:nvar, *)
+  real(kind=dp), device :: star_xp(*), star_vp(*)
+  real(kind=dp), device :: star_mp(*), star_tp(*), star_zp(*)
+  integer(kind=4), device :: star_levelp(*)
+  integer(i8b), device :: star_idp(*)
+  integer(kind=4), device :: prefix_sum(*)
+  real(kind=8), device :: d_skip(1:3)
+
+  integer(kind=4), intent(in), value :: head_idx, num_octs, ilevel
+  real(kind=8), intent(in), value :: dx, vol, mstar, d0, factG
+  integer(kind=4), intent(in), value :: npart_old
+  integer(i8b), intent(in), value :: npart_tot_old
+  real(kind=8), intent(in), value :: dt, aexp, gamma, z_ave
+  integer(kind=i8b), intent(in), value :: seed
+  logical, intent(in), value :: metal
+  integer(kind=4), intent(in), value :: ientropy, dual_energy, imetal, nstarmax
+  integer(kind=4), intent(in), value :: ivar_refine, sf_model, iturb
+  real(kind=8), intent(in), value :: var_cut_refine, smallc, smallr, eps_star
+  logical, intent(in), value :: sgs_turb
+
+  integer :: tid, igrid, ind, icell_global, nstar, offset, ipart
+  real(kind=8) :: d, mask, p, cs2, sigma2, t_ff, sfr_ff, t_dyn, alpha_vir, Mach2, b_turb, sigs, scrit
+  real(kind=8) :: mcell, mgas, PoissMean, dstar, Rand
+  type(curandStateXORWOW) :: state
+  logical :: ok
+
+  tid = (blockIdx%x - 1) * blockDim%x + threadIdx%x - 1
+  if (tid >= num_octs * twotondim) return
+
+  igrid = head_idx + tid / twotondim
+  ind   = mod(tid, twotondim) + 1
+  icell_global = (igrid - 1) * twotondim + ind
+
+  ! Get scan offset
+  offset = prefix_sum(icell_global - 1)
+  ! Check if THIS cell formed a star
+  if (prefix_sum(icell_global) == offset) then
+     ! No star formed in this cell
+     return
+  endif
+
+  ! Re-compute nstar using same RNG sequence
+  ok = .not. grid(igrid)%refined(ind)
+  d = uold(ind, 1, igrid)
+  ok = ok .and. (d > d0)
+  if (ivar_refine > 0) then
+     mask = uold(ind, ivar_refine, igrid)
+     ok = ok .and. (mask > var_cut_refine)
+  endif
+
+  if (ok) then
+     p = uold(ind, 5, igrid)
+     cs2 = max(gamma * p / d, smallc**2)
+     sigma2 = 0d0
+     if (sgs_turb) sigma2 = uold(ind, iturb, igrid) * 2d0 / 3d0
+
+     select case (sf_model)
+     case(1); sfr_ff = eps_star
+     case(2)
+        t_dyn = dx / (2d0 * sqrt(3d0 * (sigma2 + cs2)))
+        t_ff = 0.5427d0 / sqrt(factG * d)
+        sfr_ff = eps_star * exp(-1.6d0 * t_ff / t_dyn)
+     case(3)
+        alpha_vir = (15d0 * (sigma2 + cs2)) / (3.141592653589793d0 * factG * d * dx**2)
+        Mach2 = max(sigma2 / cs2, smallr)
+        b_turb = 1.0
+        sigs = log(1d0 + b_turb**2 * Mach2)
+        scrit = log(alpha_vir * (1d0 + (2d0 * Mach2**2 / (1d0 + Mach2))))
+        sfr_ff = (eps_star / 2d0) * exp(3d0 / 8d0 * sigs) * (2d0 - erfc_dev((sigs - scrit) / sqrt(2d0 * sigs)))
+     case default; sfr_ff = 0d0
+     end select
+
+     mcell = d * vol
+     t_ff = 0.5427d0 / sqrt(factG * d)
+     mgas = dt * (sfr_ff / t_ff) * mcell
+     PoissMean = mgas / mstar
+
+     call curand_init(seed, int(tid, 8), 0_8, state)
+     nstar = curand_poisson(state, PoissMean)
+     if (real(nstar, 8) * mstar > 0.9d0 * mcell) nstar = int(0.9d0 * mcell / mstar)
+     
+     if (nstar > 0) then
+        ipart = npart_old + offset + 1
+        if (ipart > nstarmax) return
+
+        ! Coordinates
+        do idim = 1, ndim
+           star_xp(ipart + (idim-1)*leading) = &
+                & (2*grid(igrid)%ckey(idim) + mod((ind-1)/2**(idim-1), 2) + 0.5d0) * dx - d_skip(idim)
+        end do
+
+        ! Velocity (gas velocity)
+        do idim = 1, ndim
+           star_vp(ipart + (idim-1)*leading) = uold(ind, idim+1, igrid)
+        end do
+
+        ! Mass, Time, Metal, Level, ID
+        star_mp(ipart) = real(nstar, 8) * mstar
+        Rand = curand_uniform_double(state)
+        star_tp(ipart) = aexp + Rand * dt
+        
+        if (metal) then
+           star_zp(ipart) = uold(ind, imetal, igrid) / d
+        else
+           star_zp(ipart) = z_ave * 0.02d0
+        endif
+        
+        star_levelp(ipart) = ilevel
+        star_idp(ipart) = npart_tot_old + offset + 1
+
+        ! Update gas density and pressure
+        dstar = real(nstar, 8) * mstar / vol
+        uold(ind, 1, igrid) = d - dstar
+        uold(ind, 5, igrid) = uold(ind, 1, igrid) * p / d
+        if (dual_energy >= 0) then
+           uold(ind, ientropy, igrid) = uold(ind, 5, igrid) / uold(ind, 1, igrid)**gamma
+        endif
+     endif
+  endif
+
+end subroutine star_formation_kernel
+
+!> Device implementation of erfc for sf_model=3.
+attributes(device) function erfc_dev(x) result(res)
+  real(kind=8), intent(in) :: x
+  real(kind=8) :: res
+  res = 1.0d0 - erf(x)
+end function erfc_dev
+
+end module star_device

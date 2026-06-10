@@ -4,6 +4,7 @@ module gpu_runner
   use oct_commons, only: oct
   use gpu_utils
   use cudafor
+  use curand_device
   implicit none
   integer, dimension(1:3), parameter::n_nbor = (/1,2,2/)
 
@@ -37,10 +38,11 @@ module gpu_runner
   integer(kind=4), device, allocatable, dimension(:)   :: sortp
   integer(i8b),    device, allocatable, dimension(:)   :: idp
 
-!!$  real(kind=dp),   device, allocatable, dimension(:,:) :: jp
-!!$  real(kind=dp),   device, allocatable, dimension(:)   :: zp, tp, tm, size_p, charge
-!!$  integer(i8b),    device, allocatable, dimension(:)   :: idm
-!!$  integer(kind=4), device, allocatable, dimension(:)   :: idt
+  !> Arrays to hold the star particle variables on the device
+  real(kind=dp),   device, allocatable, dimension(:,:) :: star_xp, star_vp
+  real(kind=dp),   device, allocatable, dimension(:)   :: star_mp, star_tp, star_zp
+  integer(kind=4), device, allocatable, dimension(:)   :: star_levelp
+  integer(i8b),    device, allocatable, dimension(:)   :: star_idp
 
   !> xp_swap/isp_swap/idp_swap: gather/scatter scratch and other tasks.
   real(kind=dp),   device, allocatable, dimension(:) :: xp_swap
@@ -407,8 +409,99 @@ contains
 
   end subroutine gpu_cooling
 
-! fuse relies on cooperative groups grid sync which requires all blocks to
-! reside concurrently on the SM. On large problems RAMSES needs more blocks.
+  !> @brief
+  !> Star formation routine on a GPU
+  !>
+  !> @detail
+  !> @param[in] sim : The simulation object
+  !> @param[in] ilevel : The refinement level to update
+  !> @param[out] mstar_loc : The mass formed on this rank
+  !>
+  subroutine gpu_star_formation(sim, ilevel, mstar_loc)
+   use nvtx
+   use star_device, only: count_star_formation_kernel, star_formation_kernel
+   use ramses_commons, only: ramses_t
+#ifndef WITHOUTMPI
+   use mpi
+#endif
+   type(ramses_t), intent(inout) :: sim
+   integer, intent(in) :: ilevel
+   real(kind=8), intent(inout) :: mstar_loc
+
+   integer(kind=4) :: head_idx, num_octs, icpu
+   integer(kind=4) :: num_threads, num_blocks
+   real(kind=8) :: scale_nH, scale_T2, scale_l, scale_d, scale_t, scale_v
+   real(kind=8) :: dx, vol, factG, d0, mstar
+   integer(kind=4) :: npart_old, npart_new
+   integer(i8b) :: npart_tot_old
+   integer(kind=4), device :: npart_new_d
+
+   ! Conversion factor from user units to cgs units
+   call units(sim%r,sim%g,scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
+
+   ! Set some constants
+   dx = sim%r%boxlen/2**ilevel
+   vol = dx**ndim
+   factG = 1.0d0
+   if(sim%r%cosmo) factG = 3.0d0/8.0d0/ACOS(-1.0d0) * sim%g%omega_m * sim%g%aexp 
+
+   d0 = sim%r%n_star / scale_nH
+   mstar = sim%r%m_star * sim%r%mass_sph
+
+   head_idx = sim%m%head(ilevel)
+   num_octs = sim%m%noct(ilevel)
+   num_threads = 256
+   num_blocks = (num_octs * twotondim + num_threads - 1) / num_threads
+
+   if (num_octs <= 0) return
+
+   call nvtxStartRange("GPU Star Formation Pass 1", color=3)!blue
+   call count_star_formation_kernel<<<num_blocks, num_threads>>>(grid, uold, prefix_sum, &
+        & head_idx, num_octs, ilevel, d0, dx, vol, factG, mstar, &
+        & sim%r%ivar_refine, sim%r%var_cut_refine, &
+        & sim%g%dtnew(ilevel), sim%r%seed, sim%g%aexp, sim%r%gamma, &
+        & sim%r%smallc, sim%r%smallr, sim%r%sf_model, sim%r%eps_star, &
+        & sim%r%sgs_turb, sim%r%iturb)
+   call GPU_Error_Check(__FILE__, __LINE__)
+   call nvtxEndRange()
+
+   ! Prefix sum to get local count
+   call gpu_scan((head_idx - 1) * twotondim + 1, num_octs * twotondim, npart_new_d)
+   npart_new = npart_new_d
+
+   if (npart_new > 0) then
+
+      npart_old = sim%star%npart
+      npart_tot_old = sim%star%npart_tot
+
+      if (npart_old + npart_new > sim%r%nstarmax) then
+         write(*,*)'Not enough memory for star particles on GPU'
+         stop
+      endif
+
+      call nvtxStartRange("GPU Star Formation Pass 2", color=3)!blue
+      call star_formation_kernel<<<num_blocks, num_threads>>>(grid, uold, &
+           & star_xp, star_vp, star_mp, star_tp, star_zp, star_levelp, star_idp, &
+           & prefix_sum, d_skip, &
+           & head_idx, num_octs, ilevel, dx, vol, mstar, &
+           & npart_old, npart_tot_old + nstar_cum(sim%g%myid-1), &
+           & sim%g%dtnew(ilevel), sim%r%seed, sim%g%aexp, sim%r%gamma, &
+           & sim%r%metal, sim%r%z_ave, sim%r%ientropy, sim%r%dual_energy, sim%r%imetal, &
+           & sim%r%nstarmax, &
+           & d0, factG, sim%r%ivar_refine, sim%r%var_cut_refine, sim%r%smallc, sim%r%smallr, &
+           & sim%r%sf_model, sim%r%eps_star, sim%r%sgs_turb, sim%r%iturb)
+      call GPU_Error_Check(__FILE__, __LINE__)
+      call nvtxEndRange()
+
+   endif
+
+   ! Update host bookkeeping
+   sim%star%npart = npart_old + npart_new
+   mstar_loc = real(npart_new, 8) * mstar
+   sim%star%npart_tot = sim%star%npart_tot + npart_new
+
+  end subroutine gpu_star_formation
+
 !#define FUSE_LEVEL
 !#define FUSE_HILBERT
 !#define FUSE_CACHE

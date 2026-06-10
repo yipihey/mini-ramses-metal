@@ -466,8 +466,10 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
         gpu/gpu_utils.cuf
         gpu/gpu_hydro.cuf
         gpu/gpu_cooling.cuf
+        gpu/gpu_star.cuf
         gpu/gpu_rho.cuf
         gpu/gpu_mg.cuf
+
         gpu/gpu_refine.cuf
         gpu/gpu_flag.cuf
         gpu/gpu_runner.cuf

@@ -12,7 +12,6 @@ module part_device
        & partial_sums_0, partial_sums_1, partial_sums_2, &
        & partial_sums_dp_0, partial_sums_dp_1, partial_sums_dp_2, &
        & xp, vp, mp, phip, levelp, sortp, idp, &
-!       & jp, zp, tp, tm, size_p, charge, idm, idt, &
        & xp_swap, isp_swap, idp_swap, &
        & gpu_scan, gpu_scan_dp, d_skip
 #if defined(CUB_SORT_PART)
