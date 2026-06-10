@@ -127,31 +127,31 @@ module hydro_device
   !> @brief
   !> Anisotropic edge corner-state family (CPU h%qRT/h%qRB/h%qLT/h%qLB)
   type, public :: subgrid_2x3x3edge_corner   ! edges parallel to x (feed emfx)
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid) :: density
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid) :: velocity_y
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid) :: velocity_z
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid) :: pressure
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid) :: Bx
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid) :: By
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid) :: Bz
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: density
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: velocity_y
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: velocity_z
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: pressure
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: By
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: Bz
   end type subgrid_2x3x3edge_corner
   type, public :: subgrid_3x2x3edge_corner   ! edges parallel to y (feed emfy)
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid) :: density
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_x
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_z
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid) :: pressure
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid) :: Bx
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid) :: By
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid) :: Bz
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: density
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: velocity_x
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: velocity_z
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: pressure
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: By
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: Bz
   end type subgrid_3x2x3edge_corner
   type, public :: subgrid_3x3x2edge_corner   ! edges parallel to z (feed emfz)
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1) :: density
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_x
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_y
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1) :: pressure
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bx
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1) :: By
-     real(kind=dp), dimension(1:4, 0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bz
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: density
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: velocity_x
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: velocity_y
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: pressure
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: By
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: Bz
   end type subgrid_3x3x2edge_corner
 
   !> @brief
@@ -2857,48 +2857,48 @@ contains
        ! edge-parallel velocity u is not stored (no 2D EMF solver reads it);
        ! components stay in the PHYSICAL frame (gather_corner_x permutes, C3).
        if (oka_x .and. okp_y .and. okp_z) then   ! qRT -> LL slot
-          corner_x%density   (iqLL,ix-2,iy-1,k-1) = r + (+dry+drz)
-          corner_x%velocity_y(iqLL,ix-2,iy-1,k-1) = v + (+dvy+dvz)
-          corner_x%velocity_z(iqLL,ix-2,iy-1,k-1) = w + (+dwy+dwz)
-          corner_x%pressure  (iqLL,ix-2,iy-1,k-1) = p + (+dpy+dpz)
-          corner_x%Bx(iqLL,ix-2,iy-1,k-1) = A + (+dAy+dAz)
-          corner_x%By(iqLL,ix-2,iy-1,k-1) = BR + (   +dBRz)
-          corner_x%Bz(iqLL,ix-2,iy-1,k-1) = CR + (+dCRy   )
-          if (corner_x%density (iqLL,ix-2,iy-1,k-1) < smallr) corner_x%density (iqLL,ix-2,iy-1,k-1) = r
-          if (corner_x%pressure(iqLL,ix-2,iy-1,k-1) < smallp) corner_x%pressure(iqLL,ix-2,iy-1,k-1) = p
+          corner_x%density(ix-2,iy-1,k-1,iqLL) = r + (+dry+drz)
+          corner_x%velocity_y(ix-2,iy-1,k-1,iqLL) = v + (+dvy+dvz)
+          corner_x%velocity_z(ix-2,iy-1,k-1,iqLL) = w + (+dwy+dwz)
+          corner_x%pressure(ix-2,iy-1,k-1,iqLL) = p + (+dpy+dpz)
+          corner_x%Bx(ix-2,iy-1,k-1,iqLL) = A + (+dAy+dAz)
+          corner_x%By(ix-2,iy-1,k-1,iqLL) = BR + (   +dBRz)
+          corner_x%Bz(ix-2,iy-1,k-1,iqLL) = CR + (+dCRy   )
+          if (corner_x%density(ix-2,iy-1,k-1,iqLL) < smallr) corner_x%density(ix-2,iy-1,k-1,iqLL) = r
+          if (corner_x%pressure(ix-2,iy-1,k-1,iqLL) < smallp) corner_x%pressure(ix-2,iy-1,k-1,iqLL) = p
        end if
        if (oka_x .and. okp_y .and. okm_z) then   ! qRB -> LR slot
-          corner_x%density   (iqLR,ix-2,iy-1,k-2) = r + (+dry-drz)
-          corner_x%velocity_y(iqLR,ix-2,iy-1,k-2) = v + (+dvy-dvz)
-          corner_x%velocity_z(iqLR,ix-2,iy-1,k-2) = w + (+dwy-dwz)
-          corner_x%pressure  (iqLR,ix-2,iy-1,k-2) = p + (+dpy-dpz)
-          corner_x%Bx(iqLR,ix-2,iy-1,k-2) = A + (+dAy-dAz)
-          corner_x%By(iqLR,ix-2,iy-1,k-2) = BR + (   -dBRz)
-          corner_x%Bz(iqLR,ix-2,iy-1,k-2) = CL + (+dCLy   )
-          if (corner_x%density (iqLR,ix-2,iy-1,k-2) < smallr) corner_x%density (iqLR,ix-2,iy-1,k-2) = r
-          if (corner_x%pressure(iqLR,ix-2,iy-1,k-2) < smallp) corner_x%pressure(iqLR,ix-2,iy-1,k-2) = p
+          corner_x%density(ix-2,iy-1,k-2,iqLR) = r + (+dry-drz)
+          corner_x%velocity_y(ix-2,iy-1,k-2,iqLR) = v + (+dvy-dvz)
+          corner_x%velocity_z(ix-2,iy-1,k-2,iqLR) = w + (+dwy-dwz)
+          corner_x%pressure(ix-2,iy-1,k-2,iqLR) = p + (+dpy-dpz)
+          corner_x%Bx(ix-2,iy-1,k-2,iqLR) = A + (+dAy-dAz)
+          corner_x%By(ix-2,iy-1,k-2,iqLR) = BR + (   -dBRz)
+          corner_x%Bz(ix-2,iy-1,k-2,iqLR) = CL + (+dCLy   )
+          if (corner_x%density(ix-2,iy-1,k-2,iqLR) < smallr) corner_x%density(ix-2,iy-1,k-2,iqLR) = r
+          if (corner_x%pressure(ix-2,iy-1,k-2,iqLR) < smallp) corner_x%pressure(ix-2,iy-1,k-2,iqLR) = p
        end if
        if (oka_x .and. okm_y .and. okp_z) then   ! qLT -> RL slot
-          corner_x%density   (iqRL,ix-2,iy-2,k-1) = r + (-dry+drz)
-          corner_x%velocity_y(iqRL,ix-2,iy-2,k-1) = v + (-dvy+dvz)
-          corner_x%velocity_z(iqRL,ix-2,iy-2,k-1) = w + (-dwy+dwz)
-          corner_x%pressure  (iqRL,ix-2,iy-2,k-1) = p + (-dpy+dpz)
-          corner_x%Bx(iqRL,ix-2,iy-2,k-1) = A + (-dAy+dAz)
-          corner_x%By(iqRL,ix-2,iy-2,k-1) = BL + (   +dBLz)
-          corner_x%Bz(iqRL,ix-2,iy-2,k-1) = CR + (-dCRy   )
-          if (corner_x%density (iqRL,ix-2,iy-2,k-1) < smallr) corner_x%density (iqRL,ix-2,iy-2,k-1) = r
-          if (corner_x%pressure(iqRL,ix-2,iy-2,k-1) < smallp) corner_x%pressure(iqRL,ix-2,iy-2,k-1) = p
+          corner_x%density(ix-2,iy-2,k-1,iqRL) = r + (-dry+drz)
+          corner_x%velocity_y(ix-2,iy-2,k-1,iqRL) = v + (-dvy+dvz)
+          corner_x%velocity_z(ix-2,iy-2,k-1,iqRL) = w + (-dwy+dwz)
+          corner_x%pressure(ix-2,iy-2,k-1,iqRL) = p + (-dpy+dpz)
+          corner_x%Bx(ix-2,iy-2,k-1,iqRL) = A + (-dAy+dAz)
+          corner_x%By(ix-2,iy-2,k-1,iqRL) = BL + (   +dBLz)
+          corner_x%Bz(ix-2,iy-2,k-1,iqRL) = CR + (-dCRy   )
+          if (corner_x%density(ix-2,iy-2,k-1,iqRL) < smallr) corner_x%density(ix-2,iy-2,k-1,iqRL) = r
+          if (corner_x%pressure(ix-2,iy-2,k-1,iqRL) < smallp) corner_x%pressure(ix-2,iy-2,k-1,iqRL) = p
        end if
        if (oka_x .and. okm_y .and. okm_z) then   ! qLB -> RR slot
-          corner_x%density   (iqRR,ix-2,iy-2,k-2) = r + (-dry-drz)
-          corner_x%velocity_y(iqRR,ix-2,iy-2,k-2) = v + (-dvy-dvz)
-          corner_x%velocity_z(iqRR,ix-2,iy-2,k-2) = w + (-dwy-dwz)
-          corner_x%pressure  (iqRR,ix-2,iy-2,k-2) = p + (-dpy-dpz)
-          corner_x%Bx(iqRR,ix-2,iy-2,k-2) = A + (-dAy-dAz)
-          corner_x%By(iqRR,ix-2,iy-2,k-2) = BL + (   -dBLz)
-          corner_x%Bz(iqRR,ix-2,iy-2,k-2) = CL + (-dCLy   )
-          if (corner_x%density (iqRR,ix-2,iy-2,k-2) < smallr) corner_x%density (iqRR,ix-2,iy-2,k-2) = r
-          if (corner_x%pressure(iqRR,ix-2,iy-2,k-2) < smallp) corner_x%pressure(iqRR,ix-2,iy-2,k-2) = p
+          corner_x%density(ix-2,iy-2,k-2,iqRR) = r + (-dry-drz)
+          corner_x%velocity_y(ix-2,iy-2,k-2,iqRR) = v + (-dvy-dvz)
+          corner_x%velocity_z(ix-2,iy-2,k-2,iqRR) = w + (-dwy-dwz)
+          corner_x%pressure(ix-2,iy-2,k-2,iqRR) = p + (-dpy-dpz)
+          corner_x%Bx(ix-2,iy-2,k-2,iqRR) = A + (-dAy-dAz)
+          corner_x%By(ix-2,iy-2,k-2,iqRR) = BL + (   -dBLz)
+          corner_x%Bz(ix-2,iy-2,k-2,iqRR) = CL + (-dCLy   )
+          if (corner_x%density(ix-2,iy-2,k-2,iqRR) < smallr) corner_x%density(ix-2,iy-2,k-2,iqRR) = r
+          if (corner_x%pressure(ix-2,iy-2,k-2,iqRR) < smallp) corner_x%pressure(ix-2,iy-2,k-2,iqRR) = p
        end if
 
        ! ---- Y-edge corner states (orientation 2) (CPU trace3d:1290-1353) ------
@@ -2908,48 +2908,48 @@ contains
        ! feeds the RL slot and LT the LR slot (cf. the CPU Ey gather swap,
        ! umuscl.f90:236-242). The edge-parallel velocity v is not stored.
        if (okp_x .and. oka_y .and. okp_z) then   ! qRT -> LL slot
-          corner_y%density   (iqLL,ix-1,iy-2,k-1) = r + (+drx+drz)
-          corner_y%velocity_x(iqLL,ix-1,iy-2,k-1) = u + (+dux+duz)
-          corner_y%velocity_z(iqLL,ix-1,iy-2,k-1) = w + (+dwx+dwz)
-          corner_y%pressure  (iqLL,ix-1,iy-2,k-1) = p + (+dpx+dpz)
-          corner_y%Bx(iqLL,ix-1,iy-2,k-1) = AR + (   +dARz)
-          corner_y%By(iqLL,ix-1,iy-2,k-1) = B + (+dBx+dBz)
-          corner_y%Bz(iqLL,ix-1,iy-2,k-1) = CR + (+dCRx   )
-          if (corner_y%density (iqLL,ix-1,iy-2,k-1) < smallr) corner_y%density (iqLL,ix-1,iy-2,k-1) = r
-          if (corner_y%pressure(iqLL,ix-1,iy-2,k-1) < smallp) corner_y%pressure(iqLL,ix-1,iy-2,k-1) = p
+          corner_y%density(ix-1,iy-2,k-1,iqLL) = r + (+drx+drz)
+          corner_y%velocity_x(ix-1,iy-2,k-1,iqLL) = u + (+dux+duz)
+          corner_y%velocity_z(ix-1,iy-2,k-1,iqLL) = w + (+dwx+dwz)
+          corner_y%pressure(ix-1,iy-2,k-1,iqLL) = p + (+dpx+dpz)
+          corner_y%Bx(ix-1,iy-2,k-1,iqLL) = AR + (   +dARz)
+          corner_y%By(ix-1,iy-2,k-1,iqLL) = B + (+dBx+dBz)
+          corner_y%Bz(ix-1,iy-2,k-1,iqLL) = CR + (+dCRx   )
+          if (corner_y%density(ix-1,iy-2,k-1,iqLL) < smallr) corner_y%density(ix-1,iy-2,k-1,iqLL) = r
+          if (corner_y%pressure(ix-1,iy-2,k-1,iqLL) < smallp) corner_y%pressure(ix-1,iy-2,k-1,iqLL) = p
        end if
        if (okp_x .and. oka_y .and. okm_z) then   ! qRB -> RL slot
-          corner_y%density   (iqRL,ix-1,iy-2,k-2) = r + (+drx-drz)
-          corner_y%velocity_x(iqRL,ix-1,iy-2,k-2) = u + (+dux-duz)
-          corner_y%velocity_z(iqRL,ix-1,iy-2,k-2) = w + (+dwx-dwz)
-          corner_y%pressure  (iqRL,ix-1,iy-2,k-2) = p + (+dpx-dpz)
-          corner_y%Bx(iqRL,ix-1,iy-2,k-2) = AR + (   -dARz)
-          corner_y%By(iqRL,ix-1,iy-2,k-2) = B + (+dBx-dBz)
-          corner_y%Bz(iqRL,ix-1,iy-2,k-2) = CL + (+dCLx   )
-          if (corner_y%density (iqRL,ix-1,iy-2,k-2) < smallr) corner_y%density (iqRL,ix-1,iy-2,k-2) = r
-          if (corner_y%pressure(iqRL,ix-1,iy-2,k-2) < smallp) corner_y%pressure(iqRL,ix-1,iy-2,k-2) = p
+          corner_y%density(ix-1,iy-2,k-2,iqRL) = r + (+drx-drz)
+          corner_y%velocity_x(ix-1,iy-2,k-2,iqRL) = u + (+dux-duz)
+          corner_y%velocity_z(ix-1,iy-2,k-2,iqRL) = w + (+dwx-dwz)
+          corner_y%pressure(ix-1,iy-2,k-2,iqRL) = p + (+dpx-dpz)
+          corner_y%Bx(ix-1,iy-2,k-2,iqRL) = AR + (   -dARz)
+          corner_y%By(ix-1,iy-2,k-2,iqRL) = B + (+dBx-dBz)
+          corner_y%Bz(ix-1,iy-2,k-2,iqRL) = CL + (+dCLx   )
+          if (corner_y%density(ix-1,iy-2,k-2,iqRL) < smallr) corner_y%density(ix-1,iy-2,k-2,iqRL) = r
+          if (corner_y%pressure(ix-1,iy-2,k-2,iqRL) < smallp) corner_y%pressure(ix-1,iy-2,k-2,iqRL) = p
        end if
        if (okm_x .and. oka_y .and. okp_z) then   ! qLT -> LR slot
-          corner_y%density   (iqLR,ix-2,iy-2,k-1) = r + (-drx+drz)
-          corner_y%velocity_x(iqLR,ix-2,iy-2,k-1) = u + (-dux+duz)
-          corner_y%velocity_z(iqLR,ix-2,iy-2,k-1) = w + (-dwx+dwz)
-          corner_y%pressure  (iqLR,ix-2,iy-2,k-1) = p + (-dpx+dpz)
-          corner_y%Bx(iqLR,ix-2,iy-2,k-1) = AL + (   +dALz)
-          corner_y%By(iqLR,ix-2,iy-2,k-1) = B + (-dBx+dBz)
-          corner_y%Bz(iqLR,ix-2,iy-2,k-1) = CR + (-dCRx   )
-          if (corner_y%density (iqLR,ix-2,iy-2,k-1) < smallr) corner_y%density (iqLR,ix-2,iy-2,k-1) = r
-          if (corner_y%pressure(iqLR,ix-2,iy-2,k-1) < smallp) corner_y%pressure(iqLR,ix-2,iy-2,k-1) = p
+          corner_y%density(ix-2,iy-2,k-1,iqLR) = r + (-drx+drz)
+          corner_y%velocity_x(ix-2,iy-2,k-1,iqLR) = u + (-dux+duz)
+          corner_y%velocity_z(ix-2,iy-2,k-1,iqLR) = w + (-dwx+dwz)
+          corner_y%pressure(ix-2,iy-2,k-1,iqLR) = p + (-dpx+dpz)
+          corner_y%Bx(ix-2,iy-2,k-1,iqLR) = AL + (   +dALz)
+          corner_y%By(ix-2,iy-2,k-1,iqLR) = B + (-dBx+dBz)
+          corner_y%Bz(ix-2,iy-2,k-1,iqLR) = CR + (-dCRx   )
+          if (corner_y%density(ix-2,iy-2,k-1,iqLR) < smallr) corner_y%density(ix-2,iy-2,k-1,iqLR) = r
+          if (corner_y%pressure(ix-2,iy-2,k-1,iqLR) < smallp) corner_y%pressure(ix-2,iy-2,k-1,iqLR) = p
        end if
        if (okm_x .and. oka_y .and. okm_z) then   ! qLB -> RR slot
-          corner_y%density   (iqRR,ix-2,iy-2,k-2) = r + (-drx-drz)
-          corner_y%velocity_x(iqRR,ix-2,iy-2,k-2) = u + (-dux-duz)
-          corner_y%velocity_z(iqRR,ix-2,iy-2,k-2) = w + (-dwx-dwz)
-          corner_y%pressure  (iqRR,ix-2,iy-2,k-2) = p + (-dpx-dpz)
-          corner_y%Bx(iqRR,ix-2,iy-2,k-2) = AL + (   -dALz)
-          corner_y%By(iqRR,ix-2,iy-2,k-2) = B + (-dBx-dBz)
-          corner_y%Bz(iqRR,ix-2,iy-2,k-2) = CL + (-dCLx   )
-          if (corner_y%density (iqRR,ix-2,iy-2,k-2) < smallr) corner_y%density (iqRR,ix-2,iy-2,k-2) = r
-          if (corner_y%pressure(iqRR,ix-2,iy-2,k-2) < smallp) corner_y%pressure(iqRR,ix-2,iy-2,k-2) = p
+          corner_y%density(ix-2,iy-2,k-2,iqRR) = r + (-drx-drz)
+          corner_y%velocity_x(ix-2,iy-2,k-2,iqRR) = u + (-dux-duz)
+          corner_y%velocity_z(ix-2,iy-2,k-2,iqRR) = w + (-dwx-dwz)
+          corner_y%pressure(ix-2,iy-2,k-2,iqRR) = p + (-dpx-dpz)
+          corner_y%Bx(ix-2,iy-2,k-2,iqRR) = AL + (   -dALz)
+          corner_y%By(ix-2,iy-2,k-2,iqRR) = B + (-dBx-dBz)
+          corner_y%Bz(ix-2,iy-2,k-2,iqRR) = CL + (-dCLx   )
+          if (corner_y%density(ix-2,iy-2,k-2,iqRR) < smallr) corner_y%density(ix-2,iy-2,k-2,iqRR) = r
+          if (corner_y%pressure(ix-2,iy-2,k-2,iqRR) < smallp) corner_y%pressure(ix-2,iy-2,k-2,iqRR) = p
        end if
 
        ! ---- Z-edge corner states (orientation 3) (CPU trace3d:1354-1417) ------
@@ -2957,48 +2957,48 @@ contains
        ! RT corner is the LL corner of edge (ix-1,iy-1,k-2), etc. The
        ! edge-parallel velocity w is not stored.
        if (okp_x .and. okp_y .and. oka_z) then   ! qRT -> LL slot
-          corner_z%density   (iqLL,ix-1,iy-1,k-2) = r + (+drx+dry)
-          corner_z%velocity_x(iqLL,ix-1,iy-1,k-2) = u + (+dux+duy)
-          corner_z%velocity_y(iqLL,ix-1,iy-1,k-2) = v + (+dvx+dvy)
-          corner_z%pressure  (iqLL,ix-1,iy-1,k-2) = p + (+dpx+dpy)
-          corner_z%Bx(iqLL,ix-1,iy-1,k-2) = AR + (   +dARy)
-          corner_z%By(iqLL,ix-1,iy-1,k-2) = BR + (+dBRx   )
-          corner_z%Bz(iqLL,ix-1,iy-1,k-2) = C + (+dCx+dCy)
-          if (corner_z%density (iqLL,ix-1,iy-1,k-2) < smallr) corner_z%density (iqLL,ix-1,iy-1,k-2) = r
-          if (corner_z%pressure(iqLL,ix-1,iy-1,k-2) < smallp) corner_z%pressure(iqLL,ix-1,iy-1,k-2) = p
+          corner_z%density(ix-1,iy-1,k-2,iqLL) = r + (+drx+dry)
+          corner_z%velocity_x(ix-1,iy-1,k-2,iqLL) = u + (+dux+duy)
+          corner_z%velocity_y(ix-1,iy-1,k-2,iqLL) = v + (+dvx+dvy)
+          corner_z%pressure(ix-1,iy-1,k-2,iqLL) = p + (+dpx+dpy)
+          corner_z%Bx(ix-1,iy-1,k-2,iqLL) = AR + (   +dARy)
+          corner_z%By(ix-1,iy-1,k-2,iqLL) = BR + (+dBRx   )
+          corner_z%Bz(ix-1,iy-1,k-2,iqLL) = C + (+dCx+dCy)
+          if (corner_z%density(ix-1,iy-1,k-2,iqLL) < smallr) corner_z%density(ix-1,iy-1,k-2,iqLL) = r
+          if (corner_z%pressure(ix-1,iy-1,k-2,iqLL) < smallp) corner_z%pressure(ix-1,iy-1,k-2,iqLL) = p
        end if
        if (okp_x .and. okm_y .and. oka_z) then   ! qRB -> LR slot
-          corner_z%density   (iqLR,ix-1,iy-2,k-2) = r + (+drx-dry)
-          corner_z%velocity_x(iqLR,ix-1,iy-2,k-2) = u + (+dux-duy)
-          corner_z%velocity_y(iqLR,ix-1,iy-2,k-2) = v + (+dvx-dvy)
-          corner_z%pressure  (iqLR,ix-1,iy-2,k-2) = p + (+dpx-dpy)
-          corner_z%Bx(iqLR,ix-1,iy-2,k-2) = AR + (   -dARy)
-          corner_z%By(iqLR,ix-1,iy-2,k-2) = BL + (+dBLx   )
-          corner_z%Bz(iqLR,ix-1,iy-2,k-2) = C + (+dCx-dCy)
-          if (corner_z%density (iqLR,ix-1,iy-2,k-2) < smallr) corner_z%density (iqLR,ix-1,iy-2,k-2) = r
-          if (corner_z%pressure(iqLR,ix-1,iy-2,k-2) < smallp) corner_z%pressure(iqLR,ix-1,iy-2,k-2) = p
+          corner_z%density(ix-1,iy-2,k-2,iqLR) = r + (+drx-dry)
+          corner_z%velocity_x(ix-1,iy-2,k-2,iqLR) = u + (+dux-duy)
+          corner_z%velocity_y(ix-1,iy-2,k-2,iqLR) = v + (+dvx-dvy)
+          corner_z%pressure(ix-1,iy-2,k-2,iqLR) = p + (+dpx-dpy)
+          corner_z%Bx(ix-1,iy-2,k-2,iqLR) = AR + (   -dARy)
+          corner_z%By(ix-1,iy-2,k-2,iqLR) = BL + (+dBLx   )
+          corner_z%Bz(ix-1,iy-2,k-2,iqLR) = C + (+dCx-dCy)
+          if (corner_z%density(ix-1,iy-2,k-2,iqLR) < smallr) corner_z%density(ix-1,iy-2,k-2,iqLR) = r
+          if (corner_z%pressure(ix-1,iy-2,k-2,iqLR) < smallp) corner_z%pressure(ix-1,iy-2,k-2,iqLR) = p
        end if
        if (okm_x .and. okp_y .and. oka_z) then   ! qLT -> RL slot
-          corner_z%density   (iqRL,ix-2,iy-1,k-2) = r + (-drx+dry)
-          corner_z%velocity_x(iqRL,ix-2,iy-1,k-2) = u + (-dux+duy)
-          corner_z%velocity_y(iqRL,ix-2,iy-1,k-2) = v + (-dvx+dvy)
-          corner_z%pressure  (iqRL,ix-2,iy-1,k-2) = p + (-dpx+dpy)
-          corner_z%Bx(iqRL,ix-2,iy-1,k-2) = AL + (   +dALy)
-          corner_z%By(iqRL,ix-2,iy-1,k-2) = BR + (-dBRx   )
-          corner_z%Bz(iqRL,ix-2,iy-1,k-2) = C + (-dCx+dCy)
-          if (corner_z%density (iqRL,ix-2,iy-1,k-2) < smallr) corner_z%density (iqRL,ix-2,iy-1,k-2) = r
-          if (corner_z%pressure(iqRL,ix-2,iy-1,k-2) < smallp) corner_z%pressure(iqRL,ix-2,iy-1,k-2) = p
+          corner_z%density(ix-2,iy-1,k-2,iqRL) = r + (-drx+dry)
+          corner_z%velocity_x(ix-2,iy-1,k-2,iqRL) = u + (-dux+duy)
+          corner_z%velocity_y(ix-2,iy-1,k-2,iqRL) = v + (-dvx+dvy)
+          corner_z%pressure(ix-2,iy-1,k-2,iqRL) = p + (-dpx+dpy)
+          corner_z%Bx(ix-2,iy-1,k-2,iqRL) = AL + (   +dALy)
+          corner_z%By(ix-2,iy-1,k-2,iqRL) = BR + (-dBRx   )
+          corner_z%Bz(ix-2,iy-1,k-2,iqRL) = C + (-dCx+dCy)
+          if (corner_z%density(ix-2,iy-1,k-2,iqRL) < smallr) corner_z%density(ix-2,iy-1,k-2,iqRL) = r
+          if (corner_z%pressure(ix-2,iy-1,k-2,iqRL) < smallp) corner_z%pressure(ix-2,iy-1,k-2,iqRL) = p
        end if
        if (okm_x .and. okm_y .and. oka_z) then   ! qLB -> RR slot
-          corner_z%density   (iqRR,ix-2,iy-2,k-2) = r + (-drx-dry)
-          corner_z%velocity_x(iqRR,ix-2,iy-2,k-2) = u + (-dux-duy)
-          corner_z%velocity_y(iqRR,ix-2,iy-2,k-2) = v + (-dvx-dvy)
-          corner_z%pressure  (iqRR,ix-2,iy-2,k-2) = p + (-dpx-dpy)
-          corner_z%Bx(iqRR,ix-2,iy-2,k-2) = AL + (   -dALy)
-          corner_z%By(iqRR,ix-2,iy-2,k-2) = BL + (-dBLx   )
-          corner_z%Bz(iqRR,ix-2,iy-2,k-2) = C + (-dCx-dCy)
-          if (corner_z%density (iqRR,ix-2,iy-2,k-2) < smallr) corner_z%density (iqRR,ix-2,iy-2,k-2) = r
-          if (corner_z%pressure(iqRR,ix-2,iy-2,k-2) < smallp) corner_z%pressure(iqRR,ix-2,iy-2,k-2) = p
+          corner_z%density(ix-2,iy-2,k-2,iqRR) = r + (-drx-dry)
+          corner_z%velocity_x(ix-2,iy-2,k-2,iqRR) = u + (-dux-duy)
+          corner_z%velocity_y(ix-2,iy-2,k-2,iqRR) = v + (-dvx-dvy)
+          corner_z%pressure(ix-2,iy-2,k-2,iqRR) = p + (-dpx-dpy)
+          corner_z%Bx(ix-2,iy-2,k-2,iqRR) = AL + (   -dALy)
+          corner_z%By(ix-2,iy-2,k-2,iqRR) = BL + (-dBLx   )
+          corner_z%Bz(ix-2,iy-2,k-2,iqRR) = C + (-dCx-dCy)
+          if (corner_z%density(ix-2,iy-2,k-2,iqRR) < smallr) corner_z%density(ix-2,iy-2,k-2,iqRR) = r
+          if (corner_z%pressure(ix-2,iy-2,k-2,iqRR) < smallp) corner_z%pressure(ix-2,iy-2,k-2,iqRR) = p
        end if
 
        ! ---- Passive-scalar advection predictor (CPU trace3d:1423-1448) --------
@@ -3219,14 +3219,14 @@ contains
     integer, value :: islot, I, J, K
     type(primitive_mhd_t) :: q
     ! Orientation 1 (Ex): lp1=3, lp2=4, lor=2; bp1=7, bp2=8, bor=6.
-    q%density    = c%density   (islot,I,J,K)
-    q%pressure   = c%pressure  (islot,I,J,K)
-    q%velocity_x = c%velocity_y(islot,I,J,K)
-    q%velocity_y = c%velocity_z(islot,I,J,K)
+    q%density    = c%density(I,J,K,islot)
+    q%pressure   = c%pressure(I,J,K,islot)
+    q%velocity_x = c%velocity_y(I,J,K,islot)
+    q%velocity_y = c%velocity_z(I,J,K,islot)
     q%velocity_z = 0.0_dp
-    q%Bx         = c%By(islot,I,J,K)
-    q%By         = c%Bz(islot,I,J,K)
-    q%Bz         = c%Bx(islot,I,J,K)
+    q%Bx         = c%By(I,J,K,islot)
+    q%By         = c%Bz(I,J,K,islot)
+    q%Bz         = c%Bx(I,J,K,islot)
   end function gather_corner_x
 
   attributes(device) function gather_corner_y(c, islot, I, J, K) result(q)
@@ -3234,14 +3234,14 @@ contains
     integer, value :: islot, I, J, K
     type(primitive_mhd_t) :: q
     ! Orientation 2 (Ey): lp1=4, lp2=2, lor=3; bp1=8, bp2=6, bor=7.
-    q%density    = c%density   (islot,I,J,K)
-    q%pressure   = c%pressure  (islot,I,J,K)
-    q%velocity_x = c%velocity_z(islot,I,J,K)
-    q%velocity_y = c%velocity_x(islot,I,J,K)
+    q%density    = c%density(I,J,K,islot)
+    q%pressure   = c%pressure(I,J,K,islot)
+    q%velocity_x = c%velocity_z(I,J,K,islot)
+    q%velocity_y = c%velocity_x(I,J,K,islot)
     q%velocity_z = 0.0_dp
-    q%Bx         = c%Bz(islot,I,J,K)
-    q%By         = c%Bx(islot,I,J,K)
-    q%Bz         = c%By(islot,I,J,K)
+    q%Bx         = c%Bz(I,J,K,islot)
+    q%By         = c%Bx(I,J,K,islot)
+    q%Bz         = c%By(I,J,K,islot)
   end function gather_corner_y
 
   attributes(device) function gather_corner_z(c, islot, I, J, K) result(q)
@@ -3249,14 +3249,14 @@ contains
     integer, value :: islot, I, J, K
     type(primitive_mhd_t) :: q
     ! Orientation 3 (Ez): lp1=2, lp2=3, lor=4; bp1=6, bp2=7, bor=8 (identity).
-    q%density    = c%density   (islot,I,J,K)
-    q%pressure   = c%pressure  (islot,I,J,K)
-    q%velocity_x = c%velocity_x(islot,I,J,K)
-    q%velocity_y = c%velocity_y(islot,I,J,K)
+    q%density    = c%density(I,J,K,islot)
+    q%pressure   = c%pressure(I,J,K,islot)
+    q%velocity_x = c%velocity_x(I,J,K,islot)
+    q%velocity_y = c%velocity_y(I,J,K,islot)
     q%velocity_z = 0.0_dp
-    q%Bx         = c%Bx(islot,I,J,K)
-    q%By         = c%By(islot,I,J,K)
-    q%Bz         = c%Bz(islot,I,J,K)
+    q%Bx         = c%Bx(I,J,K,islot)
+    q%By         = c%By(I,J,K,islot)
+    q%Bz         = c%Bz(I,J,K,islot)
   end function gather_corner_z
   ! =========================================================================
 
