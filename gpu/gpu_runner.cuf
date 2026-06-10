@@ -3,9 +3,6 @@ module gpu_runner
   use hydro_parameters, only: nvar
   use oct_commons, only: oct
   use gpu_utils
-#ifdef MHD
-  use hydro_device, only: subgrid_corner_state_t, subgrid_face_db_t
-#endif
   use cudafor
   implicit none
   integer, dimension(1:3), parameter::n_nbor = (/1,2,2/)
@@ -30,30 +27,11 @@ module gpu_runner
   real(kind=dp), device, allocatable, dimension(:,:,:) :: uold, unew
 
   !> Arrays to hold the face-centred B field on the device (MHD)
+  !> (The MHD integrator needs no further device storage: its corner states and
+  !> face-B slopes live in kernel shared memory -- see the B1 budget block in
+  !> gpu_hydro.cuf. The former mhd_corner_scratch / mhd_dbf_scratch global
+  !> scratch arrays, ~174 KB per oct of the integrated level, are gone.)
   real(kind=dp), device, allocatable, dimension(:,:,:) :: bold, bnew
-
-#ifdef MHD
-  !> MHD corner-state scratch passed to the cube mhd_integrator_kernel at C7.
-  !> First index maps qRT,qRB,qLT,qLB; second is the integrator block index
-  !> written by trace_3d_mhd and read by cmp_mag_flx. The four corner states are
-  !> ~162 KB/block at nsubgrid=1, too large for shared memory, so they spill here
-  !> (see the ~202 KB budget block before hydro_integrator_kernel; mhd_plan.md B1).
-  type(subgrid_corner_state_t), device, allocatable, dimension(:,:) :: mhd_corner_scratch
-
-  !> MHD face-B transverse-slope (dbf) scratch passed to the cube
-  !> mhd_integrator_kernel at C7. One per integrator block; written by
-  !> mhd_face_b_slopes_subgrid (B3) and read by trace_3d_mhd (C1). It is ~11.8 KB
-  !> /block; spilled here alongside mhd_corner_scratch so the resident shared
-  !> footprint (after the C2 interface widening) stays under the 48 KB limit (the
-  !> second of the two B1 budget folds; see the budget block in gpu_hydro.cuf).
-  type(subgrid_face_db_t), device, allocatable, dimension(:) :: mhd_dbf_scratch
-
-  !> Current allocated block-capacity of the two MHD scratch arrays. Both are
-  !> LAZILY (re)allocated by gpu_godunov on the first MHD launch, sized to the
-  !> per-level num_subgrids (NOT ngridmax), growing as needed -- this replaces the
-  !> eager ngridmax-sized placeholder that was the B1 OOM blocker (init_amr.f90).
-  integer :: mhd_scratch_nblocks = 0
-#endif
 
   !> Arrays to hold the gravity variables on the device
   real(kind=dp), device, allocatable, dimension(:,:) :: phi, rho, nref, phi_old
@@ -332,7 +310,7 @@ contains
     integer(kind=4) :: head_idx, num_subgrids
     integer :: threads_per_block, num_blocks
     real(dp) :: dt, dx, gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
-    integer :: slope, riemann, slope_mag, riemann2d, istat
+    integer :: slope, riemann, slope_mag, riemann2d
     logical :: induction
 
     if(sim%r%verbose.and.sim%g%myid==1)write(*,'("   Entering gpu_godunov for level ",I2)')ilevel
@@ -365,29 +343,11 @@ contains
     if(nsubgrid == 1)threads_per_block = 64
     if(nsubgrid == 2)threads_per_block = 256
 #ifdef MHD
-       ! LAZY allocation of the MHD scratch arrays (C7 fix for the B1 OOM blocker).
-       ! Size to this level's launch grid (num_subgrids), NOT ngridmax, growing the
-       ! capacity across levels as needed, behind a stat= OOM guard. This is what
-       ! replaces the eager ngridmax-sized alloc that would hard-abort init_amr.
-       if (mhd_scratch_nblocks < num_subgrids) then
-          if (allocated(mhd_corner_scratch)) deallocate(mhd_corner_scratch)
-          if (allocated(mhd_dbf_scratch))    deallocate(mhd_dbf_scratch)
-          allocate(mhd_corner_scratch(1:4, 1:num_subgrids), stat=istat)
-          if (istat /= 0) then
-             write(*,*) 'gpu_godunov: out of GPU memory allocating mhd_corner_scratch for ', &
-                  & num_subgrids, ' blocks at level ', ilevel
-             error stop
-          endif
-          allocate(mhd_dbf_scratch(1:num_subgrids), stat=istat)
-          if (istat /= 0) then
-             write(*,*) 'gpu_godunov: out of GPU memory allocating mhd_dbf_scratch for ', &
-                  & num_subgrids, ' blocks at level ', ilevel
-             error stop
-          endif
-          mhd_scratch_nblocks = num_subgrids
-       endif
+       ! The MHD integrator's whole working set (corner states included) lives in
+       ! kernel shared memory -- no per-level scratch to allocate (B1 budget block
+       ! in gpu_hydro.cuf).
        call mhd_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, bold, bnew, &
-            & mhd_corner_scratch, mhd_dbf_scratch, f, father, nbor, &
+            & f, father, nbor, &
             & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
             & gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
             & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
