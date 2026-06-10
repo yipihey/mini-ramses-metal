@@ -383,6 +383,10 @@ contains
           case (3); s%m%f(c,1,o)     = real(val(twotondim*(j-1)+c), dp)
           case (4); s%m%f(c,2,o)     = real(val(twotondim*(j-1)+c), dp)
           case (5); s%m%f(c,3,o)     = real(val(twotondim*(j-1)+c), dp)
+          ! flag1: lets a driver impose an explicit refinement map and call
+          ! ramses_refine_fine directly (geometry-controlled test hierarchies);
+          ! note m_flag_fine RESETS flag1, so skip it when driving this way.
+          case (7); s%m%flag1(c,o)   = int(val(twotondim*(j-1)+c))
           end select
        end do
        nset = nset + 1
