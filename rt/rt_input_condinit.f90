@@ -158,21 +158,27 @@ subroutine rt_region_condinit(r,g,x,q,dx,nn,ilevel)
      if(r%rt_region_type(k) .eq. 'point')then
         ! Volume elements
         vol=dx_cgs**ndim
-        ! Compute CIC weights relative to region center
+        ! Compute CIC weights relative to region center.  Distances use the
+        ! MINIMUM PERIODIC IMAGE, so a source near (or on) a box boundary
+        ! wraps its CIC cloud instead of silently losing the out-of-domain
+        ! fraction (a corner source used to emit only 1/2^ndim of rt_n_region).
         do i=1,nn
            xn=1.0; yn=1.0; zn=1.0
-           xn=max(1.0-abs(x(i,1)-r%rt_reg_x_center(k))/dx,0.0d0)
+           rad=abs(x(i,1)-r%rt_reg_x_center(k)); rad=min(rad,r%boxlen-rad)
+           xn=max(1.0-rad/dx,0.0d0)
 #if NDIM>1
-           yn=max(1.0-abs(x(i,2)-r%rt_reg_x_center(k))/dx,0.0d0)
+           rad=abs(x(i,2)-r%rt_reg_y_center(k)); rad=min(rad,r%boxlen-rad)
+           yn=max(1.0-rad/dx,0.0d0)
 #endif
 #if NDIM>2
-           zn=max(1.0-abs(x(i,3)-r%rt_reg_x_center(k))/dx,0.0d0)
+           rad=abs(x(i,3)-r%rt_reg_z_center(k)); rad=min(rad,r%boxlen-rad)
+           zn=max(1.0-rad/dx,0.0d0)
 #endif
            weight=xn*yn*zn
            if(weight.gt.0) then
-              ! If cell lies within CIC cloud, 
+              ! If cell lies within CIC cloud,
               ! Convert photon number to photon number density
-              q(i,group_ind) = r%rt_n_region(k)/scale_np *weight/vol 
+              q(i,group_ind) = r%rt_n_region(k)/scale_np *weight/vol
               q(i,group_ind+1) = r%rt_u_region(k)/scale_np*weight/vol &
                                * g%rt_c(ilevel)
 #if NDIM>1
@@ -354,22 +360,27 @@ subroutine rt_source_regions_sweep(r,g,x,q,dx,dt,nn,ilevel)
      if(r%rt_source_type(k) .eq. 'point')then
         ! Volume elements
         vol=dx_cgs**ndim
-        ! Compute CIC weights relative to region center
+        ! Compute CIC weights relative to region center.  Distances use the
+        ! MINIMUM PERIODIC IMAGE (see rt_region_condinit): a boundary/corner
+        ! source wraps its CIC cloud instead of losing the clipped fraction.
         do i=1,nn
            xn=1.0; yn=1.0; zn=1.0
-           xn=max(1.0-abs(x(i,1)-r%rt_src_x_center(k))/dx,0.0d0)
+           rad=abs(x(i,1)-r%rt_src_x_center(k)); rad=min(rad,r%boxlen-rad)
+           xn=max(1.0-rad/dx,0.0d0)
 #if NDIM>1
-           yn=max(1.0-abs(x(i,2)-r%rt_src_x_center(k))/dx,0.0d0)
+           rad=abs(x(i,2)-r%rt_src_y_center(k)); rad=min(rad,r%boxlen-rad)
+           yn=max(1.0-rad/dx,0.0d0)
 #endif
 #if NDIM>2
-           zn=max(1.0-abs(x(i,3)-r%rt_src_x_center(k))/dx,0.0d0)
+           rad=abs(x(i,3)-r%rt_src_z_center(k)); rad=min(rad,r%boxlen-rad)
+           zn=max(1.0-rad/dx,0.0d0)
 #endif
            weight=xn*yn*zn
            if(weight.gt.0) then
-              ! If cell lies within CIC cloud, 
+              ! If cell lies within CIC cloud,
               ! Convert photon number to photon number density
               q(i,group_ind) = q(i,group_ind) + &
-                               r%rt_n_source(k)/scale_np *weight/vol * dt_cgs               
+                               r%rt_n_source(k)/scale_np *weight/vol * dt_cgs
 
               ! The input flux is the fraction Fp/(c*Np) (Max 1 magnitude)
               q(i,group_ind+1) = q(i,group_ind+1) &
