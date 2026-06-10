@@ -459,7 +459,7 @@ contains
    call count_star_formation_kernel<<<num_blocks, num_threads>>>(grid, uold, prefix_sum, &
         & head_idx, num_octs, ilevel, d0, dx, vol, factG, mstar, &
         & sim%r%ivar_refine, sim%r%var_cut_refine, &
-        & sim%g%dtnew(ilevel), sim%r%seed, sim%g%aexp, sim%r%gamma, &
+        & sim%g%dtnew(ilevel), sim%r%seed(1), sim%g%aexp, sim%r%gamma, &
         & sim%r%smallc, sim%r%smallr, sim%r%sf_model, sim%r%eps_star, &
         & sim%r%sgs_turb, sim%r%iturb)
    call GPU_Error_Check(__FILE__, __LINE__)
@@ -482,10 +482,10 @@ contains
       call nvtxStartRange("GPU Star Formation Pass 2", color=3)!blue
       call star_formation_kernel<<<num_blocks, num_threads>>>(grid, uold, &
            & star_xp, star_vp, star_mp, star_tp, star_zp, star_levelp, star_idp, &
-           & prefix_sum, d_skip, &
+           & prefix_sum, d_skip, int(sim%r%nstarmax,kind=8), &
            & head_idx, num_octs, ilevel, dx, vol, mstar, &
-           & npart_old, npart_tot_old + nstar_cum(sim%g%myid-1), &
-           & sim%g%dtnew(ilevel), sim%r%seed, sim%g%aexp, sim%r%gamma, &
+           & npart_old, npart_tot_old + npart_new, &
+           & sim%g%dtnew(ilevel), sim%r%seed(1), sim%g%aexp, sim%r%gamma, &
            & sim%r%metal, sim%r%z_ave, sim%r%ientropy, sim%r%dual_energy, sim%r%imetal, &
            & sim%r%nstarmax, &
            & d0, factG, sim%r%ivar_refine, sim%r%var_cut_refine, sim%r%smallc, sim%r%smallr, &

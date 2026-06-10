@@ -27,14 +27,14 @@ attributes(global) subroutine count_star_formation_kernel( &
   integer(kind=4), intent(in), value :: ivar_refine
   real(kind=8), intent(in), value :: var_cut_refine
   real(kind=8), intent(in), value :: dt, aexp, gamma, smallc, smallr
-  integer(kind=i8b), intent(in), value :: seed
+  integer(kind=8), intent(in), value :: seed
   integer(kind=4), intent(in), value :: sf_model
   real(kind=8), intent(in), value :: eps_star
   logical, intent(in), value :: sgs_turb
   integer(kind=4), intent(in), value :: iturb
-
-  integer :: tid, igrid, ind, icell_global, nstar
-  real(kind=8) :: d, mask, p, cs2, sigma2, t_ff, sfr_ff, t_dyn, alpha_vir, Mach2, b_turb, sigs, scrit
+#ifdef TOTO
+  integer :: tid, igrid, ind, icell_global, nstar, idim
+  real(kind=8) :: d, mask, p, cs2, sigma2, t_ff, sfr_ff, t_dyn, alpha_vir, Mach2, b_turb, sigs, scrit, ekin
   real(kind=8) :: mcell, mgas, PoissMean
   type(curandStateXORWOW) :: state
   logical :: ok
@@ -113,7 +113,7 @@ attributes(global) subroutine count_star_formation_kernel( &
   else
      prefix_sum(icell_global) = 0
   endif
-
+#endif
 end subroutine count_star_formation_kernel
 
 !> Pass 2: Create star particles and update gas.
@@ -140,14 +140,16 @@ attributes(global) subroutine star_formation_kernel( &
   integer(kind=4), intent(in), value :: npart_old
   integer(i8b), intent(in), value :: npart_tot_old
   real(kind=8), intent(in), value :: dt, aexp, gamma, z_ave
-  integer(kind=i8b), intent(in), value :: seed
+  integer(kind=8), intent(in), value :: seed
   logical, intent(in), value :: metal
-  integer(kind=4), intent(in), value :: ientropy, dual_energy, imetal, nstarmax
+  integer(kind=4), intent(in), value :: ientropy, imetal, nstarmax
   integer(kind=4), intent(in), value :: ivar_refine, sf_model, iturb
-  real(kind=8), intent(in), value :: var_cut_refine, smallc, smallr, eps_star
+  real(kind=8), intent(in), value :: var_cut_refine, smallc, smallr, eps_star, dual_energy
   logical, intent(in), value :: sgs_turb
+  integer(kind=4), intent(in), value :: iturb
 
-  integer :: tid, igrid, ind, icell_global, nstar, offset, ipart
+#ifdef TOTO
+  integer :: tid, igrid, ind, icell_global, nstar, offset, ipart, idim
   real(kind=8) :: d, mask, p, cs2, sigma2, t_ff, sfr_ff, t_dyn, alpha_vir, Mach2, b_turb, sigs, scrit
   real(kind=8) :: mcell, mgas, PoissMean, dstar, Rand
   type(curandStateXORWOW) :: state
@@ -246,7 +248,7 @@ attributes(global) subroutine star_formation_kernel( &
         endif
      endif
   endif
-
+#endif
 end subroutine star_formation_kernel
 
 !> Device implementation of erfc for sf_model=3.
