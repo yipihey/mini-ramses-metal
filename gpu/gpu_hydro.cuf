@@ -315,12 +315,23 @@ contains
   !> @param[in] i, j, k : The cell indices within the subgrid
   !> @param[in] slope : The slope limiter id (0: 1st order, 1: minmod, 2: moncen)
   !> @param[out] slopes_x, slopes_y, slopes_z : The limited half*dq slopes
+  !> @param[in] scalar_sub (MHD) : The passive-scalar subgrid (1:nvar-5)
+  !> @param[out] dscal_x, dscal_y, dscal_z (MHD) : The limited half*dq scalar slopes
   attributes(device) subroutine compute_tvd_slopes(local_subgrid, i, j, k, slope, &
+#ifdef MHD
+       & scalar_sub, dscal_x, dscal_y, dscal_z, &
+#endif
        & slopes_x, slopes_y, slopes_z)
     type(subgrid_6x6x6cell_primitive), intent(in) :: local_subgrid
     integer, value :: i, j, k, slope
     type(primitive_t), intent(out) :: slopes_x, slopes_y, slopes_z
     type(primitive_t) :: cell
+#ifdef MHD
+    real(kind=dp), intent(in) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
+    real(kind=dp), intent(out) :: dscal_x(1:nscalar_mhd), dscal_y(1:nscalar_mhd), dscal_z(1:nscalar_mhd)
+    real(kind=dp) :: rscal
+    integer :: n
+#endif
 
     ! Cell centered (middle) values
     cell%density    = local_subgrid%density   (i, j, k)
@@ -328,24 +339,55 @@ contains
     cell%velocity_y = local_subgrid%velocity_y(i, j, k)
     cell%velocity_z = local_subgrid%velocity_z(i, j, k)
     cell%pressure   = local_subgrid%pressure  (i, j, k)
+#ifdef MHD
+    cell%Bx         = local_subgrid%Bx(i, j, k)
+    cell%By         = local_subgrid%By(i, j, k)
+    cell%Bz         = local_subgrid%Bz(i, j, k)
+#endif
 
     slopes_x%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i - 1, j, k), cell%density,    local_subgrid%density   (i + 1, j, k), slope)
     slopes_x%velocity_x = 0.5_dp * slope_moncen(local_subgrid%velocity_x(i - 1, j, k), cell%velocity_x, local_subgrid%velocity_x(i + 1, j, k), slope)
     slopes_x%velocity_y = 0.5_dp * slope_moncen(local_subgrid%velocity_y(i - 1, j, k), cell%velocity_y, local_subgrid%velocity_y(i + 1, j, k), slope)
     slopes_x%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i - 1, j, k), cell%velocity_z, local_subgrid%velocity_z(i + 1, j, k), slope)
     slopes_x%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i - 1, j, k), cell%pressure,   local_subgrid%pressure  (i + 1, j, k), slope)
+#ifdef MHD
+    ! All three B slopes are returned per direction (mirroring CPU uslope, which
+    ! limits every primitive); the trace consumes only the transverse ones (the
+    ! normal B is face-predicted).
+    slopes_x%Bx         = 0.5_dp * slope_moncen(local_subgrid%Bx(i - 1, j, k), cell%Bx, local_subgrid%Bx(i + 1, j, k), slope)
+    slopes_x%By         = 0.5_dp * slope_moncen(local_subgrid%By(i - 1, j, k), cell%By, local_subgrid%By(i + 1, j, k), slope)
+    slopes_x%Bz         = 0.5_dp * slope_moncen(local_subgrid%Bz(i - 1, j, k), cell%Bz, local_subgrid%Bz(i + 1, j, k), slope)
+#endif
 
     slopes_y%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i, j - 1, k), cell%density,    local_subgrid%density(   i, j + 1, k), slope)
     slopes_y%velocity_x = 0.5_dp * slope_moncen(local_subgrid%velocity_x(i, j - 1, k), cell%velocity_x, local_subgrid%velocity_x(i, j + 1, k), slope)
     slopes_y%velocity_y = 0.5_dp * slope_moncen(local_subgrid%velocity_y(i, j - 1, k), cell%velocity_y, local_subgrid%velocity_y(i, j + 1, k), slope)
     slopes_y%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i, j - 1, k), cell%velocity_z, local_subgrid%velocity_z(i, j + 1, k), slope)
     slopes_y%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i, j - 1, k), cell%pressure,   local_subgrid%pressure(  i, j + 1, k), slope)
+#ifdef MHD
+    slopes_y%Bx         = 0.5_dp * slope_moncen(local_subgrid%Bx(i, j - 1, k), cell%Bx, local_subgrid%Bx(i, j + 1, k), slope)
+    slopes_y%By         = 0.5_dp * slope_moncen(local_subgrid%By(i, j - 1, k), cell%By, local_subgrid%By(i, j + 1, k), slope)
+    slopes_y%Bz         = 0.5_dp * slope_moncen(local_subgrid%Bz(i, j - 1, k), cell%Bz, local_subgrid%Bz(i, j + 1, k), slope)
+#endif
 
     slopes_z%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i, j, k - 1), cell%density,    local_subgrid%density   (i, j, k + 1), slope)
     slopes_z%velocity_x = 0.5_dp * slope_moncen(local_subgrid%velocity_x(i, j, k - 1), cell%velocity_x, local_subgrid%velocity_x(i, j, k + 1), slope)
     slopes_z%velocity_y = 0.5_dp * slope_moncen(local_subgrid%velocity_y(i, j, k - 1), cell%velocity_y, local_subgrid%velocity_y(i, j, k + 1), slope)
     slopes_z%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i, j, k - 1), cell%velocity_z, local_subgrid%velocity_z(i, j, k + 1), slope)
     slopes_z%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i, j, k - 1), cell%pressure,   local_subgrid%pressure  (i, j, k + 1), slope)
+#ifdef MHD
+    slopes_z%Bx         = 0.5_dp * slope_moncen(local_subgrid%Bx(i, j, k - 1), cell%Bx, local_subgrid%Bx(i, j, k + 1), slope)
+    slopes_z%By         = 0.5_dp * slope_moncen(local_subgrid%By(i, j, k - 1), cell%By, local_subgrid%By(i, j, k + 1), slope)
+    slopes_z%Bz         = 0.5_dp * slope_moncen(local_subgrid%Bz(i, j, k - 1), cell%Bz, local_subgrid%Bz(i, j, k + 1), slope)
+
+    ! Passive-scalar slopes (consumed by the scalar advection predictor, C1)
+    do n = 1, nvar-5
+       rscal = scalar_sub(i,j,k,n)
+       dscal_x(n) = 0.5_dp*slope_moncen(scalar_sub(i-1,j,k,n), rscal, scalar_sub(i+1,j,k,n), slope)
+       dscal_y(n) = 0.5_dp*slope_moncen(scalar_sub(i,j-1,k,n), rscal, scalar_sub(i,j+1,k,n), slope)
+       dscal_z(n) = 0.5_dp*slope_moncen(scalar_sub(i,j,k-1,n), rscal, scalar_sub(i,j,k+1,n), slope)
+    end do
+#endif
 
   end subroutine compute_tvd_slopes
   ! ==========================================================================
@@ -1211,26 +1253,41 @@ contains
 
   ! =========================================================================
   !> @brief
-  !> Convert a subgrid of conserved variables to primitive variables in shared memory
+  !> Convert a subgrid of conserved variables to primitive variables in shared memory.
+  !> Under MHD this additionally fills the shared face-B buffer (bf), computes the
+  !> cell-centred B, applies the density/internal-energy floors and the magnetic
+  !> energy correction (CPU ctoprim), and loads the passive scalars.
   !>
   !> @param[in] head_idx : The head index of the octs at the current AMR level
   !> @param[in] block_idx : The CUDA block index of the calling thread
   !> @param[in] thread_idx : The index of calling thread within its block
   !> @param[in] gamma : The adiabatic index
+  !> @param[in] smallr, smallc (MHD) : Density and sound-speed floors
   !> @param[out] local_subgrid : The local subgrid in shared memory to write the primitive variables to
+  !> @param[out] scalar_sub (MHD) : The passive-scalar subgrid (1:nvar-5)
+  !> @param[out] bf (MHD) : The face-continuous low-face B buffer
   !>
-  attributes(device) subroutine subgrid_conserved_2_primitive(grid, uold, f, constant_gravity, nbor, &
-       & head_idx, block_idx, thread_idx, gamma, dt, local_subgrid)
+  attributes(device) subroutine subgrid_conserved_2_primitive(grid, uold, bold, f, constant_gravity, nbor, &
+#ifdef MHD
+       & scalar_sub, bf, &
+#endif
+       & head_idx, block_idx, thread_idx, gamma, smallr, smallc, dt, local_subgrid)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*) ! Unused without MHD
     integer(kind=4), device :: nbor(1:subgridsize,*)
     integer(kind=4), value :: head_idx
     integer(kind=4), value :: block_idx, thread_idx
     real(kind=dp), value :: gamma
+    real(kind=dp), value :: smallr, smallc ! Unused without MHD
     real(kind=dp), value :: dt
     type(subgrid_6x6x6cell_primitive), intent(inout) :: local_subgrid
+#ifdef MHD
+    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
+    type(subgrid_face_b_t), intent(inout) :: bf
+#endif
 
     type(conserved_t) :: conserved ! object to hold the conserved variables
     type(primitive_t) :: primitive ! object to hold the primitive variables
@@ -1238,6 +1295,11 @@ contains
     integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
     integer :: cell_idx, source_idx, subgrid_idx
     integer :: work_size
+#ifdef MHD
+    integer :: ind_nbor_xm, ind_nbor_ym, ind_nbor_zm, n
+    real(kind=dp) :: invD, Ekin, emag, eint, smalle, Bxc, Byc, Bzc, rho
+    real(kind=dp) :: b0(1:6)
+#endif
 
     work_size = 2*nsubgrid+4
 
@@ -1253,7 +1315,7 @@ contains
        ind_nbor = work_idx/8 + 1
        source_idx = nbor(ind_nbor, subgrid_idx)
 
-       ! Now that we have the index to the oct we need to figure out which cell within it to load 
+       ! Now that we have the index to the oct we need to figure out which cell within it to load
        cell_idx = mod(work_idx, 8) + 1
 
        ! Lastly, we need to figure out where in the subgrid the cell we will load goes
@@ -1262,6 +1324,77 @@ contains
        j = j + 2*j_subgrid_idx
        k = k + 2*k_subgrid_idx
 
+#ifdef MHD
+       ! This cell's six raw face-B (bold comps 1-3 = low x/y/z, 4-6 = high x/y/z).
+       b0(1) = bold(cell_idx, 1, source_idx)
+       b0(2) = bold(cell_idx, 2, source_idx)
+       b0(3) = bold(cell_idx, 3, source_idx)
+       b0(4) = bold(cell_idx, 4, source_idx)
+       b0(5) = bold(cell_idx, 5, source_idx)
+       b0(6) = bold(cell_idx, 6, source_idx)
+
+       ! Face-continuous low faces (CPU ctoprim:1768/1781/1794): a cell's low-d face
+       ! = 0.5*(self_low_d + low-d-neighbour_high_d), keeping B single-valued at each
+       ! face (divB). The low-d neighbour cell index = hhh(cell_idx,dir) and its oct
+       ! offset = iii(cell_idx,dir) (dir 1=-x, 3=-y, 5=-z): offset 0 -> same oct,
+       ! -1 -> the low-d neighbouring oct (fetched via the periodic nbor stencil,
+       ! like load_bfield in 6e6a715b). The OUTERMOST low faces bx(0,*,*)/by(*,0,*)/
+       ! bz(*,*,0) would need an oct outside the 3x3x3 nbor stencil; they are never
+       ! read (edge_e reads bx at i>=1, by at j>=1, bz at k>=1; the trace reads
+       ! bx/by/bz at index>=1), so we fill them with the cell's own low face -- a
+       ! harmless unread value -- and skip the out-of-stencil oct fetch.
+       ! Low-x face of this cell:
+       if (i == 0) then
+          bf%bx(i,j,k) = b0(1)
+       else if (iii(cell_idx,1) == 0) then
+          bf%bx(i,j,k) = 0.5_dp*(b0(1) + bold(hhh(cell_idx,1), 4, source_idx))
+       else
+          ind_nbor_xm = (i_subgrid_idx-1) + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx + 1
+          bf%bx(i,j,k) = 0.5_dp*(b0(1) + bold(hhh(cell_idx,1), 4, nbor(ind_nbor_xm, subgrid_idx)))
+       endif
+       ! Low-y face of this cell:
+       if (j == 0) then
+          bf%by(i,j,k) = b0(2)
+       else if (iii(cell_idx,3) == 0) then
+          bf%by(i,j,k) = 0.5_dp*(b0(2) + bold(hhh(cell_idx,3), 5, source_idx))
+       else
+          ind_nbor_ym = i_subgrid_idx + nsubgridp2*(j_subgrid_idx-1) + nsubgridp2sq*k_subgrid_idx + 1
+          bf%by(i,j,k) = 0.5_dp*(b0(2) + bold(hhh(cell_idx,3), 5, nbor(ind_nbor_ym, subgrid_idx)))
+       endif
+       ! Low-z face of this cell:
+       if (k == 0) then
+          bf%bz(i,j,k) = b0(3)
+       else if (iii(cell_idx,5) == 0) then
+          bf%bz(i,j,k) = 0.5_dp*(b0(3) + bold(hhh(cell_idx,5), 6, source_idx))
+       else
+          ind_nbor_zm = i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*(k_subgrid_idx-1) + 1
+          bf%bz(i,j,k) = 0.5_dp*(b0(3) + bold(hhh(cell_idx,5), 6, nbor(ind_nbor_zm, subgrid_idx)))
+       endif
+
+       ! Cell-centred B = average of the two opposing faces of THIS cell.
+       Bxc = 0.5_dp*(b0(1) + b0(4))
+       Byc = 0.5_dp*(b0(2) + b0(5))
+       Bzc = 0.5_dp*(b0(3) + b0(6))
+
+       ! Hydro conversion + MHD energy correction (CPU ctoprim:1804-1845).
+       ! Floor density and internal energy before trace/source terms see them.
+       rho  = max(uold(cell_idx, 1, source_idx), smallr)
+       invD = 1.0_dp / rho
+       primitive%density    = rho
+       primitive%velocity_x = uold(cell_idx, 2, source_idx) * invD
+       primitive%velocity_y = uold(cell_idx, 3, source_idx) * invD
+       primitive%velocity_z = uold(cell_idx, 4, source_idx) * invD
+       Ekin = 0.5_dp*( uold(cell_idx,2,source_idx)*primitive%velocity_x + &
+            &          uold(cell_idx,3,source_idx)*primitive%velocity_y + &
+            &          uold(cell_idx,4,source_idx)*primitive%velocity_z )
+       emag = 0.5_dp*( Bxc*Bxc + (Byc*Byc + Bzc*Bzc) )
+       smalle = smallc**2/gamma/(gamma - 1.0_dp)
+       eint = max(uold(cell_idx,5,source_idx) - Ekin - emag, smalle*rho)
+       primitive%pressure = (gamma - 1.0_dp)*eint
+       primitive%Bx = Bxc
+       primitive%By = Byc
+       primitive%Bz = Bzc
+#else
        ! Load the cell
        conserved%density    = uold(cell_idx, 1, source_idx)
        conserved%momentum_x = uold(cell_idx, 2, source_idx)
@@ -1271,6 +1404,7 @@ contains
 
        ! Convert to primitive variables
        primitive = conserved_2_primitive(conserved, gamma)
+#endif
 
        ! Gravity predictor step
 #ifdef GRAV
@@ -1289,6 +1423,16 @@ contains
        local_subgrid%velocity_y(i, j, k) = primitive%velocity_y
        local_subgrid%velocity_z(i, j, k) = primitive%velocity_z
        local_subgrid%pressure  (i, j, k) = primitive%pressure
+#ifdef MHD
+       local_subgrid%Bx(i, j, k) = primitive%Bx
+       local_subgrid%By(i, j, k) = primitive%By
+       local_subgrid%Bz(i, j, k) = primitive%Bz
+
+       ! Passive scalars q(ie+n) = uold(5+n)/rho (CPU ctoprim:1870-1879).
+       do n = 1, nvar-5
+          scalar_sub(i, j, k, n) = uold(cell_idx, 5+n, source_idx) * invD
+       end do
+#endif
 
        ! Store refinement map
        local_subgrid%refined   (i, j, k) = grid(source_idx)%refined(cell_idx)
@@ -2266,151 +2410,6 @@ contains
   ! #########################################################################
 
   ! =========================================================================
-  !> @brief (Stage B2) Whole-subgrid MHD conserved->primitive + face-B fill.
-  !> The MHD analog of subgrid_conserved_2_primitive: fills the 6^3 shared MHD
-  !> primitive subgrid (local_mhd: rho,vx,vy,vz,P,Bx,By,Bz + refined), the passive
-  !> scalar subgrid (scalar_sub, 1:nvar-5) and the face-centred B buffer (bf).
-  !> Re-hosts mhd_ctoprim_fill + load_bfield (6e6a715b) / CPU ctoprim
-  !> (umuscl.f90:1762-1879). The cube fill loop is copied verbatim from
-  !> subgrid_conserved_2_primitive; the per-cell MHD body is the re-host.
-  !>   * bf: the low-d face of cell (i,j,k) on axis d = 0.5*(bold(self,d) +
-  !>     bold(low-d-neighbour, d+3)) -> single-valued at every face (divB).
-  !>   * cell-centred B = 0.5*(bold(self,d)+bold(self,d+3)) per axis.
-  !>   * pressure formed AFTER subtracting emag = 0.5*(Bx^2+By^2+Bz^2).
-  !>   * passive scalars q(ie+n)=uold(5+n)/rho.
-  attributes(device) subroutine subgrid_conserved_2_primitive_mhd(grid, uold, bold, f, &
-       & constant_gravity, nbor, head_idx, block_idx, thread_idx, gamma, smallr, smallc, dt, local_mhd, scalar_sub, bf)
-    type(oct), device :: grid(*)
-    real(kind=8), device :: constant_gravity(3)
-    real(kind=dp), device :: f(1:twotondim,1:ndim,*)
-    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
-    real(kind=dp), device :: bold(1:twotondim,1:6,*)
-    integer(kind=4), device :: nbor(1:subgridsize,*)
-    integer(kind=4), value :: head_idx, block_idx, thread_idx
-    real(kind=dp), value :: gamma, smallr, smallc, dt
-    type(subgrid_6x6x6cell_primitive), intent(inout) :: local_mhd
-    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
-    type(subgrid_face_b_t), intent(inout) :: bf
-
-    integer :: work_idx, ind_nbor, ind_nbor_xm, ind_nbor_ym, ind_nbor_zm
-    integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
-    integer :: cell_idx, source_idx, subgrid_idx, work_size, n
-    real(kind=dp) :: invD, Ekin, emag, eint, smalle, Bxc, Byc, Bzc, rho
-    real(kind=dp) :: b0(1:6)
-
-    work_size = 2*nsubgrid+4
-
-    do work_idx = thread_idx, work_size**3 - 1, blockDim%x
-
-       ! Same subgrid traversal as subgrid_conserved_2_primitive: (i_subgrid_idx,
-       ! j_subgrid_idx, k_subgrid_idx) is the oct, cell_idx the cell within it,
-       ! (i,j,k) the destination cell in the 6^3 subgrid.
-       call index_1Dto3D(work_idx/8, work_size/2, work_size/2, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx)
-       subgrid_idx = head_idx + block_idx
-       ind_nbor = work_idx/8 + 1
-       source_idx = nbor(ind_nbor, subgrid_idx)
-       cell_idx = mod(work_idx, 8) + 1
-       call index_1Dto3D(cell_idx - 1, 2, 2, i, j, k)
-       i = i + 2*i_subgrid_idx
-       j = j + 2*j_subgrid_idx
-       k = k + 2*k_subgrid_idx
-
-       ! This cell's six raw face-B (bold comps 1-3 = low x/y/z, 4-6 = high x/y/z).
-       b0(1) = bold(cell_idx, 1, source_idx)
-       b0(2) = bold(cell_idx, 2, source_idx)
-       b0(3) = bold(cell_idx, 3, source_idx)
-       b0(4) = bold(cell_idx, 4, source_idx)
-       b0(5) = bold(cell_idx, 5, source_idx)
-       b0(6) = bold(cell_idx, 6, source_idx)
-
-       ! Face-continuous low faces (CPU ctoprim:1768/1781/1794): a cell's low-d face
-       ! = 0.5*(self_low_d + low-d-neighbour_high_d), keeping B single-valued at each
-       ! face (divB). The low-d neighbour cell index = hhh(cell_idx,dir) and its oct
-       ! offset = iii(cell_idx,dir) (dir 1=-x, 3=-y, 5=-z): offset 0 -> same oct,
-       ! -1 -> the low-d neighbouring oct (fetched via the periodic nbor stencil,
-       ! like load_bfield in 6e6a715b). The OUTERMOST low faces bx(0,*,*)/by(*,0,*)/
-       ! bz(*,*,0) would need an oct outside the 3x3x3 nbor stencil; they are never
-       ! read (edge_e reads bx at i>=1, by at j>=1, bz at k>=1; the trace reads
-       ! bx/by/bz at index>=1), so we fill them with the cell's own low face -- a
-       ! harmless unread value -- and skip the out-of-stencil oct fetch.
-       ! Low-x face of this cell:
-       if (i == 0) then
-          bf%bx(i,j,k) = b0(1)
-       else if (iii(cell_idx,1) == 0) then
-          bf%bx(i,j,k) = 0.5_dp*(b0(1) + bold(hhh(cell_idx,1), 4, source_idx))
-       else
-          ind_nbor_xm = (i_subgrid_idx-1) + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx + 1
-          bf%bx(i,j,k) = 0.5_dp*(b0(1) + bold(hhh(cell_idx,1), 4, nbor(ind_nbor_xm, subgrid_idx)))
-       endif
-       ! Low-y face of this cell:
-       if (j == 0) then
-          bf%by(i,j,k) = b0(2)
-       else if (iii(cell_idx,3) == 0) then
-          bf%by(i,j,k) = 0.5_dp*(b0(2) + bold(hhh(cell_idx,3), 5, source_idx))
-       else
-          ind_nbor_ym = i_subgrid_idx + nsubgridp2*(j_subgrid_idx-1) + nsubgridp2sq*k_subgrid_idx + 1
-          bf%by(i,j,k) = 0.5_dp*(b0(2) + bold(hhh(cell_idx,3), 5, nbor(ind_nbor_ym, subgrid_idx)))
-       endif
-       ! Low-z face of this cell:
-       if (k == 0) then
-          bf%bz(i,j,k) = b0(3)
-       else if (iii(cell_idx,5) == 0) then
-          bf%bz(i,j,k) = 0.5_dp*(b0(3) + bold(hhh(cell_idx,5), 6, source_idx))
-       else
-          ind_nbor_zm = i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*(k_subgrid_idx-1) + 1
-          bf%bz(i,j,k) = 0.5_dp*(b0(3) + bold(hhh(cell_idx,5), 6, nbor(ind_nbor_zm, subgrid_idx)))
-       endif
-
-       ! Cell-centred B = average of the two opposing faces of THIS cell.
-       Bxc = 0.5_dp*(b0(1) + b0(4))
-       Byc = 0.5_dp*(b0(2) + b0(5))
-       Bzc = 0.5_dp*(b0(3) + b0(6))
-
-       ! Hydro conversion + MHD energy correction (CPU ctoprim:1804-1845).
-       ! Floor density and internal energy before trace/source terms see them.
-       rho  = max(uold(cell_idx, 1, source_idx), smallr)
-       invD = 1.0_dp / rho
-       local_mhd%density   (i, j, k) = rho
-       local_mhd%velocity_x(i, j, k) = uold(cell_idx, 2, source_idx) * invD
-       local_mhd%velocity_y(i, j, k) = uold(cell_idx, 3, source_idx) * invD
-       local_mhd%velocity_z(i, j, k) = uold(cell_idx, 4, source_idx) * invD
-       Ekin = 0.5_dp*( uold(cell_idx,2,source_idx)*local_mhd%velocity_x(i,j,k) + &
-            &          uold(cell_idx,3,source_idx)*local_mhd%velocity_y(i,j,k) + &
-            &          uold(cell_idx,4,source_idx)*local_mhd%velocity_z(i,j,k) )
-       emag = 0.5_dp*( Bxc*Bxc + (Byc*Byc + Bzc*Bzc) )
-       smalle = smallc**2/gamma/(gamma - 1.0_dp)
-       eint = max(uold(cell_idx,5,source_idx) - Ekin - emag, smalle*rho)
-       local_mhd%pressure(i, j, k) = (gamma - 1.0_dp)*eint
-       local_mhd%Bx(i, j, k) = Bxc
-       local_mhd%By(i, j, k) = Byc
-       local_mhd%Bz(i, j, k) = Bzc
-
-       ! Gravity predictor (mirrors subgrid_conserved_2_primitive).
-#ifdef GRAV
-       local_mhd%velocity_x(i,j,k) = local_mhd%velocity_x(i,j,k) + f(cell_idx,1,source_idx)*0.5_dp*dt
-       local_mhd%velocity_y(i,j,k) = local_mhd%velocity_y(i,j,k) + f(cell_idx,2,source_idx)*0.5_dp*dt
-       local_mhd%velocity_z(i,j,k) = local_mhd%velocity_z(i,j,k) + f(cell_idx,3,source_idx)*0.5_dp*dt
-#else
-       local_mhd%velocity_x(i,j,k) = local_mhd%velocity_x(i,j,k) + constant_gravity(1)*0.5_dp*dt
-       local_mhd%velocity_y(i,j,k) = local_mhd%velocity_y(i,j,k) + constant_gravity(2)*0.5_dp*dt
-       local_mhd%velocity_z(i,j,k) = local_mhd%velocity_z(i,j,k) + constant_gravity(3)*0.5_dp*dt
-#endif
-
-       ! Passive scalars q(ie+n) = uold(5+n)/rho (CPU ctoprim:1870-1879).
-       do n = 1, nvar-5
-          scalar_sub(i, j, k, n) = uold(cell_idx, 5+n, source_idx) * invD
-       end do
-
-       local_mhd%refined(i, j, k) = grid(source_idx)%refined(cell_idx)
-
-    end do
-
-    call syncthreads()
-
-  end subroutine subgrid_conserved_2_primitive_mhd
-  ! =========================================================================
-
-  ! =========================================================================
   !> @brief (Stage B3) Face-B transverse TVD slope (CPU dbf). The MHD-only
   !> slope with no hydro analog: a pure 3-point limiter on the face-centred B,
   !> the inline dbf branch of CPU uslope (umuscl.f90:2255-2333), selected at
@@ -2441,83 +2440,6 @@ contains
     slop = min(abs(dlft),abs(drgt)); dlim = merge(zero, slop, (dlft*drgt) <= zero)
     db = dsgn*min(dlim,abs(dcen))
   end function face_b_tvd_slope
-  ! =========================================================================
-
-  ! =========================================================================
-  !> @brief (Stage B3, v4.1) Compute the limited TVD slopes of cell (ix,iy,k) in
-  !> all three directions for the full MHD primitive set (rho, v, P, cell-centred
-  !> B) and the passive scalars. The MHD analog of compute_tvd_slopes: a dedicated
-  !> device function called once per cell from trace_3d_mhd (C1), replacing the
-  !> former inline slope_moncen block. Slopes carry the half*dq convention (the
-  !> 0.5 factor is applied here), == CPU uslope half*dq, like the hydro trace.
-  !> All three B slopes are returned per direction (mirroring CPU uslope, which
-  !> limits every primitive); the trace consumes only the transverse ones (the
-  !> normal B is face-predicted).
-  !>
-  !> @param[in] local_mhd : The MHD subgrid of primitive variables
-  !> @param[in] scalar_sub : The passive-scalar subgrid (1:nvar-5)
-  !> @param[in] ix, iy, k : The cell indices within the subgrid
-  !> @param[in] slope : The slope limiter id (0: 1st order, 1: minmod, 2: moncen)
-  !> @param[out] slopes_x, slopes_y, slopes_z : The limited half*dq slopes
-  !> @param[out] dscal_x, dscal_y, dscal_z : The limited half*dq scalar slopes
-  attributes(device) subroutine compute_tvd_slopes_mhd(local_mhd, scalar_sub, ix, iy, k, slope, &
-       & slopes_x, slopes_y, slopes_z, dscal_x, dscal_y, dscal_z)
-    type(subgrid_6x6x6cell_primitive), intent(in) :: local_mhd
-    real(kind=dp), intent(in) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
-    integer, value :: ix, iy, k, slope
-    type(primitive_t), intent(out) :: slopes_x, slopes_y, slopes_z
-    real(kind=dp), intent(out) :: dscal_x(1:nscalar_mhd), dscal_y(1:nscalar_mhd), dscal_z(1:nscalar_mhd)
-
-    real(kind=dp), parameter :: half = 0.5_dp
-    real(kind=dp) :: r, u, v, w, p, A, B, C, rscal
-    integer :: n
-
-    ! Cell centered (middle) values
-    r = local_mhd%density   (ix,iy,k)
-    u = local_mhd%velocity_x(ix,iy,k)
-    v = local_mhd%velocity_y(ix,iy,k)
-    w = local_mhd%velocity_z(ix,iy,k)
-    p = local_mhd%pressure  (ix,iy,k)
-    A = local_mhd%Bx(ix,iy,k)
-    B = local_mhd%By(ix,iy,k)
-    C = local_mhd%Bz(ix,iy,k)
-
-    slopes_x%density    = half*slope_moncen(local_mhd%density   (ix-1,iy,k), r, local_mhd%density   (ix+1,iy,k), slope)
-    slopes_x%velocity_x = half*slope_moncen(local_mhd%velocity_x(ix-1,iy,k), u, local_mhd%velocity_x(ix+1,iy,k), slope)
-    slopes_x%velocity_y = half*slope_moncen(local_mhd%velocity_y(ix-1,iy,k), v, local_mhd%velocity_y(ix+1,iy,k), slope)
-    slopes_x%velocity_z = half*slope_moncen(local_mhd%velocity_z(ix-1,iy,k), w, local_mhd%velocity_z(ix+1,iy,k), slope)
-    slopes_x%pressure   = half*slope_moncen(local_mhd%pressure  (ix-1,iy,k), p, local_mhd%pressure  (ix+1,iy,k), slope)
-    slopes_x%Bx         = half*slope_moncen(local_mhd%Bx(ix-1,iy,k), A, local_mhd%Bx(ix+1,iy,k), slope)
-    slopes_x%By         = half*slope_moncen(local_mhd%By(ix-1,iy,k), B, local_mhd%By(ix+1,iy,k), slope)
-    slopes_x%Bz         = half*slope_moncen(local_mhd%Bz(ix-1,iy,k), C, local_mhd%Bz(ix+1,iy,k), slope)
-
-    slopes_y%density    = half*slope_moncen(local_mhd%density   (ix,iy-1,k), r, local_mhd%density   (ix,iy+1,k), slope)
-    slopes_y%velocity_x = half*slope_moncen(local_mhd%velocity_x(ix,iy-1,k), u, local_mhd%velocity_x(ix,iy+1,k), slope)
-    slopes_y%velocity_y = half*slope_moncen(local_mhd%velocity_y(ix,iy-1,k), v, local_mhd%velocity_y(ix,iy+1,k), slope)
-    slopes_y%velocity_z = half*slope_moncen(local_mhd%velocity_z(ix,iy-1,k), w, local_mhd%velocity_z(ix,iy+1,k), slope)
-    slopes_y%pressure   = half*slope_moncen(local_mhd%pressure  (ix,iy-1,k), p, local_mhd%pressure  (ix,iy+1,k), slope)
-    slopes_y%Bx         = half*slope_moncen(local_mhd%Bx(ix,iy-1,k), A, local_mhd%Bx(ix,iy+1,k), slope)
-    slopes_y%By         = half*slope_moncen(local_mhd%By(ix,iy-1,k), B, local_mhd%By(ix,iy+1,k), slope)
-    slopes_y%Bz         = half*slope_moncen(local_mhd%Bz(ix,iy-1,k), C, local_mhd%Bz(ix,iy+1,k), slope)
-
-    slopes_z%density    = half*slope_moncen(local_mhd%density   (ix,iy,k-1), r, local_mhd%density   (ix,iy,k+1), slope)
-    slopes_z%velocity_x = half*slope_moncen(local_mhd%velocity_x(ix,iy,k-1), u, local_mhd%velocity_x(ix,iy,k+1), slope)
-    slopes_z%velocity_y = half*slope_moncen(local_mhd%velocity_y(ix,iy,k-1), v, local_mhd%velocity_y(ix,iy,k+1), slope)
-    slopes_z%velocity_z = half*slope_moncen(local_mhd%velocity_z(ix,iy,k-1), w, local_mhd%velocity_z(ix,iy,k+1), slope)
-    slopes_z%pressure   = half*slope_moncen(local_mhd%pressure  (ix,iy,k-1), p, local_mhd%pressure  (ix,iy,k+1), slope)
-    slopes_z%Bx         = half*slope_moncen(local_mhd%Bx(ix,iy,k-1), A, local_mhd%Bx(ix,iy,k+1), slope)
-    slopes_z%By         = half*slope_moncen(local_mhd%By(ix,iy,k-1), B, local_mhd%By(ix,iy,k+1), slope)
-    slopes_z%Bz         = half*slope_moncen(local_mhd%Bz(ix,iy,k-1), C, local_mhd%Bz(ix,iy,k+1), slope)
-
-    ! Passive-scalar slopes (consumed by the scalar advection predictor, C1)
-    do n = 1, nvar-5
-       rscal = scalar_sub(ix,iy,k,n)
-       dscal_x(n) = half*slope_moncen(scalar_sub(ix-1,iy,k,n), rscal, scalar_sub(ix+1,iy,k,n), slope)
-       dscal_y(n) = half*slope_moncen(scalar_sub(ix,iy-1,k,n), rscal, scalar_sub(ix,iy+1,k,n), slope)
-       dscal_z(n) = half*slope_moncen(scalar_sub(ix,iy,k-1,n), rscal, scalar_sub(ix,iy,k+1,n), slope)
-    end do
-
-  end subroutine compute_tvd_slopes_mhd
   ! =========================================================================
 
   ! =========================================================================
@@ -2686,7 +2608,7 @@ contains
        CL = CL + sCL0*dtdx*half
        CR = CR + sCR0*dtdx*half
 
-       ! ---- Cell-centred values + TVD slopes (compute_tvd_slopes_mhd, v4.1) ---
+       ! ---- Cell-centred values + TVD slopes (compute_tvd_slopes, v4.1) ---
        r = local_mhd%density   (ix,iy,k); r0 = r
        u = local_mhd%velocity_x(ix,iy,k)
        v = local_mhd%velocity_y(ix,iy,k)
@@ -2695,8 +2617,9 @@ contains
        A = local_mhd%Bx(ix,iy,k)
        B = local_mhd%By(ix,iy,k)
        C = local_mhd%Bz(ix,iy,k)
-       call compute_tvd_slopes_mhd(local_mhd, scalar_sub, ix, iy, k, slope, &
-            & slopes_x, slopes_y, slopes_z, dscal_x, dscal_y, dscal_z)
+       call compute_tvd_slopes(local_mhd, ix, iy, k, slope, &
+            & scalar_sub, dscal_x, dscal_y, dscal_z, &
+            & slopes_x, slopes_y, slopes_z)
        ! Unpack into the CPU trace3d slope names (transverse B only; the normal
        ! B is face-predicted, so slopes_x%Bx / slopes_y%By / slopes_z%Bz unused).
        drx = slopes_x%density;    dry = slopes_y%density;    drz = slopes_z%density
@@ -4068,8 +3991,8 @@ contains
     ! =======================================================================
     ! Convert from conserved to primitive variables
     ! =======================================================================
-    call subgrid_conserved_2_primitive(grid, uold, f, constant_gravity, nbor, &
-         & head_idx, block_idx, thread_idx, gamma, dt, local_subgrid)
+    call subgrid_conserved_2_primitive(grid, uold, bold, f, constant_gravity, nbor, &
+         & head_idx, block_idx, thread_idx, gamma, smallr, smallc, dt, local_subgrid)
 
     ! =======================================================================
     ! Perform tracing step and compute the interface states
@@ -4179,8 +4102,9 @@ contains
     if (block_idx >= num_subgrids) return
 
     ! B2: conserved -> primitive (+ cell-centred B + bf face buffer + scalars)
-    call subgrid_conserved_2_primitive_mhd(grid, uold, bold, f, constant_gravity, nbor, &
-         & head_idx, block_idx, thread_idx, gamma, smallr, smallc, dt, local_mhd, scalar_subgrid, bf)
+    call subgrid_conserved_2_primitive(grid, uold, bold, f, constant_gravity, nbor, &
+         & scalar_subgrid, bf, &
+         & head_idx, block_idx, thread_idx, gamma, smallr, smallc, dt, local_mhd)
 
     ! C1: edge-E + MUSCL predictor (with inline face-B dbf slopes, B3) + qm/qp
     !     + corner states into the shared edge-corner buffers
