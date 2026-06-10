@@ -22,6 +22,7 @@ module hydro_device
        &   0,0,1,1,0,0,1,1,&
        &   -1,-1,-1,-1,0,0,0,0,&
        &   0,0,0,0,1,1,1,1/),(/8,6/))
+  integer,parameter::nscalar_mhd=max(1,nvar-5)
 
   !> @brief
   !> Contains a 3 x 3 x 3 subgrid of primitive variables. Intended to act as a subgrid
@@ -165,7 +166,7 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: Bx
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: By
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: Bz
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1, 1:nvar-5) :: scalar
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1, 1:nscalar_mhd) :: scalar
   end type subgrid_3x2x2cell_primitive_mhd
   type, public :: subgrid_2x3x2cell_primitive_mhd
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: density
@@ -176,7 +177,7 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bx
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: By
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bz
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:nvar-5) :: scalar
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:nscalar_mhd) :: scalar
   end type subgrid_2x3x2cell_primitive_mhd
   type, public :: subgrid_2x2x3cell_primitive_mhd
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: density
@@ -187,7 +188,7 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: Bx
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: By
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: Bz
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:nvar-5) :: scalar
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:nscalar_mhd) :: scalar
   end type subgrid_2x2x3cell_primitive_mhd
 #endif
 
@@ -2318,7 +2319,7 @@ contains
     integer(kind=4), value :: head_idx, block_idx, thread_idx
     real(kind=dp), value :: gamma, smallr, smallc, dt
     type(subgrid_6x6x6cell_primitive_mhd), intent(inout) :: local_mhd
-    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nvar-5)
+    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
     type(subgrid_face_b_t), intent(inout) :: bf
 
     integer :: work_idx, ind_nbor, ind_nbor_xm, ind_nbor_ym, ind_nbor_zm
@@ -2492,10 +2493,10 @@ contains
   attributes(device) subroutine compute_tvd_slopes_mhd(local_mhd, scalar_sub, ix, iy, k, slope, &
        & slopes_x, slopes_y, slopes_z, dscal_x, dscal_y, dscal_z)
     type(subgrid_6x6x6cell_primitive_mhd), intent(in) :: local_mhd
-    real(kind=dp), intent(in) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nvar-5)
+    real(kind=dp), intent(in) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
     integer, value :: ix, iy, k, slope
     type(primitive_mhd_t), intent(out) :: slopes_x, slopes_y, slopes_z
-    real(kind=dp), intent(out) :: dscal_x(1:nvar-5), dscal_y(1:nvar-5), dscal_z(1:nvar-5)
+    real(kind=dp), intent(out) :: dscal_x(1:nscalar_mhd), dscal_y(1:nscalar_mhd), dscal_z(1:nscalar_mhd)
 
     real(kind=dp), parameter :: half = 0.5_dp
     real(kind=dp) :: r, u, v, w, p, A, B, C, rscal
@@ -2578,7 +2579,7 @@ contains
        & left_x, right_x, left_y, right_y, left_z, right_z, gamma, smallr, smallc, &
        & dx, dt, slope, slope_mag, induction)
     type(subgrid_6x6x6cell_primitive_mhd), intent(in) :: local_mhd
-    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nvar-5)
+    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
     type(subgrid_face_b_t), intent(in) :: bf
     type(subgrid_edge_e_t), intent(inout) :: edge_e
     type(subgrid_2x3x3edge_corner), intent(inout) :: corner_x
@@ -2597,7 +2598,7 @@ contains
     real(kind=dp) :: drx,dux,dvx,dwx,dpx, dry,duy,dvy,dwy,dpy, drz,duz,dvz,dwz,dpz
     real(kind=dp) :: dBx,dCx, dAy,dCy, dAz,dBz
     type(primitive_mhd_t) :: slopes_x, slopes_y, slopes_z
-    real(kind=dp) :: dscal_x(1:nvar-5), dscal_y(1:nvar-5), dscal_z(1:nvar-5)
+    real(kind=dp) :: dscal_x(1:nscalar_mhd), dscal_y(1:nscalar_mhd), dscal_z(1:nscalar_mhd)
     real(kind=dp) :: AL,AR,BL,BR,CL,CR
     real(kind=dp) :: dALy,dARy,dALz,dARz,dBLx,dBRx,dBLz,dBRz,dCLx,dCRx,dCLy,dCRy
     real(kind=dp) :: sAL0,sAR0,sBL0,sBR0,sCL0,sCR0
@@ -3680,7 +3681,7 @@ contains
     integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
     integer :: subgrid_idx, cell_idx, source_idx, father_idx, work_idx
     integer :: interface_array_size, info, ind_nbor, n
-    real(kind=dp) :: fd, fmx, fmy, fmz, fe, fs(1:nvar-5), scale, dflux, weight
+    real(kind=dp) :: fd, fmx, fmy, fmz, fe, fs(1:nscalar_mhd), scale, dflux, weight
     logical :: c1, c2, c3
     integer :: oc1, oc2, oc3, cc1, cc2, cc3
 
@@ -4174,7 +4175,7 @@ contains
     ! Resident shared buffers -- the whole working set. See the budget block
     ! above: 46320 B at nsubgrid=1, nvar=8 -> fits the 48 KB static limit.
     type(subgrid_6x6x6cell_primitive_mhd), shared :: local_mhd
-    real(kind=dp), shared :: scalar_subgrid(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nvar-5)
+    real(kind=dp), shared :: scalar_subgrid(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
     type(subgrid_face_b_t), shared :: bf
     type(subgrid_edge_e_t), shared :: edge_e
     type(subgrid_2x3x3edge_primitive), shared :: emfx
