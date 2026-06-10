@@ -393,7 +393,7 @@ contains
     slope_central = 0.5 * (slope_left + slope_right)
 
     ! Slope type factor, 0: 1st order, 1: minmod, 2: moncen
-    factor = real(slope, kind=8) 
+    factor = real(slope, kind=dp)
 
     if (slope_left*slope_right <= 0.0_dp) then
        slope_moncen = 0.0_dp
@@ -541,7 +541,7 @@ contains
   attributes(device) function compute_emag(Bx, By, Bz) result(emag)
     real(kind=dp), value :: Bx, By, Bz
     real(kind=dp) :: emag
-    emag = 0.5d0 * compute_bsquared(Bx, By, Bz)
+    emag = 0.5_dp * compute_bsquared(Bx, By, Bz)
     return
   end function compute_emag
   ! ==========================================================================
@@ -580,16 +580,16 @@ contains
     primitive%velocity_z = conserved%momentum_z / primitive%density
 
     ! Cell-centred magnetic field: average of the two opposing faces per axis
-    primitive%Bx = 0.5d0 * (bxl + bxr)
-    primitive%By = 0.5d0 * (byl + byr)
-    primitive%Bz = 0.5d0 * (bzl + bzr)
+    primitive%Bx = 0.5_dp * (bxl + bxr)
+    primitive%By = 0.5_dp * (byl + byr)
+    primitive%Bz = 0.5_dp * (bzl + bzr)
 
     ! Gas pressure from total energy minus kinetic and magnetic energy
     momentum_squared = magnitude_squared(conserved%momentum_x, conserved%momentum_y, conserved%momentum_z)
     emag = compute_emag(primitive%Bx, primitive%By, primitive%Bz)
     smalle = smallc**2/gamma/(gamma - 1.0_dp)
     eint = max(conserved%energy - 0.5_dp*momentum_squared/primitive%density - emag, smalle*primitive%density)
-    primitive%pressure = (gamma - 1.d0) * eint
+    primitive%pressure = (gamma - 1.0_dp) * eint
     return
   end function mhd_conserved_2_primitive
   ! ==========================================================================
@@ -620,7 +620,7 @@ contains
 
     velocity_squared = magnitude_squared(primitive%velocity_x, primitive%velocity_y, primitive%velocity_z)
     emag = compute_emag(primitive%Bx, primitive%By, primitive%Bz)
-    conserved%energy = (primitive%pressure/(gamma - 1.d0)) + 0.5d0*primitive%density*velocity_squared + emag
+    conserved%energy = (primitive%pressure/(gamma - 1.0_dp)) + 0.5_dp*primitive%density*velocity_squared + emag
 
     conserved%Bx = primitive%Bx
     conserved%By = primitive%By
@@ -661,7 +661,7 @@ contains
     right_state = right
 
     ! Enforce continuity of the normal magnetic field across the interface.
-    bx_mean = 0.5d0 * (left_state%Bx + right_state%Bx)
+    bx_mean = 0.5_dp * (left_state%Bx + right_state%Bx)
     left_state%Bx = bx_mean
     right_state%Bx = bx_mean
 
@@ -719,12 +719,12 @@ contains
     ! Fast magnetosonic speeds (CPU find_speed_fast).
     b2l = compute_bsquared(blx, bly, blz)
     c2l = gamma * pl / rl
-    d2l = 0.5d0 * (b2l / rl + c2l)
+    d2l = 0.5_dp * (b2l / rl + c2l)
     cfleft = sqrt(d2l + sqrt(d2l**2 - c2l * blx * blx / rl))
 
     b2r = compute_bsquared(brx, bry, brz)
     c2r = gamma * pr / rr
-    d2r = 0.5d0 * (b2r / rr + c2r)
+    d2r = 0.5_dp * (b2r / rr + c2r)
     cfright = sqrt(d2r + sqrt(d2r**2 - c2r * brx * brx / rr))
 
     speed_l = min(min(ul, ur) - max(cfleft, cfright), 0.0_dp)
@@ -786,7 +786,7 @@ contains
     real(kind=dp) :: ro, uo, vo, wo, Bo, Co, Ptoto, etoto, vdotBo
 
     smallp = smallc**2 / gamma
-    entho = 1.0d0 / (gamma - 1.0d0)
+    entho = 1.0_dp / (gamma - 1.0_dp)
 
     ! Floor the states (GPU convention, matches hll_mhd_fluxes; no-op for the
     ! already trace-floored inputs).
@@ -796,14 +796,14 @@ contains
     rs%pressure = max(rs%pressure, smallp*rs%density)
 
     ! Enforce continuity of the normal magnetic field (CPU :1006-1008).
-    A = 0.5d0*(ls%Bx + rs%Bx)
+    A = 0.5_dp*(ls%Bx + rs%Bx)
     sgnm = sign(1.0_dp, A)
 
     ! Left variables (CPU :1011-1025). %By/%Bz are the transverse B (Bl,Cl).
     rl = ls%density; ul = ls%velocity_x; vl = ls%velocity_y; wl = ls%velocity_z
     Pl = ls%pressure; Bl = ls%By; Cl = ls%Bz
-    ekinl = 0.5d0*(ul*ul + vl*vl + wl*wl)*rl
-    emagl = 0.5d0*(A*A + Bl*Bl + Cl*Cl)
+    ekinl = 0.5_dp*(ul*ul + vl*vl + wl*wl)*rl
+    emagl = 0.5_dp*(A*A + Bl*Bl + Cl*Cl)
     etotl = Pl*entho + ekinl + emagl
     Ptotl = Pl + emagl
     vdotBl = ul*A + vl*Bl + wl*Cl
@@ -811,16 +811,16 @@ contains
     ! Right variables (CPU :1028-1042).
     rr = rs%density; ur = rs%velocity_x; vr = rs%velocity_y; wr = rs%velocity_z
     Pr = rs%pressure; Br = rs%By; Cr = rs%Bz
-    ekinr = 0.5d0*(ur*ur + vr*vr + wr*wr)*rr
-    emagr = 0.5d0*(A*A + Br*Br + Cr*Cr)
+    ekinr = 0.5_dp*(ur*ur + vr*vr + wr*wr)*rr
+    emagr = 0.5_dp*(A*A + Br*Br + Cr*Cr)
     etotr = Pr*entho + ekinr + emagr
     Ptotr = Pr + emagr
     vdotBr = ur*A + vr*Br + wr*Cr
 
     ! Fast magnetosonic speeds (find_speed_fast) using the continuity-enforced A.
-    b2l = A*A + Bl*Bl + Cl*Cl; c2l = gamma*Pl/rl; d2l = 0.5d0*(b2l/rl + c2l)
+    b2l = A*A + Bl*Bl + Cl*Cl; c2l = gamma*Pl/rl; d2l = 0.5_dp*(b2l/rl + c2l)
     cfastl = sqrt(d2l + sqrt(d2l**2 - c2l*A*A/rl))
-    b2r = A*A + Br*Br + Cr*Cr; c2r = gamma*Pr/rr; d2r = 0.5d0*(b2r/rr + c2r)
+    b2r = A*A + Br*Br + Cr*Cr; c2r = gamma*Pr/rr; d2r = 0.5_dp*(b2r/rr + c2r)
     cfastr = sqrt(d2r + sqrt(d2r**2 - c2r*A*A/rr))
 
     ! HLL wave speeds, Lagrangian sound speeds, acoustic star state (CPU :1049-1060).
@@ -834,7 +834,7 @@ contains
     rstarl = rl*(SL - ul)/(SL - ustar)
     estar  = rl*(SL - ul)*(SL - ustar) - A*A
     el     = rl*(SL - ul)*(SL - ul   ) - A*A
-    if (abs(estar) < 1d-4*A*A) then
+    if (abs(estar) < 1e-4_dp*A*A) then
        vstarl = vl; Bstarl = Bl; wstarl = wl; Cstarl = Cl
     else
        vstarl = vl - A*Bl*(ustar - ul)/estar
@@ -850,7 +850,7 @@ contains
     rstarr = rr*(SR - ur)/(SR - ustar)
     estar  = rr*(SR - ur)*(SR - ustar) - A*A
     er     = rr*(SR - ur)*(SR - ur   ) - A*A
-    if (abs(estar) < 1d-4*A*A) then
+    if (abs(estar) < 1e-4_dp*A*A) then
        vstarr = vr; Bstarr = Br; wstarr = wr; Cstarr = Cr
     else
        vstarr = vr - A*Br*(ustar - ur)/estar
@@ -872,18 +872,18 @@ contains
     etotstarstarr = etotstarr + sgnm*sqrrstarr*(vdotBstarr - vdotBstarstar)
 
     ! Sample the solution at x/t = 0 (CPU :1126-1222).
-    if (SL > 0.0d0) then
+    if (SL > 0.0_dp) then
        ro = rl; uo = ul; vo = vl; wo = wl; Bo = Bl; Co = Cl; Ptoto = Ptotl; etoto = etotl; vdotBo = vdotBl
-    else if (SAL > 0.0d0) then
+    else if (SAL > 0.0_dp) then
        ro = rstarl; uo = ustar; vo = vstarl; wo = wstarl; Bo = Bstarl; Co = Cstarl
        Ptoto = Ptotstar; etoto = etotstarl; vdotBo = vdotBstarl
-    else if (ustar > 0.0d0) then
+    else if (ustar > 0.0_dp) then
        ro = rstarl; uo = ustar; vo = vstarstar; wo = wstarstar; Bo = Bstarstar; Co = Cstarstar
        Ptoto = Ptotstar; etoto = etotstarstarl; vdotBo = vdotBstarstar
-    else if (SAR > 0.0d0) then
+    else if (SAR > 0.0_dp) then
        ro = rstarr; uo = ustar; vo = vstarstar; wo = wstarstar; Bo = Bstarstar; Co = Cstarstar
        Ptoto = Ptotstar; etoto = etotstarstarr; vdotBo = vdotBstarstar
-    else if (SR > 0.0d0) then
+    else if (SR > 0.0_dp) then
        ro = rstarr; uo = ustar; vo = vstarr; wo = wstarr; Bo = Bstarr; Co = Cstarr
        Ptoto = Ptotstar; etoto = etotstarr; vdotBo = vdotBstarr
     else
@@ -993,22 +993,22 @@ contains
 
     b2LL = compute_bsquared(stateLL%Bx, stateLL%By, stateLL%Bz)
     c2LL = gamma * stateLL%pressure / stateLL%density
-    d2LL = 0.5d0 * (b2LL / stateLL%density + c2LL)
+    d2LL = 0.5_dp * (b2LL / stateLL%density + c2LL)
     cLLx = sqrt(d2LL + sqrt(d2LL**2 - c2LL * stateLL%Bx * stateLL%Bx / stateLL%density))
 
     b2LR = compute_bsquared(stateLR%Bx, stateLR%By, stateLR%Bz)
     c2LR = gamma * stateLR%pressure / stateLR%density
-    d2LR = 0.5d0 * (b2LR / stateLR%density + c2LR)
+    d2LR = 0.5_dp * (b2LR / stateLR%density + c2LR)
     cLRx = sqrt(d2LR + sqrt(d2LR**2 - c2LR * stateLR%Bx * stateLR%Bx / stateLR%density))
 
     b2RL = compute_bsquared(stateRL%Bx, stateRL%By, stateRL%Bz)
     c2RL = gamma * stateRL%pressure / stateRL%density
-    d2RL = 0.5d0 * (b2RL / stateRL%density + c2RL)
+    d2RL = 0.5_dp * (b2RL / stateRL%density + c2RL)
     cRLx = sqrt(d2RL + sqrt(d2RL**2 - c2RL * stateRL%Bx * stateRL%Bx / stateRL%density))
 
     b2RR = compute_bsquared(stateRR%Bx, stateRR%By, stateRR%Bz)
     c2RR = gamma * stateRR%pressure / stateRR%density
-    d2RR = 0.5d0 * (b2RR / stateRR%density + c2RR)
+    d2RR = 0.5_dp * (b2RR / stateRR%density + c2RR)
     cRRx = sqrt(d2RR + sqrt(d2RR**2 - c2RR * stateRR%Bx * stateRR%Bx / stateRR%density))
 
     ! Compute 4 fast magnetosonic velocities relative to y direction.
@@ -1114,19 +1114,19 @@ contains
     ARR = stateRR%Bx; BRR = stateRR%By; CRR = stateRR%Bz
 
     b2LL = compute_bsquared(ALL, BLL, CLL); c2LL = gamma*pLL/rLL
-    d2LL = 0.5d0*(b2LL/rLL + c2LL)
+    d2LL = 0.5_dp*(b2LL/rLL + c2LL)
     cfastLLx = sqrt(d2LL + sqrt(d2LL**2 - c2LL*ALL*ALL/rLL))
     cfastLLy = sqrt(d2LL + sqrt(d2LL**2 - c2LL*BLL*BLL/rLL))
     b2LR = compute_bsquared(ALR, BLR, CLR); c2LR = gamma*pLR/rLR
-    d2LR = 0.5d0*(b2LR/rLR + c2LR)
+    d2LR = 0.5_dp*(b2LR/rLR + c2LR)
     cfastLRx = sqrt(d2LR + sqrt(d2LR**2 - c2LR*ALR*ALR/rLR))
     cfastLRy = sqrt(d2LR + sqrt(d2LR**2 - c2LR*BLR*BLR/rLR))
     b2RL = compute_bsquared(ARL, BRL, CRL); c2RL = gamma*pRL/rRL
-    d2RL = 0.5d0*(b2RL/rRL + c2RL)
+    d2RL = 0.5_dp*(b2RL/rRL + c2RL)
     cfastRLx = sqrt(d2RL + sqrt(d2RL**2 - c2RL*ARL*ARL/rRL))
     cfastRLy = sqrt(d2RL + sqrt(d2RL**2 - c2RL*BRL*BRL/rRL))
     b2RR = compute_bsquared(ARR, BRR, CRR); c2RR = gamma*pRR/rRR
-    d2RR = 0.5d0*(b2RR/rRR + c2RR)
+    d2RR = 0.5_dp*(b2RR/rRR + c2RR)
     cfastRRx = sqrt(d2RR + sqrt(d2RR**2 - c2RR*ARR*ARR/rRR))
     cfastRRy = sqrt(d2RR + sqrt(d2RR**2 - c2RR*BRR*BRR/rRR))
 
@@ -1153,10 +1153,10 @@ contains
        return
     endif
 
-    PtotLL = pLL + 0.5d0*(ALL*ALL + BLL*BLL + CLL*CLL)
-    PtotLR = pLR + 0.5d0*(ALR*ALR + BLR*BLR + CLR*CLR)
-    PtotRL = pRL + 0.5d0*(ARL*ARL + BRL*BRL + CRL*CRL)
-    PtotRR = pRR + 0.5d0*(ARR*ARR + BRR*BRR + CRR*CRR)
+    PtotLL = pLL + 0.5_dp*(ALL*ALL + BLL*BLL + CLL*CLL)
+    PtotLR = pLR + 0.5_dp*(ALR*ALR + BLR*BLR + CLR*CLR)
+    PtotRL = pRL + 0.5_dp*(ARL*ARL + BRL*BRL + CRL*CRL)
+    PtotRR = pRR + 0.5_dp*(ARR*ARR + BRR*BRR + CRR*CRR)
 
     rcLLx = rLL*(uLL - SL); rcRLx = rRL*(SR - uRL)
     rcLRx = rLR*(uLR - SL); rcRRx = rRR*(SR - uRR)
@@ -3155,7 +3155,7 @@ contains
     real(kind=dp) :: b2l, b2r, c2l, c2r, d2l, d2r, cfleft, cfright
 
     smallp = smallc**2 / gamma
-    bx_mean = 0.5d0 * (left%Bx + right%Bx)
+    bx_mean = 0.5_dp * (left%Bx + right%Bx)
     rl = max(left%density, smallr);  rr = max(right%density, smallr)
     pl = max(left%pressure, smallp*rl); pr = max(right%pressure, smallp*rr)
     ul = left%velocity_x; ur = right%velocity_x
@@ -3163,9 +3163,9 @@ contains
     bly = left%By;  blz = left%Bz
     bry = right%By; brz = right%Bz
     b2l = compute_bsquared(blx, bly, blz); c2l = gamma*pl/rl
-    d2l = 0.5d0*(b2l/rl + c2l); cfleft = sqrt(d2l + sqrt(d2l**2 - c2l*blx*blx/rl))
+    d2l = 0.5_dp*(b2l/rl + c2l); cfleft = sqrt(d2l + sqrt(d2l**2 - c2l*blx*blx/rl))
     b2r = compute_bsquared(brx, bry, brz); c2r = gamma*pr/rr
-    d2r = 0.5d0*(b2r/rr + c2r); cfright = sqrt(d2r + sqrt(d2r**2 - c2r*brx*brx/rr))
+    d2r = 0.5_dp*(b2r/rr + c2r); cfright = sqrt(d2r + sqrt(d2r**2 - c2r*brx*brx/rr))
     SL = min(min(ul, ur) - max(cfleft, cfright), 0.0_dp)
     SR = max(max(ul, ur) + max(cfleft, cfright), 0.0_dp)
   end subroutine hll_mhd_wavespeeds
@@ -3493,6 +3493,58 @@ contains
     call syncthreads()
 
   end subroutine zero_fine_fluxes_mhd
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief Pure-induction (kinematic dynamo) mode: zero ALL Euler fluxes so the
+  !> conservative update leaves rho/momentum/energy/scalars untouched and only
+  !> the CT update advances B. Mirrors CPU godunov_fine.f90:667
+  !> (`if(r%induction)h%flux=0.0d0`); zeroing the flux arrays (rather than
+  !> gating the consumers) keeps C5/C6 and the coarse/fine Part-1 correction
+  !> bit-identical to the CPU. Called from the kernel only when induction.
+  attributes(device) subroutine zero_euler_fluxes_mhd(fluxes_x, fluxes_y, fluxes_z, thread_idx)
+    type(subgrid_3x2x2cell_primitive_mhd), intent(inout) :: fluxes_x
+    type(subgrid_2x3x2cell_primitive_mhd), intent(inout) :: fluxes_y
+    type(subgrid_2x2x3cell_primitive_mhd), intent(inout) :: fluxes_z
+    integer, value :: thread_idx
+    integer :: work_idx, interface_array_size, i, j, k, n
+
+    interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
+
+    do work_idx = thread_idx, interface_array_size * 3 - 1, blockDim%x
+       if (work_idx < interface_array_size) then
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
+          fluxes_x%density(i,j,k) = 0_dp;  fluxes_x%velocity_x(i,j,k) = 0_dp
+          fluxes_x%velocity_y(i,j,k) = 0_dp; fluxes_x%velocity_z(i,j,k) = 0_dp
+          fluxes_x%pressure(i,j,k) = 0_dp
+          fluxes_x%Bx(i,j,k) = 0_dp; fluxes_x%By(i,j,k) = 0_dp; fluxes_x%Bz(i,j,k) = 0_dp
+          do n = 1, nvar-5
+             fluxes_x%scalar(i,j,k,n) = 0_dp
+          end do
+       else if (work_idx < 2 * interface_array_size) then
+          call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
+          fluxes_y%density(i,j,k) = 0_dp;  fluxes_y%velocity_x(i,j,k) = 0_dp
+          fluxes_y%velocity_y(i,j,k) = 0_dp; fluxes_y%velocity_z(i,j,k) = 0_dp
+          fluxes_y%pressure(i,j,k) = 0_dp
+          fluxes_y%Bx(i,j,k) = 0_dp; fluxes_y%By(i,j,k) = 0_dp; fluxes_y%Bz(i,j,k) = 0_dp
+          do n = 1, nvar-5
+             fluxes_y%scalar(i,j,k,n) = 0_dp
+          end do
+       else
+          call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
+          fluxes_z%density(i,j,k) = 0_dp;  fluxes_z%velocity_x(i,j,k) = 0_dp
+          fluxes_z%velocity_y(i,j,k) = 0_dp; fluxes_z%velocity_z(i,j,k) = 0_dp
+          fluxes_z%pressure(i,j,k) = 0_dp
+          fluxes_z%Bx(i,j,k) = 0_dp; fluxes_z%By(i,j,k) = 0_dp; fluxes_z%Bz(i,j,k) = 0_dp
+          do n = 1, nvar-5
+             fluxes_z%scalar(i,j,k,n) = 0_dp
+          end do
+       end if
+    end do
+
+    call syncthreads()
+
+  end subroutine zero_euler_fluxes_mhd
   ! =========================================================================
 
   ! =========================================================================
@@ -3889,6 +3941,9 @@ contains
     ! (di,dj,dk) index the octs sharing each of the 12 boundary edges. c1/c2/c3 =
     ! is_coarse for those neighbours (CPU .not.ok1/2/3); weight=0.5 if any is
     ! refined. atomicadd handles other blocks correcting the same coarse cell.
+    ! NB the GPU edge arrays hold RAW E (C5 scales its own curl inline), whereas
+    ! the CPU h%emf* are stored dt/dx-scaled before this correction runs -- so
+    ! every dflux below carries the *dtdx that the CPU applied at store time.
     ! =================================================================
     if (thread_idx == 0) then
 
@@ -3898,7 +3953,7 @@ contains
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c3,oc3,cc3)
        if (c1 .or. c3) then
           weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfz%edge_e(0,0,0)+emfz%edge_e(0,0,1))*0.25_dp*weight
+          dflux=(emfz%edge_e(0,0,0)+emfz%edge_e(0,0,1))*0.25_dp*weight*dtdx
           if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,1,oc1),dflux);  endif
           if(c2)then; info=atomicadd(bnew(cc2,4,oc2),dflux);  info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
           if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,4,oc3),-dflux); endif
@@ -3908,7 +3963,7 @@ contains
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c3,oc3,cc3)
        if (c1 .or. c3) then
           weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfz%edge_e(0,2,0)+emfz%edge_e(0,2,1))*0.25_dp*weight
+          dflux=(emfz%edge_e(0,2,0)+emfz%edge_e(0,2,1))*0.25_dp*weight*dtdx
           if(c1)then; info=atomicadd(bnew(cc1,4,oc1),dflux);  info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
           if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,4,oc2),-dflux); endif
           if(c3)then; info=atomicadd(bnew(cc3,1,oc3),-dflux); info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
@@ -3918,7 +3973,7 @@ contains
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c3,oc3,cc3)
        if (c1 .or. c3) then
           weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfz%edge_e(2,2,0)+emfz%edge_e(2,2,1))*0.25_dp*weight
+          dflux=(emfz%edge_e(2,2,0)+emfz%edge_e(2,2,1))*0.25_dp*weight*dtdx
           if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,4,oc1),-dflux); endif
           if(c2)then; info=atomicadd(bnew(cc2,1,oc2),-dflux); info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
           if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,1,oc3),dflux);  endif
@@ -3928,7 +3983,7 @@ contains
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c3,oc3,cc3)
        if (c1 .or. c3) then
           weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfz%edge_e(2,0,0)+emfz%edge_e(2,0,1))*0.25_dp*weight
+          dflux=(emfz%edge_e(2,0,0)+emfz%edge_e(2,0,1))*0.25_dp*weight*dtdx
           if(c1)then; info=atomicadd(bnew(cc1,1,oc1),-dflux); info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
           if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,1,oc2),dflux);  endif
           if(c3)then; info=atomicadd(bnew(cc3,4,oc3),dflux);  info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
@@ -3940,7 +3995,7 @@ contains
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c3,oc3,cc3)
        if (c1 .or. c3) then
           weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfx%edge_e(0,0,0)+emfx%edge_e(1,0,0))*0.25_dp*weight
+          dflux=(emfx%edge_e(0,0,0)+emfx%edge_e(1,0,0))*0.25_dp*weight*dtdx
           if(c1)then; info=atomicadd(bnew(cc1,6,oc1),dflux);  info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
           if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,6,oc2),-dflux); endif
           if(c3)then; info=atomicadd(bnew(cc3,3,oc3),-dflux); info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
@@ -3950,7 +4005,7 @@ contains
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c3,oc3,cc3)
        if (c1 .or. c3) then
           weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfx%edge_e(0,0,2)+emfx%edge_e(1,0,2))*0.25_dp*weight
+          dflux=(emfx%edge_e(0,0,2)+emfx%edge_e(1,0,2))*0.25_dp*weight*dtdx
           if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,6,oc1),-dflux); endif
           if(c2)then; info=atomicadd(bnew(cc2,3,oc2),-dflux); info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
           if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,3,oc3),dflux);  endif
@@ -3960,7 +4015,7 @@ contains
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c3,oc3,cc3)
        if (c1 .or. c3) then
           weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfx%edge_e(0,2,2)+emfx%edge_e(1,2,2))*0.25_dp*weight
+          dflux=(emfx%edge_e(0,2,2)+emfx%edge_e(1,2,2))*0.25_dp*weight*dtdx
           if(c1)then; info=atomicadd(bnew(cc1,3,oc1),-dflux); info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
           if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,3,oc2),dflux);  endif
           if(c3)then; info=atomicadd(bnew(cc3,6,oc3),dflux);  info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
@@ -3970,7 +4025,7 @@ contains
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c3,oc3,cc3)
        if (c1 .or. c3) then
           weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfx%edge_e(0,2,0)+emfx%edge_e(1,2,0))*0.25_dp*weight
+          dflux=(emfx%edge_e(0,2,0)+emfx%edge_e(1,2,0))*0.25_dp*weight*dtdx
           if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,3,oc1),dflux);  endif
           if(c2)then; info=atomicadd(bnew(cc2,6,oc2),dflux);  info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
           if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,6,oc3),-dflux); endif
@@ -3982,7 +4037,7 @@ contains
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c3,oc3,cc3)
        if (c1 .or. c3) then
           weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfy%edge_e(0,0,0)+emfy%edge_e(0,1,0))*0.25_dp*weight
+          dflux=(emfy%edge_e(0,0,0)+emfy%edge_e(0,1,0))*0.25_dp*weight*dtdx
           if(c1)then; info=atomicadd(bnew(cc1,6,oc1),-dflux); info=atomicadd(bnew(cc1,1,oc1),-dflux); endif
           if(c2)then; info=atomicadd(bnew(cc2,4,oc2),-dflux); info=atomicadd(bnew(cc2,6,oc2),dflux);  endif
           if(c3)then; info=atomicadd(bnew(cc3,3,oc3),dflux);  info=atomicadd(bnew(cc3,4,oc3),dflux);  endif
@@ -3992,7 +4047,7 @@ contains
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c3,oc3,cc3)
        if (c1 .or. c3) then
           weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfy%edge_e(0,0,2)+emfy%edge_e(0,1,2))*0.25_dp*weight
+          dflux=(emfy%edge_e(0,0,2)+emfy%edge_e(0,1,2))*0.25_dp*weight*dtdx
           if(c1)then; info=atomicadd(bnew(cc1,4,oc1),-dflux); info=atomicadd(bnew(cc1,6,oc1),dflux);  endif
           if(c2)then; info=atomicadd(bnew(cc2,3,oc2),dflux);  info=atomicadd(bnew(cc2,4,oc2),dflux);  endif
           if(c3)then; info=atomicadd(bnew(cc3,1,oc3),dflux);  info=atomicadd(bnew(cc3,3,oc3),-dflux); endif
@@ -4002,7 +4057,7 @@ contains
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c3,oc3,cc3)
        if (c1 .or. c3) then
           weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfy%edge_e(2,0,2)+emfy%edge_e(2,1,2))*0.25_dp*weight
+          dflux=(emfy%edge_e(2,0,2)+emfy%edge_e(2,1,2))*0.25_dp*weight*dtdx
           if(c1)then; info=atomicadd(bnew(cc1,3,oc1),dflux);  info=atomicadd(bnew(cc1,4,oc1),dflux);  endif
           if(c2)then; info=atomicadd(bnew(cc2,1,oc2),dflux);  info=atomicadd(bnew(cc2,3,oc2),-dflux); endif
           if(c3)then; info=atomicadd(bnew(cc3,6,oc3),-dflux); info=atomicadd(bnew(cc3,1,oc3),-dflux); endif
@@ -4012,7 +4067,7 @@ contains
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c3,oc3,cc3)
        if (c1 .or. c3) then
           weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfy%edge_e(2,0,0)+emfy%edge_e(2,1,0))*0.25_dp*weight
+          dflux=(emfy%edge_e(2,0,0)+emfy%edge_e(2,1,0))*0.25_dp*weight*dtdx
           if(c1)then; info=atomicadd(bnew(cc1,1,oc1),dflux);  info=atomicadd(bnew(cc1,3,oc1),-dflux); endif
           if(c2)then; info=atomicadd(bnew(cc2,6,oc2),-dflux); info=atomicadd(bnew(cc2,1,oc2),-dflux); endif
           if(c3)then; info=atomicadd(bnew(cc3,4,oc3),-dflux); info=atomicadd(bnew(cc3,6,oc3),dflux);  endif
@@ -4278,6 +4333,13 @@ contains
     call riemann_driver_mhd(left_x, right_x, left_y, right_y, left_z, right_z, &
          & thread_idx, gamma, smallr, smallc, riemann)
 
+    ! Pure induction: zero the Euler fluxes so only the CT update acts
+    ! (CPU godunov_fine.f90:667). induction is block-uniform, so the
+    ! syncthreads inside the call is safe.
+    if (induction) then
+       call zero_euler_fluxes_mhd(left_x, left_y, left_z, thread_idx)
+    endif
+
     ! C3: 2D EMF solve from the corner-state scratch -> edge-EMF subgrids (v4.1)
     call cmp_mag_flx_mhd(mhd_corner_scratch, bslot, emfx, emfy, emfz, thread_idx, &
          & gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin, riemann2d)
@@ -4446,6 +4508,7 @@ contains
 
     integer :: tid, bid, cell_idx, oct_idx
     integer :: ind, father_idx, i, j, k
+    integer :: ivar ! Conserved-variable slot (1:nvar, CPU upload_fine parity)
     integer :: idim ! Spatial dimension (face-B restriction / energy split)
     real(kind=dp) :: eint_sum, ekin, erad, emag ! interpol_var==1 internal-energy restriction
 #ifdef MHD
@@ -4469,20 +4532,14 @@ contains
     k = grid(oct_idx)%ckey(3) - 2 * grid(father_idx)%ckey(3)
     cell_idx = 1 + i + 2*j + 4*k
 
-    ! Reset conservative variables
-    uold(cell_idx, 1, father_idx) = 0_dp
-    uold(cell_idx, 2, father_idx) = 0_dp
-    uold(cell_idx, 3, father_idx) = 0_dp
-    uold(cell_idx, 4, father_idx) = 0_dp
-    uold(cell_idx, 5, father_idx) = 0_dp
-
-    ! Average children variables
-    do ind = 1, twotondim
-       uold(cell_idx, 1, father_idx) = uold(cell_idx, 1, father_idx) + uold(ind, 1, oct_idx) * inv_twotondim
-       uold(cell_idx, 2, father_idx) = uold(cell_idx, 2, father_idx) + uold(ind, 2, oct_idx) * inv_twotondim
-       uold(cell_idx, 3, father_idx) = uold(cell_idx, 3, father_idx) + uold(ind, 3, oct_idx) * inv_twotondim
-       uold(cell_idx, 4, father_idx) = uold(cell_idx, 4, father_idx) + uold(ind, 4, oct_idx) * inv_twotondim
-       uold(cell_idx, 5, father_idx) = uold(cell_idx, 5, father_idx) + uold(ind, 5, oct_idx) * inv_twotondim
+    ! Reset conservative variables and average the children, over ALL nvar slots
+    ! (CPU upload_fine does ivar=1,nvar, upload.f90:141-149 -- the passive
+    ! scalars at 6:nvar are restricted exactly like the five core variables).
+    do ivar = 1, nvar
+       uold(cell_idx, ivar, father_idx) = 0_dp
+       do ind = 1, twotondim
+          uold(cell_idx, ivar, father_idx) = uold(cell_idx, ivar, father_idx) + uold(ind, ivar, oct_idx) * inv_twotondim
+       end do
     end do
 
     ! Restriction of the face-centred B field (mirrors CPU upload_fine, upload.f90:118-195).
