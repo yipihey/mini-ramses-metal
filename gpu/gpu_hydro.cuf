@@ -2263,7 +2263,15 @@ contains
 
   ! =========================================================================
   !> @brief
-  !> Driver for the Riemann solvers. This subroutine handles arranging the interface states and reading/writing data from shared memory
+  !> Driver for the Riemann solvers. This subroutine handles arranging the interface states and reading/writing data from shared memory.
+  !> Under MHD it rotates the magnetic field along with the velocity into the
+  !> face-normal frame (the CPU bn,bt1,bt2 / ln,lt1,lt2 permutations, cmpflxm
+  !> umuscl.f90:131-204), dispatches the MHD solvers (riemann_mhd_fluxes), and
+  !> advects the passive scalars with the same SL/SR HLL flux as the CPU
+  !> (find_mhd_flux: ff(s)=d*u*s, cvar(s)=d*s; godunov_utils.f90:1332-1335).
+  !> At NDIM=3 the magnetic-flux slots (Bx/By/Bz) are written but never consumed --
+  !> B is advanced by constrained transport (the EMF curl in C5), not by these
+  !> face fluxes (CPU guards the face-flux B update #if NDIM<3, godunov_fine:771).
   !>
   !> @param[in,out] left_interfaces_x : The left interfaces at the i+1/2 interfaces. The fluxes along the X interfaces are returned in this array
   !> @param[in] right_interfaces_x : The right interfaces at the i-1/2 interfaces.
@@ -2272,20 +2280,26 @@ contains
   !> @param[in,out] left_interfaces_z : The left interfaces at the k+1/2 interfaces. The fluxes along the Z interfaces are returned in this array
   !> @param[in] right_interfaces_z : The right interfaces at the k-1/2 interfaces.
   !> @param[in] gamma : The adiabatic index
+  !> @param[in] smallr, smallc : Density and sound-speed floors (MHD solvers only; unused without MHD)
   !> @param[in] thread_idx : The index of this thread
   !>
   attributes(device) subroutine riemann_driver(left_interfaces_x, right_interfaces_x, left_interfaces_y, &
        & right_interfaces_y, left_interfaces_z, right_interfaces_z, thread_idx, &
-       & gamma, riemann)
+       & gamma, smallr, smallc, riemann)
     type(subgrid_3x2x2cell_primitive), intent(inout) :: left_interfaces_x, right_interfaces_x
     type(subgrid_2x3x2cell_primitive), intent(inout) :: left_interfaces_y, right_interfaces_y
     type(subgrid_2x2x3cell_primitive), intent(inout) :: left_interfaces_z, right_interfaces_z
     real(kind=dp), value :: gamma
+    real(kind=dp), value :: smallr, smallc ! Unused without MHD
     integer, value :: riemann
     integer, value :: thread_idx
     integer :: work_idx, interface_array_size, i, j, k
     type(primitive_t) :: left_interface, right_interface
     type(conserved_t) :: flux
+#ifdef MHD
+    real(kind=dp) :: SL, SR, sLin, sRin
+    integer :: n
+#endif
 
     interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
 
@@ -2306,9 +2320,19 @@ contains
           right_interface%velocity_y = right_interfaces_x%velocity_y(i,j,k)
           right_interface%velocity_z = right_interfaces_x%velocity_z(i,j,k)
           right_interface%pressure   = right_interfaces_x%pressure(i,j,k)
+#ifdef MHD
+          ! X interfaces: normal frame is identity
+          left_interface%Bx = left_interfaces_x%Bx(i,j,k); left_interface%By = left_interfaces_x%By(i,j,k); left_interface%Bz = left_interfaces_x%Bz(i,j,k)
+          right_interface%Bx = right_interfaces_x%Bx(i,j,k); right_interface%By = right_interfaces_x%By(i,j,k); right_interface%Bz = right_interfaces_x%Bz(i,j,k)
+#endif
 
           ! Call the Riemann Solver
+#ifdef MHD
+          flux = riemann_mhd_fluxes(left_interface, right_interface, gamma, smallr, smallc, riemann)
+          call hll_mhd_wavespeeds(left_interface, right_interface, gamma, smallr, smallc, SL, SR)
+#else
           flux = riemann_fluxes(left_interface, right_interface, gamma, riemann)
+#endif
 
           ! Unpack the fluxes into the interface state arrays
           left_interfaces_x%density   (i,j,k) = flux%density
@@ -2316,11 +2340,50 @@ contains
           left_interfaces_x%velocity_y(i,j,k) = flux%momentum_y
           left_interfaces_x%velocity_z(i,j,k) = flux%momentum_z
           left_interfaces_x%pressure  (i,j,k) = flux%energy
+#ifdef MHD
+          left_interfaces_x%Bx(i,j,k) = flux%Bx; left_interfaces_x%By(i,j,k) = flux%By; left_interfaces_x%Bz(i,j,k) = flux%Bz
+          do n = 1, nvar-5
+             sLin = left_interfaces_x%scalar(i,j,k,n); sRin = right_interfaces_x%scalar(i,j,k,n)
+             left_interfaces_x%scalar(i,j,k,n) = mhd_scalar_flux(riemann, flux%density, SL, SR, &
+                  & max(left_interface%density,smallr), left_interface%velocity_x, sLin, max(right_interface%density,smallr), right_interface%velocity_x, sRin)
+          end do
+#endif
 
        else if (work_idx < 2 * interface_array_size) then ! Compute fluxes across the y interfaces
           ! Compute the indices in the interface state arrays
           call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
 
+#ifdef MHD
+          ! Y interfaces: normal=vy/By, t1=vx/Bx, t2=vz/Bz. NOTE this MHD frame
+          ! is a SWAP (matching the CPU cmpflxm ln/lt1/lt2 convention) while the
+          ! hydro Y frame below is a CYCLIC rotation. The two send different
+          ! states through the t1/t2 slots of the solver, so the Y branch cannot
+          ! be merged additively without changing one of them bitwise -- it is
+          ! kept as an alternative block.
+          left_interface%density = left_interfaces_y%density(i,j,k);  left_interface%pressure = left_interfaces_y%pressure(i,j,k)
+          left_interface%velocity_x = left_interfaces_y%velocity_y(i,j,k); left_interface%velocity_y = left_interfaces_y%velocity_x(i,j,k)
+          left_interface%velocity_z = left_interfaces_y%velocity_z(i,j,k)
+          left_interface%Bx = left_interfaces_y%By(i,j,k); left_interface%By = left_interfaces_y%Bx(i,j,k); left_interface%Bz = left_interfaces_y%Bz(i,j,k)
+          right_interface%density = right_interfaces_y%density(i,j,k); right_interface%pressure = right_interfaces_y%pressure(i,j,k)
+          right_interface%velocity_x = right_interfaces_y%velocity_y(i,j,k); right_interface%velocity_y = right_interfaces_y%velocity_x(i,j,k)
+          right_interface%velocity_z = right_interfaces_y%velocity_z(i,j,k)
+          right_interface%Bx = right_interfaces_y%By(i,j,k); right_interface%By = right_interfaces_y%Bx(i,j,k); right_interface%Bz = right_interfaces_y%Bz(i,j,k)
+
+          flux = riemann_mhd_fluxes(left_interface, right_interface, gamma, smallr, smallc, riemann)
+          call hll_mhd_wavespeeds(left_interface, right_interface, gamma, smallr, smallc, SL, SR)
+
+          left_interfaces_y%density(i,j,k) = flux%density
+          left_interfaces_y%velocity_y(i,j,k) = flux%momentum_x   ! normal momentum
+          left_interfaces_y%velocity_x(i,j,k) = flux%momentum_y   ! tangential 1
+          left_interfaces_y%velocity_z(i,j,k) = flux%momentum_z   ! tangential 2
+          left_interfaces_y%pressure(i,j,k) = flux%energy
+          left_interfaces_y%By(i,j,k) = flux%Bx; left_interfaces_y%Bx(i,j,k) = flux%By; left_interfaces_y%Bz(i,j,k) = flux%Bz
+          do n = 1, nvar-5
+             sLin = left_interfaces_y%scalar(i,j,k,n); sRin = right_interfaces_y%scalar(i,j,k,n)
+             left_interfaces_y%scalar(i,j,k,n) = mhd_scalar_flux(riemann, flux%density, SL, SR, &
+                  & max(left_interface%density,smallr), left_interface%velocity_x, sLin, max(right_interface%density,smallr), right_interface%velocity_x, sRin)
+          end do
+#else
           ! Gather the interface states
           left_interface%density    = left_interfaces_y%density(i,j,k)
           left_interface%velocity_x = left_interfaces_y%velocity_y(i,j,k)
@@ -2343,6 +2406,7 @@ contains
           left_interfaces_y%velocity_y(i,j,k) = flux%momentum_x
           left_interfaces_y%velocity_z(i,j,k) = flux%momentum_y
           left_interfaces_y%pressure  (i,j,k) = flux%energy
+#endif
        else ! Compute fluxes across the z interfaces
           ! Compute the indices in the interface state arrays
           call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
@@ -2359,9 +2423,20 @@ contains
           right_interface%velocity_y = right_interfaces_z%velocity_x(i,j,k)
           right_interface%velocity_z = right_interfaces_z%velocity_y(i,j,k)
           right_interface%pressure   = right_interfaces_z%pressure(i,j,k)
+#ifdef MHD
+          ! Z interfaces: normal=vz/Bz, t1=vx/Bx, t2=vy/By (same cyclic frame
+          ! as the hydro gather above)
+          left_interface%Bx = left_interfaces_z%Bz(i,j,k); left_interface%By = left_interfaces_z%Bx(i,j,k); left_interface%Bz = left_interfaces_z%By(i,j,k)
+          right_interface%Bx = right_interfaces_z%Bz(i,j,k); right_interface%By = right_interfaces_z%Bx(i,j,k); right_interface%Bz = right_interfaces_z%By(i,j,k)
+#endif
 
           ! Call the Riemann Solver
+#ifdef MHD
+          flux = riemann_mhd_fluxes(left_interface, right_interface, gamma, smallr, smallc, riemann)
+          call hll_mhd_wavespeeds(left_interface, right_interface, gamma, smallr, smallc, SL, SR)
+#else
           flux = riemann_fluxes(left_interface, right_interface, gamma, riemann)
+#endif
 
           ! Unpack the fluxes into the interface state arrays
           left_interfaces_z%density   (i,j,k) = flux%density
@@ -2369,6 +2444,14 @@ contains
           left_interfaces_z%velocity_y(i,j,k) = flux%momentum_z
           left_interfaces_z%velocity_z(i,j,k) = flux%momentum_x
           left_interfaces_z%pressure  (i,j,k) = flux%energy
+#ifdef MHD
+          left_interfaces_z%Bz(i,j,k) = flux%Bx; left_interfaces_z%Bx(i,j,k) = flux%By; left_interfaces_z%By(i,j,k) = flux%Bz
+          do n = 1, nvar-5
+             sLin = left_interfaces_z%scalar(i,j,k,n); sRin = right_interfaces_z%scalar(i,j,k,n)
+             left_interfaces_z%scalar(i,j,k,n) = mhd_scalar_flux(riemann, flux%density, SL, SR, &
+                  & max(left_interface%density,smallr), left_interface%velocity_x, sLin, max(right_interface%density,smallr), right_interface%velocity_x, sRin)
+          end do
+#endif
        end if
     end do
 
@@ -2893,7 +2976,7 @@ contains
   !> @brief (Stage C2 helper) Return the HLL fast-magnetosonic wave speeds SL/SR
   !> for the 1D MHD Riemann problem, identical to the speed computation inside
   !> hll_mhd_fluxes (B4) -- recomputed here (rather than modifying B4, which is
-  !> frozen) so the passive-scalar HLL flux in riemann_driver_mhd uses the same
+  !> frozen) so the passive-scalar HLL flux in riemann_driver uses the same
   !> SL/SR as the MHD-core flux. Floors match B4 (no-ops for realistic states).
   attributes(device) subroutine hll_mhd_wavespeeds(left, right, gamma, smallr, smallc, SL, SR)
     type(primitive_t), intent(in) :: left, right
@@ -2920,119 +3003,6 @@ contains
   end subroutine hll_mhd_wavespeeds
   ! =========================================================================
 
-  ! =========================================================================
-  !> @brief (Stage C2) MHD 1D-flux driver. The MHD analog of riemann_driver: for
-  !> each of the X/Y/Z interfaces it gathers the qm/qp interface states, rotates
-  !> the velocity AND magnetic field into the face-normal frame (the CPU bn,bt1,bt2
-  !> / ln,lt1,lt2 permutations, cmpflxm umuscl.f90:131-204), calls riemann_mhd_fluxes
-  !> (B4), and unpacks the conserved fluxes back into the interface arrays with the
-  !> rotation reversed. Passive scalars are advected with the same SL/SR HLL flux as
-  !> the CPU (find_mhd_flux: ff(s)=d*u*s, cvar(s)=d*s; godunov_utils.f90:1332-1335).
-  !> At NDIM=3 the magnetic-flux slots (Bx/By/Bz) are written but never consumed --
-  !> B is advanced by constrained transport (the EMF curl in C5), not by these
-  !> face fluxes (CPU guards the face-flux B update #if NDIM<3, godunov_fine:771).
-  attributes(device) subroutine riemann_driver_mhd(left_x, right_x, left_y, right_y, &
-       & left_z, right_z, thread_idx, gamma, smallr, smallc, riemann)
-    type(subgrid_3x2x2cell_primitive), intent(inout) :: left_x, right_x
-    type(subgrid_2x3x2cell_primitive), intent(inout) :: left_y, right_y
-    type(subgrid_2x2x3cell_primitive), intent(inout) :: left_z, right_z
-    real(kind=dp), value :: gamma, smallr, smallc
-    integer, value :: riemann, thread_idx
-    integer :: work_idx, interface_array_size, i, j, k, n
-    type(primitive_t) :: lft, rgt
-    type(conserved_t) :: flux
-    real(kind=dp) :: SL, SR, sLin, sRin
-
-    interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
-
-    do work_idx = thread_idx, interface_array_size * 3 - 1, blockDim%x
-       if (work_idx < interface_array_size) then
-          ! ---- X interfaces: normal frame is identity ----------------------
-          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
-          lft%density = left_x%density(i,j,k);  lft%pressure = left_x%pressure(i,j,k)
-          lft%velocity_x = left_x%velocity_x(i,j,k); lft%velocity_y = left_x%velocity_y(i,j,k)
-          lft%velocity_z = left_x%velocity_z(i,j,k)
-          lft%Bx = left_x%Bx(i,j,k); lft%By = left_x%By(i,j,k); lft%Bz = left_x%Bz(i,j,k)
-          rgt%density = right_x%density(i,j,k); rgt%pressure = right_x%pressure(i,j,k)
-          rgt%velocity_x = right_x%velocity_x(i,j,k); rgt%velocity_y = right_x%velocity_y(i,j,k)
-          rgt%velocity_z = right_x%velocity_z(i,j,k)
-          rgt%Bx = right_x%Bx(i,j,k); rgt%By = right_x%By(i,j,k); rgt%Bz = right_x%Bz(i,j,k)
-
-          flux = riemann_mhd_fluxes(lft, rgt, gamma, smallr, smallc, riemann)
-          call hll_mhd_wavespeeds(lft, rgt, gamma, smallr, smallc, SL, SR)
-
-          left_x%density(i,j,k) = flux%density
-          left_x%velocity_x(i,j,k) = flux%momentum_x
-          left_x%velocity_y(i,j,k) = flux%momentum_y
-          left_x%velocity_z(i,j,k) = flux%momentum_z
-          left_x%pressure(i,j,k) = flux%energy
-          left_x%Bx(i,j,k) = flux%Bx; left_x%By(i,j,k) = flux%By; left_x%Bz(i,j,k) = flux%Bz
-          do n = 1, nvar-5
-             sLin = left_x%scalar(i,j,k,n); sRin = right_x%scalar(i,j,k,n)
-             left_x%scalar(i,j,k,n) = mhd_scalar_flux(riemann, flux%density, SL, SR, &
-                  & max(lft%density,smallr), lft%velocity_x, sLin, max(rgt%density,smallr), rgt%velocity_x, sRin)
-          end do
-
-       else if (work_idx < 2 * interface_array_size) then
-          ! ---- Y interfaces: normal=vy/By, t1=vx/Bx, t2=vz/Bz --------------
-          call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
-          lft%density = left_y%density(i,j,k);  lft%pressure = left_y%pressure(i,j,k)
-          lft%velocity_x = left_y%velocity_y(i,j,k); lft%velocity_y = left_y%velocity_x(i,j,k)
-          lft%velocity_z = left_y%velocity_z(i,j,k)
-          lft%Bx = left_y%By(i,j,k); lft%By = left_y%Bx(i,j,k); lft%Bz = left_y%Bz(i,j,k)
-          rgt%density = right_y%density(i,j,k); rgt%pressure = right_y%pressure(i,j,k)
-          rgt%velocity_x = right_y%velocity_y(i,j,k); rgt%velocity_y = right_y%velocity_x(i,j,k)
-          rgt%velocity_z = right_y%velocity_z(i,j,k)
-          rgt%Bx = right_y%By(i,j,k); rgt%By = right_y%Bx(i,j,k); rgt%Bz = right_y%Bz(i,j,k)
-
-          flux = riemann_mhd_fluxes(lft, rgt, gamma, smallr, smallc, riemann)
-          call hll_mhd_wavespeeds(lft, rgt, gamma, smallr, smallc, SL, SR)
-
-          left_y%density(i,j,k) = flux%density
-          left_y%velocity_y(i,j,k) = flux%momentum_x   ! normal momentum
-          left_y%velocity_x(i,j,k) = flux%momentum_y   ! tangential 1
-          left_y%velocity_z(i,j,k) = flux%momentum_z   ! tangential 2
-          left_y%pressure(i,j,k) = flux%energy
-          left_y%By(i,j,k) = flux%Bx; left_y%Bx(i,j,k) = flux%By; left_y%Bz(i,j,k) = flux%Bz
-          do n = 1, nvar-5
-             sLin = left_y%scalar(i,j,k,n); sRin = right_y%scalar(i,j,k,n)
-             left_y%scalar(i,j,k,n) = mhd_scalar_flux(riemann, flux%density, SL, SR, &
-                  & max(lft%density,smallr), lft%velocity_x, sLin, max(rgt%density,smallr), rgt%velocity_x, sRin)
-          end do
-
-       else
-          ! ---- Z interfaces: normal=vz/Bz, t1=vx/Bx, t2=vy/By --------------
-          call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
-          lft%density = left_z%density(i,j,k);  lft%pressure = left_z%pressure(i,j,k)
-          lft%velocity_x = left_z%velocity_z(i,j,k); lft%velocity_y = left_z%velocity_x(i,j,k)
-          lft%velocity_z = left_z%velocity_y(i,j,k)
-          lft%Bx = left_z%Bz(i,j,k); lft%By = left_z%Bx(i,j,k); lft%Bz = left_z%By(i,j,k)
-          rgt%density = right_z%density(i,j,k); rgt%pressure = right_z%pressure(i,j,k)
-          rgt%velocity_x = right_z%velocity_z(i,j,k); rgt%velocity_y = right_z%velocity_x(i,j,k)
-          rgt%velocity_z = right_z%velocity_y(i,j,k)
-          rgt%Bx = right_z%Bz(i,j,k); rgt%By = right_z%Bx(i,j,k); rgt%Bz = right_z%By(i,j,k)
-
-          flux = riemann_mhd_fluxes(lft, rgt, gamma, smallr, smallc, riemann)
-          call hll_mhd_wavespeeds(lft, rgt, gamma, smallr, smallc, SL, SR)
-
-          left_z%density(i,j,k) = flux%density
-          left_z%velocity_z(i,j,k) = flux%momentum_x   ! normal momentum
-          left_z%velocity_x(i,j,k) = flux%momentum_y   ! tangential 1
-          left_z%velocity_y(i,j,k) = flux%momentum_z   ! tangential 2
-          left_z%pressure(i,j,k) = flux%energy
-          left_z%Bz(i,j,k) = flux%Bx; left_z%Bx(i,j,k) = flux%By; left_z%By(i,j,k) = flux%Bz
-          do n = 1, nvar-5
-             sLin = left_z%scalar(i,j,k,n); sRin = right_z%scalar(i,j,k,n)
-             left_z%scalar(i,j,k,n) = mhd_scalar_flux(riemann, flux%density, SL, SR, &
-                  & max(lft%density,smallr), lft%velocity_x, sLin, max(rgt%density,smallr), rgt%velocity_x, sRin)
-          end do
-       end if
-    end do
-
-    call syncthreads()
-
-  end subroutine riemann_driver_mhd
-  ! =========================================================================
 
   ! =========================================================================
   !> @brief (Stage C3 helpers) Read one edge corner state from the shared
@@ -3947,7 +3917,7 @@ contains
     ! names say
     call riemann_driver(left_interfaces_x, right_interfaces_x, left_interfaces_y, &
          & right_interfaces_y, left_interfaces_z, right_interfaces_z, thread_idx, &
-         & gamma, riemann)
+         & gamma, smallr, smallc, riemann)
 
     ! =======================================================================
     ! Zero fluxes at boundaries with finer levels.
@@ -4050,7 +4020,7 @@ contains
          & left_x, right_x, left_y, right_y, left_z, right_z, gamma, dtdx, slope)
 
     ! C2: 1D MHD fluxes (written back into the left_* interface arrays)
-    call riemann_driver_mhd(left_x, right_x, left_y, right_y, left_z, right_z, &
+    call riemann_driver(left_x, right_x, left_y, right_y, left_z, right_z, &
          & thread_idx, gamma, smallr, smallc, riemann)
 
     ! Pure induction: zero the Euler fluxes so only the CT update acts
