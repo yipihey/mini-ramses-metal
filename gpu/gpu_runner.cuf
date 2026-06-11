@@ -482,7 +482,7 @@ contains
    if (npart_new > 0) then
 
       ! Array flag2 contains the parent AMR cell index of each new star
-      call compute_star_swap_table<<<num_blocks, num_threads>>>(prefix_sum, flag2, head_idx, num_octs)
+      call compute_star_swap_table<<<num_blocks, num_threads>>>(flag2, prefix_sum, head_idx, num_octs)
 
       head_part = sim%star%npart + 1
 
@@ -501,7 +501,7 @@ contains
            & star_xp, star_vp, star_mp, star_tp, star_zp, star_levelp, star_idp, &
            & head_part, npart_new, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
            & dx, vol, mstar, d_skip, int(sim%r%nstarmax,8), &
-           & sim%g%dtnew(ilevel), sim%g%texp, sim%g%aexp, &
+           & sim%g%dtnew(ilevel), sim%g%texp, sim%g%aexp, sim%r%gamma, &
            & sim%r%metal, sim%r%imetal, sim%r%z_ave, sim%r%ientropy, sim%r%dual_energy)
       call GPU_Error_Check(__FILE__, __LINE__)
       call nvtxEndRange()

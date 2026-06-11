@@ -201,7 +201,7 @@ attributes(global) subroutine compute_star_swap_table(swap_local, prefix_sum, he
   global_cell_idx = cell_idx + (oct_idx - 1) * twotondim
 
   ! Get previous prefix sum
-  if (oct_idx > head_idx)then
+  if (global_cell_idx > 1 + (head_idx - 1) * twotondim)then
      previous_sum = prefix_sum(global_cell_idx - 1)
   else
      previous_sum = 0
@@ -221,13 +221,14 @@ end subroutine compute_star_swap_table
 
 !> Create star particles and update gas variables.
 ! =========================================================================
-attributes(global) subroutine star_formation_kernel(grid, uold, flag1, swap_local, &
+attributes(global) subroutine star_formation_kernel(grid, uold, flag1, f, swap_local, &
      & star_xp, star_vp, star_mp, star_tp, star_zp, star_levelp, star_idp, &
      & head_idx, num_star, ilevel, levelmin, levelmax, dx, vol, mstar, d_skip, leading, &
-     & dt, texp, aexp, metal, imetal, z_ave, ientropy, dual_energy)
+     & dt, texp, aexp, gamma, metal, imetal, z_ave, ientropy, dual_energy)
   use curand_device
   type(oct), device :: grid(*)
   real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+  real(kind=dp), device :: f(1:twotondim,1:ndim,*)
   integer(kind=4), device :: flag1(*)
   integer(kind=4), device :: swap_local(*)
   real(kind=dp), device :: star_xp(*), star_vp(*)
@@ -240,7 +241,7 @@ attributes(global) subroutine star_formation_kernel(grid, uold, flag1, swap_loca
   integer(kind=4), intent(in), value :: head_idx, num_star
   integer(kind=4), intent(in), value :: ilevel, levelmin, levelmax
   real(kind=8), intent(in), value :: dx, vol, mstar
-  real(kind=8), intent(in), value :: dt, texp, aexp, z_ave
+  real(kind=8), intent(in), value :: dt, texp, aexp, gamma, z_ave
   logical, intent(in), value :: metal
   integer(kind=4), intent(in), value :: ientropy, imetal
   real(kind=8), intent(in), value :: dual_energy
@@ -268,9 +269,16 @@ attributes(global) subroutine star_formation_kernel(grid, uold, flag1, swap_loca
   d_old = uold(cell_idx, 1, oct_idx)
 
   ! Gas velocity
+#ifdef GRAV
+  do idim = 1, ndim
+     star_vp(star_idx + (idim-1)*leading) = uold(cell_idx, idim+1, oct_idx) / d_old &
+          & - f(cell_idx, idim, oct_idx) * 0.5d0 * dt
+  end do
+#else
   do idim = 1, ndim
      star_vp(star_idx + (idim-1)*leading) = uold(cell_idx, idim+1, oct_idx) / d_old
   end do
+#endif
 
   ! Number of stars
   nstar = flag1(global_cell_idx)
