@@ -98,13 +98,17 @@ contains
   !>
   !> @return
   !> The pressure
-  attributes(device) function compute_pressure(conserved, gamma) result(pressure)
+  attributes(device) function compute_pressure(conserved, gamma, smallr, smallc2) result(pressure)
     type(conserved_t), intent(in) :: conserved
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc2
     real(kind=dp) :: pressure, momentum_squared
+    real(kind=dp) :: density, smallp
 
+    smallp = smallc2 / gamma
     momentum_squared = magnitude_squared(conserved%momentum_x, conserved%momentum_y, conserved%momentum_z)
-    pressure = (gamma - 1.0_dp)*(conserved%energy - 0.5_dp*momentum_squared/conserved%density)
+    density = max(conserved%density, smallr)
+    internal_energy = conserved%energy - 0.5_dp*momentum_squared/density
+    pressure = max((gamma - 1.0_dp)*internal_energy, density*smallp)
     return
   end function compute_pressure
   ! ==========================================================================
@@ -219,16 +223,16 @@ contains
   !> @param[in] gamma : The adiabatic index
   !> @return
   !> A primitive_t object with the primitive variables in a cell
-  attributes(device) function conserved_2_primitive(conserved, gamma) result(primitive)
+  attributes(device) function conserved_2_primitive(conserved, gamma, smallr, smallc2) result(primitive)
     type(conserved_t), intent(in) :: conserved
     real(kind=dp), value :: gamma
     type(primitive_t) :: primitive
 
-    primitive%density    = conserved%density
-    primitive%velocity_x = conserved%momentum_x / conserved%density
-    primitive%velocity_y = conserved%momentum_y / conserved%density
-    primitive%velocity_z = conserved%momentum_z / conserved%density
-    primitive%pressure   = compute_pressure(conserved, gamma)
+    primitive%density    = max(conserved%density, smallr)
+    primitive%velocity_x = conserved%momentum_x / primitive%density
+    primitive%velocity_y = conserved%momentum_y / primitive%density
+    primitive%velocity_z = conserved%momentum_z / primitive%density
+    primitive%pressure   = compute_pressure(conserved, gamma, smallr, smallc2)
     return
   end function conserved_2_primitive
   ! ==========================================================================
@@ -302,7 +306,7 @@ contains
   !> @param[out] local_subgrid : The local subgrid in shared memory to write the primitive variables to
   !>
   attributes(device) subroutine subgrid_conserved_2_primitive(grid, uold, f, constant_gravity, nbor, &
-       & head_idx, block_idx, thread_idx, gamma, dt, local_subgrid)
+       & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
@@ -310,7 +314,7 @@ contains
     integer(kind=4), device :: nbor(1:subgridsize,*)
     integer(kind=4), value :: head_idx
     integer(kind=4), value :: block_idx, thread_idx
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc2
     real(kind=dp), value :: dt
     type(subgrid_6x6x6cell_primitive), intent(inout) :: local_subgrid
 
@@ -352,7 +356,7 @@ contains
        conserved%energy     = uold(cell_idx, 5, source_idx)
 
        ! Convert to primitive variables
-       primitive = conserved_2_primitive(conserved, gamma)
+       primitive = conserved_2_primitive(conserved, gamma, smallr, smallc2)
 
        ! Gravity predictor step
 #ifdef GRAV
@@ -399,10 +403,10 @@ contains
   !>
   attributes(device) subroutine trace_3d(local_subgrid, thread_idx, &
        & left_interfaces_x, right_interfaces_x,left_interfaces_y, right_interfaces_y, &
-       & left_interfaces_z, right_interfaces_z, gamma, dtdx, slope)
+       & left_interfaces_z, right_interfaces_z, gamma, smallr, smallc2, dtdx, slope)
     type(subgrid_6x6x6cell_primitive), intent(inout) :: local_subgrid ! The subgrid that this block is working on in shared memory
     integer, value :: thread_idx
-    real(kind=dp), value :: gamma, dtdx
+    real(kind=dp), value :: gamma, smallr, smallc2, dtdx
     integer, value :: slope
 
     type(subgrid_3x2x2cell_primitive) :: left_interfaces_x, right_interfaces_x
@@ -412,15 +416,15 @@ contains
     type(primitive_t) :: slopes_x, slopes_y, slopes_z ! The limited slopes in the x, y, and z directions
     type(primitive_t) :: source_term ! The sources terms
 
-    real(kind=dp), parameter :: smallr = 1d-10
-    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
-    real(kind=dp), parameter :: smallp = smallr * smallc_squared
+    real(kind=dp) :: smallp
     integer :: work_idx   ! Loop index for unit of work
     integer :: i, j, k    ! Cell indices
     integer :: work_size
 
     ! Compute the size of the section of the subgrid to operate on
     work_size = 2*nsubgrid+2
+
+    smallp = smallr * smallc2
 
     ! Note that we're now excluding the outermost shell of cells since this
     ! stencil operation requires 1 ghost cell. This also requires the
@@ -596,17 +600,20 @@ contains
   !>
   !> @return
   !> flux : The conserved_t of the HLL fluxes 
-  attributes(device) function hll_fluxes(left_state_p, right_state_p, gamma, llf) result(flux)
+  attributes(device) function hll_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2, llf) result(flux)
     type(primitive_t), intent(inout) :: left_state_p, right_state_p
     real(kind=dp), value :: gamma
     logical, value :: llf
     type(conserved_t) :: flux
-    ! Both `smallr` and `smallc`/`smallp` are usually defined in amr_commons. I'm redefining them here so that they will be evaluated at compile time
-    real(kind=dp), parameter :: smallr = 1d-10
-    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
     type(conserved_t) :: left_state_c, right_state_c, left_fluxes, right_fluxes
-    real(kind=dp) :: smallp
-    real(kind=dp) :: sound_speed_l, sound_speed_r, speed_l, speed_r, speed_max
+    real(kind=dp) :: sound_speed_l, sound_speed_r, speed_l, speed_r, speed_max, smallp
+
+    ! Verify that the density and pressure are reasonable and positive
+    smallp = smallc2 / gamma
+    left_state_p%density   = max(left_state_p%density,   smallr)
+    right_state_p%density  = max(right_state_p%density,  smallr)
+    left_state_p%pressure  = max(left_state_p%pressure,  smallp * left_state_p%density)
+    right_state_p%pressure = max(right_state_p%pressure, smallp * right_state_p%density)
 
     ! Compute the sound speeds
     sound_speed_l = sound_speed(left_state_p, gamma)
@@ -659,14 +666,11 @@ contains
   !>
   !> @return
   !> flux : The conserved_t of the HLLC fluxes
-  attributes(device) function hllc_fluxes(left_state_p, right_state_p, gamma) result(flux)
+  attributes(device) function hllc_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2) result(flux)
     type(primitive_t), intent(inout) :: left_state_p, right_state_p
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc2
     type(conserved_t) :: flux
-    ! Both `smallr` and `smallc`/`smallp` are usually defined in amr_commons. 
-    ! Redefining them here so that they will be evaluated at compile time
-    real(kind=dp), parameter :: smallr = 1d-10
-    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
+
     real(kind=dp) :: smallp, entho
     real(kind=dp) :: rl, rr, pl, pr, ul, ur, vl, vr, wl, wr
     real(kind=dp) :: el, er, ekinl, ekinr, etotl, etotr
@@ -676,7 +680,7 @@ contains
     real(kind=dp) :: ro, uo, vo, wo, po, etoto
 
     ! Verify that the density and pressure are reasonable and positive
-    smallp = smallc_squared / gamma
+    smallp = smallc2 / gamma
     left_state_p%density   = max(left_state_p%density,   smallr)
     right_state_p%density  = max(right_state_p%density,  smallr)
     left_state_p%pressure  = max(left_state_p%pressure,  smallp * left_state_p%density)
@@ -772,21 +776,21 @@ contains
   !>
   !> @return
   !> flux : The conserved_t of the fluxes
-  attributes(device) function riemann_fluxes(left_state_p, right_state_p, gamma, riemann) result(flux)
+  attributes(device) function riemann_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2, riemann) result(flux)
     type(primitive_t), intent(inout) :: left_state_p, right_state_p
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc2
     integer, value :: riemann
     type(conserved_t) :: flux
 
     if(riemann .eq. solver_llf)then
-       flux = hll_fluxes(left_state_p, right_state_p, gamma, .true.)
+       flux = hll_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2, .true.)
     else if (riemann .eq. solver_hll) then
-       flux = hll_fluxes(left_state_p, right_state_p, gamma, .false.)
+       flux = hll_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2, .false.)
     else if (riemann .eq. solver_hllc) then
-       flux = hllc_fluxes(left_state_p, right_state_p, gamma)
+       flux = hllc_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2)
     else
        ! Unsupported: LLF
-       flux = hll_fluxes(left_state_p, right_state_p, gamma, .true.)
+       flux = hll_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2, .true.)
     endif
 
   end function riemann_fluxes
@@ -807,11 +811,11 @@ contains
   !>
   attributes(device) subroutine riemann_driver(left_interfaces_x, right_interfaces_x, left_interfaces_y, &
        & right_interfaces_y, left_interfaces_z, right_interfaces_z, thread_idx, &
-       & gamma, riemann)
+       & gamma, smallr, smallc2, riemann)
     type(subgrid_3x2x2cell_primitive), intent(inout) :: left_interfaces_x, right_interfaces_x
     type(subgrid_2x3x2cell_primitive), intent(inout) :: left_interfaces_y, right_interfaces_y
     type(subgrid_2x2x3cell_primitive), intent(inout) :: left_interfaces_z, right_interfaces_z
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc2
     integer, value :: riemann
     integer, value :: thread_idx
     integer :: work_idx, interface_array_size, i, j, k
@@ -839,7 +843,7 @@ contains
           right_interface%pressure   = right_interfaces_x%pressure(i,j,k)
 
           ! Call the Riemann Solver
-          flux = riemann_fluxes(left_interface, right_interface, gamma, riemann)
+          flux = riemann_fluxes(left_interface, right_interface, gamma, smallr, smallc2, riemann)
 
           ! Unpack the fluxes into the interface state arrays
           left_interfaces_x%density   (i,j,k) = flux%density
@@ -866,7 +870,7 @@ contains
           right_interface%pressure   = right_interfaces_y%pressure(i,j,k)
 
           ! Call the Riemann Solver
-          flux = riemann_fluxes(left_interface, right_interface, gamma, riemann)
+          flux = riemann_fluxes(left_interface, right_interface, gamma, smallr, smallc2, riemann)
 
           ! Unpack the fluxes into the interface state arrays
           left_interfaces_y%density   (i,j,k) = flux%density
@@ -892,7 +896,7 @@ contains
           right_interface%pressure   = right_interfaces_z%pressure(i,j,k)
 
           ! Call the Riemann Solver
-          flux = riemann_fluxes(left_interface, right_interface, gamma, riemann)
+          flux = riemann_fluxes(left_interface, right_interface, gamma, smallr, smallc2, riemann)
 
           ! Unpack the fluxes into the interface state arrays
           left_interfaces_z%density   (i,j,k) = flux%density
@@ -1346,7 +1350,7 @@ contains
 #ifndef PAPER
   attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
-       & gamma, dt, dx, slope, riemann, constant_gravity)
+       & gamma, smallr, smallc2, dt, dx, slope, riemann, constant_gravity)
     type(oct), device :: grid(*)
     integer, device :: father(*)
     integer, device :: nbor(1:subgridsize,*)
@@ -1358,7 +1362,7 @@ contains
     integer(kind=4), intent(in), value :: num_subgrids
     integer, intent(in), value :: ngridmax
     integer, intent(in), value :: ilevel, levelmin, levelmax
-    real(kind=dp), intent(in), value :: gamma
+    real(kind=dp), intent(in), value :: gamma, smallr, smallc2
     real(kind=dp), intent(in), value :: dt
     real(kind=dp), intent(in), value :: dx
     integer, intent(in), value :: slope
@@ -1385,7 +1389,7 @@ contains
     ! Convert from conserved to primitive variables
     ! =======================================================================
     call subgrid_conserved_2_primitive(grid, uold, f, constant_gravity, nbor, &
-         & head_idx, block_idx, thread_idx, gamma, dt, local_subgrid)
+         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
 
     ! =======================================================================
     ! Perform tracing step and compute the interface states
@@ -1393,7 +1397,7 @@ contains
     ! This will compute the interface states and write them to shared memory
     call trace_3d(local_subgrid, thread_idx, &
          & left_interfaces_x, right_interfaces_x, left_interfaces_y, right_interfaces_y, &
-         & left_interfaces_z, right_interfaces_z, gamma, dtdx, slope)
+         & left_interfaces_z, right_interfaces_z, gamma, smallr, smallc2, dtdx, slope)
 
     ! =======================================================================
     ! Compute the fluxes.
@@ -1404,7 +1408,7 @@ contains
     ! names say
     call riemann_driver(left_interfaces_x, right_interfaces_x, left_interfaces_y, &
          & right_interfaces_y, left_interfaces_z, right_interfaces_z, thread_idx, &
-         & gamma, riemann)
+         & gamma, smallr, smallc2, riemann)
 
     ! =======================================================================
     ! Zero fluxes at boundaries with finer levels.
@@ -1562,19 +1566,21 @@ contains
   ! =========================================================================~
 
   ! =========================================================================
-  attributes(global) subroutine upload_kernel(grid, father, uold, head_idx, num_octs, internal_energy, smallr)
+  attributes(global) subroutine upload_kernel(grid, father, uold, head_idx, num_octs, &
+       & internal_energy, smallr, smallc2)
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     integer(kind=4), device :: father(*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
-    real(kind=8), intent(in), value :: smallr
+    real(kind=dp), intent(in), value :: smallr, smallc2
     logical, intent(in), value :: internal_energy
 
     integer :: tid, bid, cell_idx, oct_idx
     integer :: ind, father_idx, i, j, k
     real(kind=dp), parameter :: inv_twotondim = 1.0_dp / real(twotondim, kind=dp)
-    real(kind=dp) :: eint, ekin, eint_average, ekin_average
+    real(kind=dp) :: density, eint, ekin, smalle
+    real(kind=dp) :: density_average, eint_average, ekin_average
 
     ! Thread and block id
     tid = threadIdx%x - 1
@@ -1610,20 +1616,25 @@ contains
 
     ! Non-conservative upload
     if (internal_energy) then
+       smalle = smallc2 / gamma / (gamma - 1.0_dp)
        eint_average = 0_dp
        do ind = 1, twotondim
+          ! Compute children density
+          density = max(uold(ind, 1, oct_idx), smallr)
           ! Compute children kinetic and internal energy
-          ekin = 0.5_dp * uold(ind, 2, oct_idx)**2 / max( real(uold(ind, 1, oct_idx),kind=8), smallr) + &
-               & 0.5_dp * uold(ind, 3, oct_idx)**2 / max( real(uold(ind, 1, oct_idx),kind=8), smallr) + &
-               & 0.5_dp * uold(ind, 4, oct_idx)**2 / max( real(uold(ind, 1, oct_idx),kind=8), smallr)
-          eint = uold(ind, 5, oct_idx) - ekin
+          ekin = 0.5_dp * uold(ind, 2, oct_idx)**2 / density + &
+               & 0.5_dp * uold(ind, 3, oct_idx)**2 / density + &
+               & 0.5_dp * uold(ind, 4, oct_idx)**2 / density
+          eint = max(uold(ind, 5, oct_idx) - ekin, smalle * density) 
           ! Average children internal energy
           eint_average = eint_average + eint * inv_twotondim
        end do
+       ! Compute father density
+       density_average = max(uold(cell_idx, 1, father_idx), smallr)
        ! Compute father kinetic energy
-       ekin_average = 0.5_dp * uold(cell_idx, 2, father_idx)**2 / max( real(uold(cell_idx, 1, father_idx),kind=8), smallr) + &
-            &         0.5_dp * uold(cell_idx, 3, father_idx)**2 / max( real(uold(cell_idx, 1, father_idx),kind=8), smallr) + &
-            &         0.5_dp * uold(cell_idx, 4, father_idx)**2 / max( real(uold(cell_idx, 1, father_idx),kind=8), smallr)
+       ekin_average = 0.5_dp * uold(cell_idx, 2, father_idx)**2 / density_average + &
+            &         0.5_dp * uold(cell_idx, 3, father_idx)**2 / density_average + &
+            &         0.5_dp * uold(cell_idx, 4, father_idx)**2 / density_average
        ! Add father internal energy
        uold(cell_idx, 5, father_idx) = eint_average + ekin_average
     end if

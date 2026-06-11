@@ -297,7 +297,7 @@ contains
     !
     integer(kind=4) :: head_idx, num_subgrids
     integer :: threads_per_block, num_blocks
-    real(dp) :: dt, dx, gamma
+    real(dp) :: dt, dx, gamma, smallr, smallc2
     integer :: slope, riemann
 
     if(sim%r%verbose.and.sim%g%myid==1)write(*,'("   Entering gpu_godunov for level ",I2)')ilevel
@@ -305,6 +305,8 @@ contains
     dt = sim%g%dtnew(ilevel)
     dx = sim%r%boxlen/2**ilevel
     gamma = sim%r%gamma
+    smallr = sim%r%smallr
+    smallc2 = sim%r%smallc**2
     slope = sim%r%slope_type
     riemann = sim%r%riemann
 
@@ -318,7 +320,7 @@ contains
     threads_per_block = ((threads_per_block + 31) / 32) * 32
     call hydro_integrator_paper_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
          & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
-         & gamma, dt, dx, slope, riemann, constant_gravity)
+         & gamma, smallr, smallc2, dt, dx, slope, riemann, constant_gravity)
 #else
     if(nsubgrid == 1)threads_per_block = 64
     if(nsubgrid == 2)threads_per_block = 256
@@ -349,6 +351,7 @@ contains
     !
     integer(kind=4) :: head_idx, num_octs
     integer(kind=4) :: num_threads, num_blocks
+    real(kind=dp) :: smallr, smallc2
     logical :: internal_energy
 
     if (sim%r%interpol_var == 1) then
@@ -356,6 +359,8 @@ contains
     else
        internal_energy = .false.
     endif
+    smallr  = sim%r%smallr
+    smallc2 = sim%r%smallc**2
 
     head_idx = sim%m%head(ilevel+1)
     num_octs = sim%m%noct(ilevel+1)
@@ -365,7 +370,7 @@ contains
     if (num_octs > 0) then
        call nvtxStartRange("GPU upload", color=0)!green
        call upload_kernel<<<num_blocks, num_threads>>>(grid, father, uold, head_idx, num_octs, &
-            & internal_energy, sim%r%smallr)
+            & internal_energy, smallr, smallc2)
        call nvtxEndRange()
     endif
 
