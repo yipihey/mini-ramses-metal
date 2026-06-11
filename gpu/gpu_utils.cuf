@@ -29,11 +29,15 @@ module gpu_utils
   !> zero_fine_emf read nothing outside it) -- both are shared-memory
   !> occupancy savings for the MHD integrator kernel.
   type, public :: subgrid_6x6x6cell_primitive
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: density
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_x
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_y
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_z
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: pressure
+     ! P0 bank-conflict fix: leading (stride-1) dimension padded +1 (6->7 at
+     ! nsubgrid=1). gcd(7,32)=1 makes the j/k strides span all 32 shared banks,
+     ! and the 252-real per-field slab stride no longer aliases density..pressure
+     ! (was 216 == 0 mod 32). Index slot i=2*nsubgrid+4 is padding, never read.
+     real(kind=dp), dimension(0:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: density
+     real(kind=dp), dimension(0:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_x
+     real(kind=dp), dimension(0:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_y
+     real(kind=dp), dimension(0:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_z
+     real(kind=dp), dimension(0:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: pressure
 #ifdef MHD
      logical(kind=1), dimension(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2) :: refined
 #else

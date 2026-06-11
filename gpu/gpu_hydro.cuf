@@ -1477,14 +1477,65 @@ contains
     call syncthreads()
 
   end subroutine subgrid_conserved_2_primitive
+
+#ifdef MHD
+  ! =========================================================================
+  !> @brief Edge-centred E (CPU trace3d:935-951) recomputed on demand so the
+  !> resident subgrid_edge_e_t buffer need not occupy shared memory (P1 diet).
+  !> Each result is bitwise-identical to the former phase-1 fill (same operand
+  !> order); the inputs (shared local_subgrid velocities and bf) are stable
+  !> through the trace because phase 1 only ever wrote edge_e.
+  ! =========================================================================
+  attributes(device) function edge_e_x(ls, bf, i, j, k) result(E)
+    type(subgrid_6x6x6cell_primitive), intent(in) :: ls
+    type(subgrid_face_b_t), intent(in) :: bf
+    integer, value :: i, j, k
+    real(kind=dp) :: E, vv, ww, Bb, Cc
+    vv = 0.25_dp*( ls%velocity_y(i,j-1,k-1) + ls%velocity_y(i,j-1,k) + &
+         &         ls%velocity_y(i,j  ,k-1) + ls%velocity_y(i,j  ,k) )
+    ww = 0.25_dp*( ls%velocity_z(i,j-1,k-1) + ls%velocity_z(i,j-1,k) + &
+         &         ls%velocity_z(i,j  ,k-1) + ls%velocity_z(i,j  ,k) )
+    Bb = 0.5_dp*( bf%by(i,j  ,k-1) + bf%by(i,j  ,k) )
+    Cc = 0.5_dp*( bf%bz(i,j-1,k  ) + bf%bz(i,j  ,k) )
+    E = vv*Cc - ww*Bb
+  end function edge_e_x
+
+  attributes(device) function edge_e_y(ls, bf, i, j, k) result(E)
+    type(subgrid_6x6x6cell_primitive), intent(in) :: ls
+    type(subgrid_face_b_t), intent(in) :: bf
+    integer, value :: i, j, k
+    real(kind=dp) :: E, uu, ww, Aa, Cc
+    uu = 0.25_dp*( ls%velocity_x(i-1,j,k-1) + ls%velocity_x(i-1,j,k) + &
+         &         ls%velocity_x(i  ,j,k-1) + ls%velocity_x(i  ,j,k) )
+    ww = 0.25_dp*( ls%velocity_z(i-1,j,k-1) + ls%velocity_z(i-1,j,k) + &
+         &         ls%velocity_z(i  ,j,k-1) + ls%velocity_z(i  ,j,k) )
+    Aa = 0.5_dp*( bf%bx(i  ,j,k-1) + bf%bx(i,j,k) )
+    Cc = 0.5_dp*( bf%bz(i-1,j,k  ) + bf%bz(i,j,k) )
+    E = ww*Aa - uu*Cc
+  end function edge_e_y
+
+  attributes(device) function edge_e_z(ls, bf, i, j, k) result(E)
+    type(subgrid_6x6x6cell_primitive), intent(in) :: ls
+    type(subgrid_face_b_t), intent(in) :: bf
+    integer, value :: i, j, k
+    real(kind=dp) :: E, uu, vv, Aa, Bb
+    uu = 0.25_dp*( ls%velocity_x(i-1,j-1,k) + ls%velocity_x(i-1,j,k) + &
+         &         ls%velocity_x(i  ,j-1,k) + ls%velocity_x(i  ,j,k) )
+    vv = 0.25_dp*( ls%velocity_y(i-1,j-1,k) + ls%velocity_y(i-1,j,k) + &
+         &         ls%velocity_y(i  ,j-1,k) + ls%velocity_y(i  ,j,k) )
+    Aa = 0.5_dp*( bf%bx(i,j-1,k) + bf%bx(i,j,k) )
+    Bb = 0.5_dp*( bf%by(i-1,j,k) + bf%by(i,j,k) )
+    E = uu*Bb - vv*Aa
+  end function edge_e_z
+#endif
   ! =========================================================================
 
   ! =========================================================================
   !> @brief
   !> Compute the interface states with tracing.
-  !> Under MHD this is the full constrained-transport trace (CPU trace3d): an
-  !> extra phase computes the raw edge-centred E (Ex,Ey,Ez) over
-  !> [1,2*nsubgrid+3] with a sync before the predictor; the predictor adds the
+  !> Under MHD this is the full constrained-transport trace (CPU trace3d): the
+  !> raw edge-centred E (Ex,Ey,Ez) is recomputed inline per cell (no resident
+  !> edge_e buffer -- P1 diet); the predictor adds the
   !> Lorentz-force source terms, predicts the face-B by the discrete curl of
   !> edge-E (single-valued normal B keeps divB clean), writes B and the passive
   !> scalars to the interface states, and stores each corner state into the
@@ -1506,7 +1557,6 @@ contains
   !> @param[in] right_interfaces_z : The right side interfaces normal to z
   !> @param[in] scalar_sub (MHD) : The passive-scalar subgrid (1:nvar-5)
   !> @param[in] bf (MHD) : The face-continuous low-face B buffer
-  !> @param[inout] edge_e (MHD) : The raw edge-centred E buffer (phase 1)
   !> @param[inout] corner_x/y/z (MHD) : The edge corner-state buffers
   !> @param[in] smallr, smallc (MHD) : Density and sound-speed floors (the
   !>           hydro build keeps its hardcoded parameter floors)
@@ -1515,7 +1565,7 @@ contains
   !>
   attributes(device) subroutine trace_3d(local_subgrid, thread_idx, &
 #ifdef MHD
-       & scalar_sub, bf, edge_e, corner_x, corner_y, corner_z, &
+       & scalar_sub, bf, corner_x, corner_y, corner_z, &
        & smallr, smallc, slope_mag, induction, &
 #endif
        & left_interfaces_x, right_interfaces_x,left_interfaces_y, right_interfaces_y, &
@@ -1543,7 +1593,6 @@ contains
 #ifdef MHD
     real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
     type(subgrid_face_b_t), intent(in) :: bf
-    type(subgrid_edge_e_t), intent(inout) :: edge_e
     type(subgrid_2x3x3edge_corner), intent(inout) :: corner_x
     type(subgrid_3x2x3edge_corner), intent(inout) :: corner_y
     type(subgrid_3x3x2edge_corner), intent(inout) :: corner_z
@@ -1567,53 +1616,11 @@ contains
 
     smallp = smallr*smallc*smallc
 
-    ! ====================================================================
-    ! Phase 1: raw edge-centred E over [1, 2*nsubgrid+3] (CPU trace3d:935-951).
-    ! Each component is computed only over the exact anisotropic extent of
-    ! subgrid_edge_e_t (one short along its own axis) -- phase 2 reads Ex at
-    ! (i, j..j+1, k..k+1) for i,j,k <= 2*nsubgrid+2, so Ex beyond
-    ! 2*nsubgrid+2 along x (and cyclically for Ey/Ez) was never consumed.
-    ! ====================================================================
-    work_size = 2*nsubgrid+3
-    do work_idx = thread_idx, work_size**3 - 1, blockDim%x
-       call index_1Dto3D(work_idx, work_size, work_size, i, j, k)
-       i = i + 1; j = j + 1; k = k + 1
-
-       ! Ex(i,j,k) = v*C - w*B   (x-edge at (i,j-1/2,k-1/2); averages over k-1,k)
-       if (i <= 2*nsubgrid+2) then
-          vv = 0.25_dp*( local_subgrid%velocity_y(i,j-1,k-1) + local_subgrid%velocity_y(i,j-1,k) + &
-               &         local_subgrid%velocity_y(i,j  ,k-1) + local_subgrid%velocity_y(i,j  ,k) )
-          ww = 0.25_dp*( local_subgrid%velocity_z(i,j-1,k-1) + local_subgrid%velocity_z(i,j-1,k) + &
-               &         local_subgrid%velocity_z(i,j  ,k-1) + local_subgrid%velocity_z(i,j  ,k) )
-          Bb = 0.5_dp*( bf%by(i,j  ,k-1) + bf%by(i,j  ,k) )
-          Cc = 0.5_dp*( bf%bz(i,j-1,k  ) + bf%bz(i,j  ,k) )
-          edge_e%Ex(i,j,k) = vv*Cc - ww*Bb
-       end if
-
-       ! Ey(i,j,k) = w*A - u*C   (y-edge at (i-1/2,j,k-1/2); averages over k-1,k)
-       if (j <= 2*nsubgrid+2) then
-          uu = 0.25_dp*( local_subgrid%velocity_x(i-1,j,k-1) + local_subgrid%velocity_x(i-1,j,k) + &
-               &         local_subgrid%velocity_x(i  ,j,k-1) + local_subgrid%velocity_x(i  ,j,k) )
-          ww = 0.25_dp*( local_subgrid%velocity_z(i-1,j,k-1) + local_subgrid%velocity_z(i-1,j,k) + &
-               &         local_subgrid%velocity_z(i  ,j,k-1) + local_subgrid%velocity_z(i  ,j,k) )
-          Aa = 0.5_dp*( bf%bx(i  ,j,k-1) + bf%bx(i,j,k) )
-          Cc = 0.5_dp*( bf%bz(i-1,j,k  ) + bf%bz(i,j,k) )
-          edge_e%Ey(i,j,k) = ww*Aa - uu*Cc
-       end if
-
-       ! Ez(i,j,k) = u*B - v*A   (z-edge at (i-1/2,j-1/2,k); in-plane)
-       if (k <= 2*nsubgrid+2) then
-          uu = 0.25_dp*( local_subgrid%velocity_x(i-1,j-1,k) + local_subgrid%velocity_x(i-1,j,k) + &
-               &         local_subgrid%velocity_x(i  ,j-1,k) + local_subgrid%velocity_x(i  ,j,k) )
-          vv = 0.25_dp*( local_subgrid%velocity_y(i-1,j-1,k) + local_subgrid%velocity_y(i-1,j,k) + &
-               &         local_subgrid%velocity_y(i  ,j-1,k) + local_subgrid%velocity_y(i  ,j,k) )
-          Aa = 0.5_dp*( bf%bx(i,j-1,k) + bf%bx(i,j,k) )
-          Bb = 0.5_dp*( bf%by(i-1,j,k) + bf%by(i,j,k) )
-          edge_e%Ez(i,j,k) = uu*Bb - vv*Aa
-       end if
-    end do
-
-    call syncthreads()
+    ! Phase 1 (raw edge-centred E) and its barrier are gone: the resident
+    ! subgrid_edge_e_t buffer was removed (P1 shmem diet). local_subgrid and bf
+    ! are already block-consistent (synced at the end of the prim conversion)
+    ! and phase 1 only ever wrote edge_e, so each cell recomputes the 12 edge-E
+    ! values it needs inline below (edge_e_{x,y,z}) with no extra syncthreads.
 #endif
 
     ! Compute the size of the section of the subgrid to operate on
@@ -1665,13 +1672,15 @@ contains
        dCLy = half*face_b_tvd_slope(bf%bz(i,j-1,k  ), bf%bz(i,j,k  ), bf%bz(i,j+1,k  ), slope_mag)
        dCRy = half*face_b_tvd_slope(bf%bz(i,j-1,k+1), bf%bz(i,j,k+1), bf%bz(i,j+1,k+1), slope_mag)
 
-       ! ---- Edge-centred E gathered (CPU trace3d:985-1000) --------------------
-       ELL = edge_e%Ex(i  ,j  ,k  ); ELR = edge_e%Ex(i  ,j  ,k+1)
-       ERL = edge_e%Ex(i  ,j+1,k  ); ERR = edge_e%Ex(i  ,j+1,k+1)
-       FLL = edge_e%Ey(i  ,j  ,k  ); FLR = edge_e%Ey(i  ,j  ,k+1)
-       FRL = edge_e%Ey(i+1,j  ,k  ); FRR = edge_e%Ey(i+1,j  ,k+1)
-       GLL = edge_e%Ez(i  ,j  ,k  ); GLR = edge_e%Ez(i  ,j+1,k  )
-       GRL = edge_e%Ez(i+1,j  ,k  ); GRR = edge_e%Ez(i+1,j+1,k  )
+       ! ---- Edge-centred E recomputed inline (CPU trace3d:935-1000) -----------
+       ! Resident subgrid_edge_e_t removed (P1 shmem diet); edge_e_{x,y,z}
+       ! reproduce the former phase-1 fill bitwise from shared local_subgrid+bf.
+       ELL = edge_e_x(local_subgrid, bf, i  , j  , k  ); ELR = edge_e_x(local_subgrid, bf, i  , j  , k+1)
+       ERL = edge_e_x(local_subgrid, bf, i  , j+1, k  ); ERR = edge_e_x(local_subgrid, bf, i  , j+1, k+1)
+       FLL = edge_e_y(local_subgrid, bf, i  , j  , k  ); FLR = edge_e_y(local_subgrid, bf, i  , j  , k+1)
+       FRL = edge_e_y(local_subgrid, bf, i+1, j  , k  ); FRR = edge_e_y(local_subgrid, bf, i+1, j  , k+1)
+       GLL = edge_e_z(local_subgrid, bf, i  , j  , k  ); GLR = edge_e_z(local_subgrid, bf, i  , j+1, k  )
+       GRL = edge_e_z(local_subgrid, bf, i+1, j  , k  ); GRR = edge_e_z(local_subgrid, bf, i+1, j+1, k  )
 
        ! ---- Face-B predicted by discrete curl of edge-E (CPU trace3d:1003-1015)
        sAL0 = + (GLR-GLL) - (FLR-FLL)
@@ -3709,23 +3718,26 @@ contains
   !      already exact.
   !
   ! Resident shared per block (nsubgrid=1, nvar=8, FP64; refined = 1 B):
-  !   (A) subgrid_6x6x6cell_primitive  5*216*8 + 64*1          =  8704 B
+  !   (A) subgrid_6x6x6cell_primitive  5*252*8 + 64*1          = 10144 B
+  !       (P0 bank-conflict fix: leading dim padded 6->7; +1440 B vs 8704)
   !       scalar_subgrid (nvar-5=3)        3*216*8                 =  5184 B
   !   (B) subgrid_face_b_t (bf, trimmed)   3*180*8                 =  4320 B
-  !   (D) subgrid_edge_e_t (exact extents) 3*(4*5*5)*8             =  2400 B
+  !   (D) subgrid_edge_e_t                  REMOVED (P1)            =     0 B
+  !       (was 3*(4*5*5)*8 = 2400 B; recomputed inline via edge_e_{x,y,z})
   !   (E) emfx+emfy+emfz (v4.1 family)     3*18*8                  =   432 B
   !   (F) corner_x/y/z (4 slots * 18 edges
   !       * 7 fields per orientation)      3*4032                  = 12096 B
   !   (G) 6 MHD interface arrays (11-wide) 6*12*11*8               =  6336 B
   !       ------------------------------------------------------------------
-  !       TOTAL resident                                           = 39472 B
-  !                  = 38.5 KB < 48 KB static limit (was 46320 B = 45.2 KB).
+  !       TOTAL resident                                           = 38512 B
+  !                  = 37.6 KB < 48 KB static limit (was 39472 B pre P0/P1).
   !
-  ! At NPRE=4 (the production A100 config) the reals halve: ~19.8 KB static
-  ! (was ~23.6 KB modelled / 20.9 KB by NCU) -> 8-9 blocks/SM on A100
-  ! (164 KB carveout, +1 KB/block driver reserve), up from 7. If the cluster
-  ! ptxas report lands just above a block boundary, the next lever is
-  ! recomputing edge_e inline in the trace (-3*100 reals, +~100 LDS/cell).
+  ! At NPRE=4 (the production A100 config) the reals halve. NCU measured the
+  ! pre-P0/P1 static at 16998 B = 16.6 KiB -> 9 blocks/SM. With P0 (+720 B
+  ! local_subgrid pad) and P1 (-1200 B edge_e removed) the net is ~16518 B
+  ! -> still 9 blocks/SM (164 KB carveout, +1 KB/block driver reserve). edge_e
+  ! is now recomputed inline; the next lever for 10 blocks/SM (needs <15770 B)
+  ! is slimming the corner_x/y/z family (-6048 B FP32) -- physics audit first.
   !
   ! Reference: hydro_integrator_kernel resident shared is 12384 B = 12.1 KB
   ! (subgrid_6x6x6cell_primitive 9504 + 6 interface arrays 2880); the hydro
@@ -3779,7 +3791,8 @@ contains
     ! -> fits the 48 KB static limit with ~8.5 KB headroom.
     real(kind=dp), shared :: scalar_subgrid(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
     type(subgrid_face_b_t), shared :: bf
-    type(subgrid_edge_e_t), shared :: edge_e
+    ! P1 diet: resident subgrid_edge_e_t (1200 B FP32) removed -- the 12 edge-E
+    ! values each cell needs are recomputed inline in trace_3d via edge_e_{x,y,z}.
     type(subgrid_2x3x3edge_primitive), shared :: emfx
     type(subgrid_3x2x3edge_primitive), shared :: emfy
     type(subgrid_3x3x2edge_primitive), shared :: emfz
@@ -3815,7 +3828,7 @@ contains
     ! This will compute the interface states and write them to shared memory
     call trace_3d(local_subgrid, thread_idx, &
 #ifdef MHD
-         & scalar_subgrid, bf, edge_e, corner_x, corner_y, corner_z, &
+         & scalar_subgrid, bf, corner_x, corner_y, corner_z, &
          & smallr, smallc, slope_mag, induction, &
 #endif
          & left_interfaces_x, right_interfaces_x, left_interfaces_y, right_interfaces_y, &
