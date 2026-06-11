@@ -444,18 +444,61 @@ contains
   !>
   !> @param[in] conserved : The conserved variables
   !> @param[in] gamma : The adiabatic index
+#ifdef MHD
+  !> @param[in] bxl, bxr  : Optional low/high x-face magnetic field of the cell
+  !> @param[in] byl, byr  : Optional low/high y-face magnetic field of the cell
+  !> @param[in] bzl, bzr  : Optional low/high z-face magnetic field of the cell
+  !> @param[in] smallr    : Optional density floor
+  !> @param[in] smallc    : Optional sound-speed floor
+#endif
   !> @return
   !> A primitive_t object with the primitive variables in a cell
+#ifdef MHD
+  attributes(device) function conserved_2_primitive(conserved, gamma, bxl, bxr, byl, byr, &
+       & bzl, bzr, smallr, smallc) result(primitive)
+#else
   attributes(device) function conserved_2_primitive(conserved, gamma) result(primitive)
+#endif
     type(conserved_t), intent(in) :: conserved
     real(kind=dp), value :: gamma
+#ifdef MHD
+    real(kind=dp), intent(in), optional :: bxl, bxr, byl, byr, bzl, bzr
+    real(kind=dp), intent(in), optional :: smallr, smallc
+#endif
     type(primitive_t) :: primitive
+#ifdef MHD
+    real(kind=dp) :: momentum_squared, emag, eint, smalle
+#endif
 
+#ifdef MHD
+    if (present(bxl)) then
+       primitive%density    = max(conserved%density, smallr)
+       primitive%velocity_x = conserved%momentum_x / primitive%density
+       primitive%velocity_y = conserved%momentum_y / primitive%density
+       primitive%velocity_z = conserved%momentum_z / primitive%density
+
+       primitive%Bx = 0.5_dp * (bxl + bxr)
+       primitive%By = 0.5_dp * (byl + byr)
+       primitive%Bz = 0.5_dp * (bzl + bzr)
+
+       momentum_squared = magnitude_squared(conserved%momentum_x, conserved%momentum_y, conserved%momentum_z)
+       emag = compute_emag(primitive%Bx, primitive%By, primitive%Bz)
+       smalle = smallc**2/gamma/(gamma - 1.0_dp)
+       eint = max(conserved%energy - 0.5_dp*momentum_squared/primitive%density - emag, smalle*primitive%density)
+       primitive%pressure = (gamma - 1.0_dp) * eint
+    else
+#endif
     primitive%density    = conserved%density
     primitive%velocity_x = conserved%momentum_x / conserved%density
     primitive%velocity_y = conserved%momentum_y / conserved%density
     primitive%velocity_z = conserved%momentum_z / conserved%density
     primitive%pressure   = compute_pressure(conserved, gamma)
+#ifdef MHD
+    primitive%Bx = 0.0_dp
+    primitive%By = 0.0_dp
+    primitive%Bz = 0.0_dp
+    endif
+#endif
     return
   end function conserved_2_primitive
   ! ==========================================================================
@@ -473,21 +516,31 @@ contains
     type(primitive_t), intent(in) :: primitive
     real(kind=dp), value :: gamma
     type(conserved_t) :: conserved
+#ifdef MHD
+    real(kind=dp) :: velocity_squared, emag
+#endif
 
     conserved%density    = primitive%density
     conserved%momentum_x = primitive%velocity_x * primitive%density
     conserved%momentum_y = primitive%velocity_y * primitive%density
     conserved%momentum_z = primitive%velocity_z * primitive%density
+#ifdef MHD
+    velocity_squared = magnitude_squared(primitive%velocity_x, primitive%velocity_y, primitive%velocity_z)
+    emag = compute_emag(primitive%Bx, primitive%By, primitive%Bz)
+    conserved%energy = (primitive%pressure/(gamma - 1.0_dp)) + 0.5_dp*primitive%density*velocity_squared + emag
+    conserved%Bx = primitive%Bx
+    conserved%By = primitive%By
+    conserved%Bz = primitive%Bz
+#else
     conserved%energy     = compute_energy(primitive, gamma)
+#endif
     return
   end function primitive_2_conserved
   ! ==========================================================================
 
 #ifdef MHD
   ! ==========================================================================
-  ! MHD device helpers (Stage B1). Small attributes(device) functions mirroring
-  ! the conserved<->primitive math of CPU ctoprim (umuscl.f90:1720). Currently
-  ! unused; wired into the MHD integrator in later stages.
+  ! MHD device helpers shared by the unified conversion pipeline and solvers.
   ! ==========================================================================
 
   ! ==========================================================================
@@ -527,89 +580,6 @@ contains
     emag = 0.5_dp * compute_bsquared(Bx, By, Bz)
     return
   end function compute_emag
-  ! ==========================================================================
-
-  ! ==========================================================================
-  !> @brief
-  !> Convert conserved variables to primitive variables for MHD. Mirrors the
-  !> hydro conserved_2_primitive but additionally (a) cell-centres the magnetic
-  !> field as 0.5*(B_left + B_right) along each of the 3 axes and (b) subtracts
-  !> the magnetic energy from the total energy before forming the gas pressure.
-  !> See CPU ctoprim (umuscl.f90:1804-1845): the input energy is the TOTAL energy
-  !> so both kinetic and magnetic energy are removed to get the internal energy.
-  !> Floors match CPU ctoprim: density is floored before forming velocity/kinetic
-  !> energy, then internal energy is floored before gas pressure is formed.
-  !>
-  !> @param[in] conserved : The hydro conserved variables (density, momentum, total energy)
-  !> @param[in] bxl, bxr  : The low/high x-face magnetic field of the cell
-  !> @param[in] byl, byr  : The low/high y-face magnetic field of the cell
-  !> @param[in] bzl, bzr  : The low/high z-face magnetic field of the cell
-  !> @param[in] gamma     : The adiabatic index
-  !> @param[in] smallr    : Density floor
-  !> @param[in] smallc    : Sound-speed floor
-  !>
-  !> @return
-  !> A primitive_t with cell-centred B and gas pressure
-  attributes(device) function mhd_conserved_2_primitive(conserved, bxl, bxr, byl, byr, bzl, bzr, gamma, smallr, smallc) result(primitive)
-    type(conserved_t), intent(in) :: conserved
-    real(kind=dp), value :: bxl, bxr, byl, byr, bzl, bzr
-    real(kind=dp), value :: gamma, smallr, smallc
-    type(primitive_t) :: primitive
-    real(kind=dp) :: momentum_squared, emag, eint, smalle
-
-    primitive%density    = max(conserved%density, smallr)
-    primitive%velocity_x = conserved%momentum_x / primitive%density
-    primitive%velocity_y = conserved%momentum_y / primitive%density
-    primitive%velocity_z = conserved%momentum_z / primitive%density
-
-    ! Cell-centred magnetic field: average of the two opposing faces per axis
-    primitive%Bx = 0.5_dp * (bxl + bxr)
-    primitive%By = 0.5_dp * (byl + byr)
-    primitive%Bz = 0.5_dp * (bzl + bzr)
-
-    ! Gas pressure from total energy minus kinetic and magnetic energy
-    momentum_squared = magnitude_squared(conserved%momentum_x, conserved%momentum_y, conserved%momentum_z)
-    emag = compute_emag(primitive%Bx, primitive%By, primitive%Bz)
-    smalle = smallc**2/gamma/(gamma - 1.0_dp)
-    eint = max(conserved%energy - 0.5_dp*momentum_squared/primitive%density - emag, smalle*primitive%density)
-    primitive%pressure = (gamma - 1.0_dp) * eint
-    return
-  end function mhd_conserved_2_primitive
-  ! ==========================================================================
-
-  ! ==========================================================================
-  !> @brief
-  !> Convert primitive variables to conserved variables for MHD. Mirrors the
-  !> hydro primitive_2_conserved but adds the magnetic energy into the total
-  !> energy and passes the cell-centred magnetic field through unchanged. Note
-  !> this is the inverse of mhd_conserved_2_primitive only for the cell-centred
-  !> field; the face-centred field is advanced separately by constrained transport.
-  !>
-  !> @param[in] primitive : The primitive MHD variables (cell-centred B)
-  !> @param[in] gamma     : The adiabatic index
-  !>
-  !> @return
-  !> A conserved_t with total energy (incl. magnetic) and cell-centred B
-  attributes(device) function mhd_primitive_2_conserved(primitive, gamma) result(conserved)
-    type(primitive_t), intent(in) :: primitive
-    real(kind=dp), value :: gamma
-    type(conserved_t) :: conserved
-    real(kind=dp) :: velocity_squared, emag
-
-    conserved%density    = primitive%density
-    conserved%momentum_x = primitive%velocity_x * primitive%density
-    conserved%momentum_y = primitive%velocity_y * primitive%density
-    conserved%momentum_z = primitive%velocity_z * primitive%density
-
-    velocity_squared = magnitude_squared(primitive%velocity_x, primitive%velocity_y, primitive%velocity_z)
-    emag = compute_emag(primitive%Bx, primitive%By, primitive%Bz)
-    conserved%energy = (primitive%pressure/(gamma - 1.0_dp)) + 0.5_dp*primitive%density*velocity_squared + emag
-
-    conserved%Bx = primitive%Bx
-    conserved%By = primitive%By
-    conserved%Bz = primitive%Bz
-    return
-  end function mhd_primitive_2_conserved
   ! ==========================================================================
 
   ! ==========================================================================
@@ -670,8 +640,8 @@ contains
     blz = left_state%Bz
     brz = right_state%Bz
 
-    left_state_c = mhd_primitive_2_conserved(left_state, gamma)
-    right_state_c = mhd_primitive_2_conserved(right_state, gamma)
+    left_state_c = primitive_2_conserved(left_state, gamma)
+    right_state_c = primitive_2_conserved(right_state, gamma)
 
     emagl = compute_emag(blx, bly, blz)
     emagr = compute_emag(brx, bry, brz)
@@ -1349,7 +1319,6 @@ contains
     real(kind=dp) :: invD
 #ifdef MHD
     integer :: ind_nbor_xm, ind_nbor_ym, ind_nbor_zm
-    real(kind=dp) :: Ekin, emag, eint, smalle, Bxc, Byc, Bzc, rho
     real(kind=dp) :: b0(1:6)
 #endif
 
@@ -1424,26 +1393,17 @@ contains
           endif
        endif
 
-       ! Cell-centred B = average of the two opposing faces of THIS cell.
-       Bxc = 0.5_dp*(b0(1) + b0(4))
-       Byc = 0.5_dp*(b0(2) + b0(5))
-       Bzc = 0.5_dp*(b0(3) + b0(6))
+       conserved%density    = uold(cell_idx, 1, source_idx)
+       conserved%momentum_x = uold(cell_idx, 2, source_idx)
+       conserved%momentum_y = uold(cell_idx, 3, source_idx)
+       conserved%momentum_z = uold(cell_idx, 4, source_idx)
+       conserved%energy     = uold(cell_idx, 5, source_idx)
 
        ! Hydro conversion + MHD energy correction (CPU ctoprim:1804-1845).
        ! Floor density and internal energy before trace/source terms see them.
-       rho  = max(uold(cell_idx, 1, source_idx), smallr)
-       invD = 1.0_dp / rho
-       primitive%density    = rho
-       primitive%velocity_x = uold(cell_idx, 2, source_idx) * invD
-       primitive%velocity_y = uold(cell_idx, 3, source_idx) * invD
-       primitive%velocity_z = uold(cell_idx, 4, source_idx) * invD
-       Ekin = 0.5_dp*( uold(cell_idx,2,source_idx)*primitive%velocity_x + &
-            &          uold(cell_idx,3,source_idx)*primitive%velocity_y + &
-            &          uold(cell_idx,4,source_idx)*primitive%velocity_z )
-       emag = 0.5_dp*( Bxc*Bxc + (Byc*Byc + Bzc*Bzc) )
-       smalle = smallc**2/gamma/(gamma - 1.0_dp)
-       eint = max(uold(cell_idx,5,source_idx) - Ekin - emag, smalle*rho)
-       primitive%pressure = (gamma - 1.0_dp)*eint
+       primitive = conserved_2_primitive(conserved, gamma, &
+            & b0(1), b0(4), b0(2), b0(5), b0(3), b0(6), smallr, smallc)
+       invD = 1.0_dp / primitive%density
 #else
        ! Load the cell
        conserved%density    = uold(cell_idx, 1, source_idx)
@@ -4597,9 +4557,6 @@ contains
 
     type(primitive_t) :: primitive
     type(conserved_t) :: conserved
-#ifdef MHD
-    type(primitive_t) :: prim_mhd
-#endif
     integer :: info
     integer :: tid, bid ! The index of the thread and the block
     integer :: cell_idx ! The index of the cell
@@ -4657,23 +4614,23 @@ contains
              ! MHD: cell-centred B + emag-subtracted gas pressure (CPU cmpdt,
              ! godunov_utils.f90:244-305). Wave speed = |v_d| + fast magnetosonic
              ! speed per direction; sound speed (|v_d|+smallc) under induction.
-             prim_mhd = mhd_conserved_2_primitive(conserved, &
+             primitive = conserved_2_primitive(conserved, gamma, &
                   & bold(cell_idx,1,oct_idx), bold(cell_idx,4,oct_idx), &
                   & bold(cell_idx,2,oct_idx), bold(cell_idx,5,oct_idx), &
-                  & bold(cell_idx,3,oct_idx), bold(cell_idx,6,oct_idx), gamma, smallr, smallc)
-             pp = max(prim_mhd%pressure, prim_mhd%density*smallc*smallc/gamma)
-             b2sq = compute_bsquared(prim_mhd%Bx, prim_mhd%By, prim_mhd%Bz)
+                  & bold(cell_idx,3,oct_idx), bold(cell_idx,6,oct_idx), smallr, smallc)
+             pp = max(primitive%pressure, primitive%density*smallc*smallc/gamma)
+             b2sq = compute_bsquared(primitive%Bx, primitive%By, primitive%Bz)
              emag_loc = 0.5d0*b2sq*vol_loc
              eint_loc = pp/(gamma-1d0)*vol_loc
-             rinv = 1.0d0 / prim_mhd%density
+             rinv = 1.0d0 / primitive%density
              a2 = gamma*pp*rinv
              if (induction) then
-                ctot = abs(prim_mhd%velocity_x)+abs(prim_mhd%velocity_y)+abs(prim_mhd%velocity_z) + 3d0*smallc
+                ctot = abs(primitive%velocity_x)+abs(primitive%velocity_y)+abs(primitive%velocity_z) + 3d0*smallc
              else
                 c2v = 0.5d0*(b2sq*rinv + a2)
-                ctot = abs(prim_mhd%velocity_x) + sqrt(c2v + sqrt(c2v**2 - a2*prim_mhd%Bx**2*rinv)) &
-                     & + abs(prim_mhd%velocity_y) + sqrt(c2v + sqrt(c2v**2 - a2*prim_mhd%By**2*rinv)) &
-                     & + abs(prim_mhd%velocity_z) + sqrt(c2v + sqrt(c2v**2 - a2*prim_mhd%Bz**2*rinv))
+                ctot = abs(primitive%velocity_x) + sqrt(c2v + sqrt(c2v**2 - a2*primitive%Bx**2*rinv)) &
+                     & + abs(primitive%velocity_y) + sqrt(c2v + sqrt(c2v**2 - a2*primitive%By**2*rinv)) &
+                     & + abs(primitive%velocity_z) + sqrt(c2v + sqrt(c2v**2 - a2*primitive%Bz**2*rinv))
              endif
 #else
              ! Convert to primitive variables (hydro)
