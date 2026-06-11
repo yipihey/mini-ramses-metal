@@ -52,8 +52,8 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bx
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: By
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bz
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:nscalar_mhd) :: scalar
-#endif
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:nscalar_mhd) :: scalar ! We actually probably want this to be not behind MHD, instead behind NPSCAL. And not as nscalar_mhd, but just nscalar.
+#endif 
   end type subgrid_2x3x2cell_primitive
   type, public :: subgrid_2x2x3cell_primitive
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: density
@@ -1446,7 +1446,18 @@ contains
 
   ! =========================================================================
   !> @brief
-  !> Compute the interface states with tracing
+  !> Compute the interface states with tracing.
+  !> Under MHD this is the full constrained-transport trace (CPU trace3d): an
+  !> extra phase computes the raw edge-centred E (Ex,Ey,Ez) over
+  !> [1,2*nsubgrid+3] with a sync before the predictor; the predictor adds the
+  !> Lorentz-force source terms, predicts the face-B by the discrete curl of
+  !> edge-E (single-valued normal B keeps divB clean), writes B and the passive
+  !> scalars to the interface states, and stores each corner state into the
+  !> slot of the ONE oct edge that consumes it (the shared subgrid_*edge_corner
+  !> buffers; the write-side inverse of the CPU cmp_mag_flx gather shifts).
+  !> The 12 face-B transverse slopes (CPU dbf) are recomputed inline from the
+  !> shared bf via face_b_tvd_slope -- nothing is staged in global memory.
+  !> induction=.true. zeroes the velocity source terms (kinematic-dynamo mode).
   !>
   !> @param[in] local_subgrid : The subgrid of primitive variables to solve
   !> @param[in] thread_idx : The index of the current thread
@@ -1458,8 +1469,20 @@ contains
   !> @param[in] right_interfaces_x : The right side interfaces normal to x
   !> @param[in] right_interfaces_y : The right side interfaces normal to y
   !> @param[in] right_interfaces_z : The right side interfaces normal to z
+  !> @param[in] scalar_sub (MHD) : The passive-scalar subgrid (1:nvar-5)
+  !> @param[in] bf (MHD) : The face-continuous low-face B buffer
+  !> @param[inout] edge_e (MHD) : The raw edge-centred E buffer (phase 1)
+  !> @param[inout] corner_x/y/z (MHD) : The edge corner-state buffers
+  !> @param[in] smallr, smallc (MHD) : Density and sound-speed floors (the
+  !>           hydro build keeps its hardcoded parameter floors)
+  !> @param[in] slope_mag (MHD) : The magnetic slope limiter id
+  !> @param[in] induction (MHD) : Pure-induction (kinematic dynamo) switch
   !>
   attributes(device) subroutine trace_3d(local_subgrid, thread_idx, &
+#ifdef MHD
+       & scalar_sub, bf, edge_e, corner_x, corner_y, corner_z, &
+       & smallr, smallc, slope_mag, induction, &
+#endif
        & left_interfaces_x, right_interfaces_x,left_interfaces_y, right_interfaces_y, &
        & left_interfaces_z, right_interfaces_z, gamma, dtdx, slope)
     type(subgrid_6x6x6cell_primitive), intent(inout) :: local_subgrid ! The subgrid that this block is working on in shared memory
@@ -1474,12 +1497,89 @@ contains
     type(primitive_t) :: slopes_x, slopes_y, slopes_z ! The limited slopes in the x, y, and z directions
     type(primitive_t) :: source_term ! The sources terms
 
+#ifndef MHD
     real(kind=dp), parameter :: smallr = 1d-10
     real(kind=dp), parameter :: smallc_squared = (1d-10)**2
     real(kind=dp), parameter :: smallp = smallr * smallc_squared
+#endif
     integer :: work_idx   ! Loop index for unit of work
     integer :: i, j, k    ! Cell indices
     integer :: work_size
+#ifdef MHD
+    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
+    type(subgrid_face_b_t), intent(in) :: bf
+    type(subgrid_edge_e_t), intent(inout) :: edge_e
+    type(subgrid_2x3x3edge_corner), intent(inout) :: corner_x
+    type(subgrid_3x2x3edge_corner), intent(inout) :: corner_y
+    type(subgrid_3x3x2edge_corner), intent(inout) :: corner_z
+    real(kind=dp), value :: smallr, smallc
+    integer, value :: slope_mag
+    logical, value :: induction
+
+    real(kind=dp), parameter :: half = 0.5_dp
+    integer, parameter :: iqLL = 1, iqRL = 2, iqLR = 3, iqRR = 4
+    real(kind=dp) :: r, u, v, w, p, A, B, C, smallp, rscal
+    real(kind=dp) :: drx,dux,dvx,dwx,dpx, dry,duy,dvy,dwy,dpy, drz,duz,dvz,dwz,dpz
+    real(kind=dp) :: dBx,dCx, dAy,dCy, dAz,dBz
+    real(kind=dp) :: dscal_x(1:nscalar_mhd), dscal_y(1:nscalar_mhd), dscal_z(1:nscalar_mhd)
+    real(kind=dp) :: AL,AR,BL,BR,CL,CR
+    real(kind=dp) :: dALy,dARy,dALz,dARz,dBLx,dBRx,dBLz,dBRz,dCLx,dCRx,dCLy,dCRy
+    real(kind=dp) :: sAL0,sAR0,sBL0,sBR0,sCL0,sCR0
+    real(kind=dp) :: ELL,ELR,ERL,ERR,FLL,FLR,FRL,FRR,GLL,GLR,GRL,GRR
+    real(kind=dp) :: sr0, uu,vv,ww,Aa,Bb,Cc
+    logical :: okp_x, okm_x, oka_x, okp_y, okm_y, oka_y, okp_z, okm_z, oka_z
+    integer :: n
+
+    smallp = smallr*smallc*smallc
+
+    ! ====================================================================
+    ! Phase 1: raw edge-centred E over [1, 2*nsubgrid+3] (CPU trace3d:935-951).
+    ! Each component is computed only over the exact anisotropic extent of
+    ! subgrid_edge_e_t (one short along its own axis) -- phase 2 reads Ex at
+    ! (i, j..j+1, k..k+1) for i,j,k <= 2*nsubgrid+2, so Ex beyond
+    ! 2*nsubgrid+2 along x (and cyclically for Ey/Ez) was never consumed.
+    ! ====================================================================
+    work_size = 2*nsubgrid+3
+    do work_idx = thread_idx, work_size**3 - 1, blockDim%x
+       call index_1Dto3D(work_idx, work_size, work_size, i, j, k)
+       i = i + 1; j = j + 1; k = k + 1
+
+       ! Ex(i,j,k) = v*C - w*B   (x-edge at (i,j-1/2,k-1/2); averages over k-1,k)
+       if (i <= 2*nsubgrid+2) then
+          vv = 0.25_dp*( local_subgrid%velocity_y(i,j-1,k-1) + local_subgrid%velocity_y(i,j-1,k) + &
+               &         local_subgrid%velocity_y(i,j  ,k-1) + local_subgrid%velocity_y(i,j  ,k) )
+          ww = 0.25_dp*( local_subgrid%velocity_z(i,j-1,k-1) + local_subgrid%velocity_z(i,j-1,k) + &
+               &         local_subgrid%velocity_z(i,j  ,k-1) + local_subgrid%velocity_z(i,j  ,k) )
+          Bb = 0.5_dp*( bf%by(i,j  ,k-1) + bf%by(i,j  ,k) )
+          Cc = 0.5_dp*( bf%bz(i,j-1,k  ) + bf%bz(i,j  ,k) )
+          edge_e%Ex(i,j,k) = vv*Cc - ww*Bb
+       end if
+
+       ! Ey(i,j,k) = w*A - u*C   (y-edge at (i-1/2,j,k-1/2); averages over k-1,k)
+       if (j <= 2*nsubgrid+2) then
+          uu = 0.25_dp*( local_subgrid%velocity_x(i-1,j,k-1) + local_subgrid%velocity_x(i-1,j,k) + &
+               &         local_subgrid%velocity_x(i  ,j,k-1) + local_subgrid%velocity_x(i  ,j,k) )
+          ww = 0.25_dp*( local_subgrid%velocity_z(i-1,j,k-1) + local_subgrid%velocity_z(i-1,j,k) + &
+               &         local_subgrid%velocity_z(i  ,j,k-1) + local_subgrid%velocity_z(i  ,j,k) )
+          Aa = 0.5_dp*( bf%bx(i  ,j,k-1) + bf%bx(i,j,k) )
+          Cc = 0.5_dp*( bf%bz(i-1,j,k  ) + bf%bz(i,j,k) )
+          edge_e%Ey(i,j,k) = ww*Aa - uu*Cc
+       end if
+
+       ! Ez(i,j,k) = u*B - v*A   (z-edge at (i-1/2,j-1/2,k); in-plane)
+       if (k <= 2*nsubgrid+2) then
+          uu = 0.25_dp*( local_subgrid%velocity_x(i-1,j-1,k) + local_subgrid%velocity_x(i-1,j,k) + &
+               &         local_subgrid%velocity_x(i  ,j-1,k) + local_subgrid%velocity_x(i  ,j,k) )
+          vv = 0.25_dp*( local_subgrid%velocity_y(i-1,j-1,k) + local_subgrid%velocity_y(i-1,j,k) + &
+               &         local_subgrid%velocity_y(i  ,j-1,k) + local_subgrid%velocity_y(i  ,j,k) )
+          Aa = 0.5_dp*( bf%bx(i,j-1,k) + bf%bx(i,j,k) )
+          Bb = 0.5_dp*( bf%by(i-1,j,k) + bf%by(i,j,k) )
+          edge_e%Ez(i,j,k) = uu*Bb - vv*Aa
+       end if
+    end do
+
+    call syncthreads()
+#endif
 
     ! Compute the size of the section of the subgrid to operate on
     work_size = 2*nsubgrid+2
@@ -1492,15 +1592,93 @@ contains
        call index_1Dto3D(work_idx, work_size, work_size, i, j, k)
        i = i + 1; j = j + 1; k = k + 1
 
+#ifdef MHD
+       ! ---- Face-centred B values (CPU trace3d:961-966) -----------------------
+       AL = bf%bx(i  ,j  ,k  )
+       AR = bf%bx(i+1,j  ,k  )
+       BL = bf%by(i  ,j  ,k  )
+       BR = bf%by(i  ,j+1,k  )
+       CL = bf%bz(i  ,j  ,k  )
+       CR = bf%bz(i  ,j  ,k+1)
+
+       ! ---- Face-centred transverse slopes (0.5*dbf; CPU trace3d:969-982) -----
+       ! Recomputed inline from the shared bf via face_b_tvd_slope (B3) -- the
+       ! CPU stages these in h%dbf / the old GPU spilled them to global scratch;
+       ! they are a pure 3-point function of bf, so recomputing the 12 values
+       ! this cell needs is cheaper than a global round-trip. Slope axes follow
+       ! CPU uslope (umuscl.f90:2255-2333): dbx along y/z, dby along x/z,
+       ! dbz along x/y; L/R = the cell's low/high face on the component's axis.
+       dALy = half*face_b_tvd_slope(bf%bx(i  ,j-1,k), bf%bx(i  ,j,k), bf%bx(i  ,j+1,k), slope_mag)
+       dARy = half*face_b_tvd_slope(bf%bx(i+1,j-1,k), bf%bx(i+1,j,k), bf%bx(i+1,j+1,k), slope_mag)
+       dALz = half*face_b_tvd_slope(bf%bx(i  ,j,k-1), bf%bx(i  ,j,k), bf%bx(i  ,j,k+1), slope_mag)
+       dARz = half*face_b_tvd_slope(bf%bx(i+1,j,k-1), bf%bx(i+1,j,k), bf%bx(i+1,j,k+1), slope_mag)
+       dBLx = half*face_b_tvd_slope(bf%by(i-1,j  ,k), bf%by(i,j  ,k), bf%by(i+1,j  ,k), slope_mag)
+       dBRx = half*face_b_tvd_slope(bf%by(i-1,j+1,k), bf%by(i,j+1,k), bf%by(i+1,j+1,k), slope_mag)
+       dBLz = half*face_b_tvd_slope(bf%by(i,j  ,k-1), bf%by(i,j  ,k), bf%by(i,j  ,k+1), slope_mag)
+       dBRz = half*face_b_tvd_slope(bf%by(i,j+1,k-1), bf%by(i,j+1,k), bf%by(i,j+1,k+1), slope_mag)
+       dCLx = half*face_b_tvd_slope(bf%bz(i-1,j,k  ), bf%bz(i,j,k  ), bf%bz(i+1,j,k  ), slope_mag)
+       dCRx = half*face_b_tvd_slope(bf%bz(i-1,j,k+1), bf%bz(i,j,k+1), bf%bz(i+1,j,k+1), slope_mag)
+       dCLy = half*face_b_tvd_slope(bf%bz(i,j-1,k  ), bf%bz(i,j,k  ), bf%bz(i,j+1,k  ), slope_mag)
+       dCRy = half*face_b_tvd_slope(bf%bz(i,j-1,k+1), bf%bz(i,j,k+1), bf%bz(i,j+1,k+1), slope_mag)
+
+       ! ---- Edge-centred E gathered (CPU trace3d:985-1000) --------------------
+       ELL = edge_e%Ex(i  ,j  ,k  ); ELR = edge_e%Ex(i  ,j  ,k+1)
+       ERL = edge_e%Ex(i  ,j+1,k  ); ERR = edge_e%Ex(i  ,j+1,k+1)
+       FLL = edge_e%Ey(i  ,j  ,k  ); FLR = edge_e%Ey(i  ,j  ,k+1)
+       FRL = edge_e%Ey(i+1,j  ,k  ); FRR = edge_e%Ey(i+1,j  ,k+1)
+       GLL = edge_e%Ez(i  ,j  ,k  ); GLR = edge_e%Ez(i  ,j+1,k  )
+       GRL = edge_e%Ez(i+1,j  ,k  ); GRR = edge_e%Ez(i+1,j+1,k  )
+
+       ! ---- Face-B predicted by discrete curl of edge-E (CPU trace3d:1003-1015)
+       sAL0 = + (GLR-GLL) - (FLR-FLL)
+       sAR0 = + (GRR-GRL) - (FRR-FRL)
+       sBL0 = - (GRL-GLL) + (ELR-ELL)
+       sBR0 = - (GRR-GLR) + (ERR-ERL)
+       sCL0 = + (FRL-FLL) - (ERL-ELL)
+       sCR0 = + (FRR-FLR) - (ERR-ELR)
+       AL = AL + sAL0*dtdx*half
+       AR = AR + sAR0*dtdx*half
+       BL = BL + sBL0*dtdx*half
+       BR = BR + sBR0*dtdx*half
+       CL = CL + sCL0*dtdx*half
+       CR = CR + sCR0*dtdx*half
+#endif
+
        ! Cell centered values
        cell%density    = local_subgrid%density   (i, j, k)
        cell%velocity_x = local_subgrid%velocity_x(i, j, k)
        cell%velocity_y = local_subgrid%velocity_y(i, j, k)
        cell%velocity_z = local_subgrid%velocity_z(i, j, k)
        cell%pressure   = local_subgrid%pressure  (i, j, k)
+#ifdef MHD
+       ! CPU trace3d scalar names: original (pre-predictor) cell values + cell B
+       r = local_subgrid%density   (i,j,k)
+       u = local_subgrid%velocity_x(i,j,k)
+       v = local_subgrid%velocity_y(i,j,k)
+       w = local_subgrid%velocity_z(i,j,k)
+       p = local_subgrid%pressure  (i,j,k)
+       A = local_subgrid%Bx(i,j,k)
+       B = local_subgrid%By(i,j,k)
+       C = local_subgrid%Bz(i,j,k)
+#endif
 
        ! Compute the TVD Slopes (dedicated device function, v4.1; half*dq)
-       call compute_tvd_slopes(local_subgrid, i, j, k, slope, slopes_x, slopes_y, slopes_z)
+       call compute_tvd_slopes(local_subgrid, i, j, k, slope, &
+#ifdef MHD
+            & scalar_sub, dscal_x, dscal_y, dscal_z, &
+#endif
+            & slopes_x, slopes_y, slopes_z)
+#ifdef MHD
+       ! Unpack into the CPU trace3d slope names (transverse B only; the normal
+       ! B is face-predicted, so slopes_x%Bx / slopes_y%By / slopes_z%Bz unused).
+       drx = slopes_x%density;    dry = slopes_y%density;    drz = slopes_z%density
+       dux = slopes_x%velocity_x; duy = slopes_y%velocity_x; duz = slopes_z%velocity_x
+       dvx = slopes_x%velocity_y; dvy = slopes_y%velocity_y; dvz = slopes_z%velocity_y
+       dwx = slopes_x%velocity_z; dwy = slopes_y%velocity_z; dwz = slopes_z%velocity_z
+       dpx = slopes_x%pressure;   dpy = slopes_y%pressure;   dpz = slopes_z%pressure
+       dBx = slopes_x%By;         dAy = slopes_y%Bx;         dAz = slopes_z%Bx
+       dCx = slopes_x%Bz;         dCy = slopes_y%Bz;         dBz = slopes_z%By
+#endif
 
        ! Source terms
        source_term%density    = -cell%velocity_x * slopes_x%density    &
@@ -1523,6 +1701,15 @@ contains
                                 -cell%velocity_y * slopes_y%pressure   &
                                 -cell%velocity_z * slopes_z%pressure   &
                                 - (slopes_x%velocity_x + slopes_y%velocity_y + slopes_z%velocity_z) * gamma * cell%pressure
+#ifdef MHD
+       ! Lorentz-force source terms (CPU trace3d:1083-1090)
+       source_term%velocity_x = source_term%velocity_x + (-(B*dBx+C*dCx)/r) + (B*dAy/r) + (C*dAz/r)
+       source_term%velocity_y = source_term%velocity_y + (A*dBx/r) + (-(A*dAy+C*dCy)/r) + (C*dBz/r)
+       source_term%velocity_z = source_term%velocity_z + (A*dCx/r) + (B*dCy/r) + (-(A*dAz+B*dBz)/r)
+       if (induction) then
+          source_term%velocity_x = 0.0_dp; source_term%velocity_y = 0.0_dp; source_term%velocity_z = 0.0_dp
+       end if
+#endif
 
        ! Cell-centered predicted states
        cell%density    = cell%density    + dtdx * source_term%density
@@ -1530,6 +1717,19 @@ contains
        cell%velocity_y = cell%velocity_y + dtdx * source_term%velocity_y
        cell%velocity_z = cell%velocity_z + dtdx * source_term%velocity_z
        cell%pressure   = cell%pressure   + dtdx * source_term%pressure
+#ifdef MHD
+       ! Predicted scalar aliases for the B interface/corner writes below; the
+       ! predicted cell-centred B is the mean of the predicted faces
+       ! (CPU trace3d:1102-1110).
+       r = cell%density
+       u = cell%velocity_x
+       v = cell%velocity_y
+       w = cell%velocity_z
+       p = cell%pressure
+       A = half*(AL+AR)
+       B = half*(BL+BR)
+       C = half*(CL+CR)
+#endif
 
        ! Compute and write out the interface states
 
@@ -1543,6 +1743,11 @@ contains
           ! Fallback to first order
           if (right_interfaces_x%density (i-2, j-2, k-2) < smallr) right_interfaces_x%density (i-2, j-2, k-2) = local_subgrid%density (i, j, k)
           if (right_interfaces_x%pressure(i-2, j-2, k-2) < smallp) right_interfaces_x%pressure(i-2, j-2, k-2) = local_subgrid%pressure(i, j, k)
+#ifdef MHD
+          right_interfaces_x%Bx(i-2, j-2, k-2) = AL
+          right_interfaces_x%By(i-2, j-2, k-2) = B - dBx
+          right_interfaces_x%Bz(i-2, j-2, k-2) = C - dCx
+#endif
        end if
 
        ! The left state at i+1/2
@@ -1555,6 +1760,11 @@ contains
           ! Fallback to first order
           if (left_interfaces_x%density (i-1, j-2, k-2) < smallr) left_interfaces_x%density (i-1, j-2, k-2) = local_subgrid%density (i, j, k)
           if (left_interfaces_x%pressure(i-1, j-2, k-2) < smallp) left_interfaces_x%pressure(i-1, j-2, k-2) = local_subgrid%pressure(i, j, k)
+#ifdef MHD
+          left_interfaces_x%Bx(i-1, j-2, k-2) = AR
+          left_interfaces_x%By(i-1, j-2, k-2) = B + dBx
+          left_interfaces_x%Bz(i-1, j-2, k-2) = C + dCx
+#endif
        end if
 
        ! The right state at j-1/2
@@ -1567,6 +1777,11 @@ contains
           ! Fallback to first order
           if (right_interfaces_y%density (i-2, j-2, k-2) < smallr) right_interfaces_y%density (i-2, j-2, k-2) = local_subgrid%density (i, j, k)
           if (right_interfaces_y%pressure(i-2, j-2, k-2) < smallp) right_interfaces_y%pressure(i-2, j-2, k-2) = local_subgrid%pressure(i, j, k)
+#ifdef MHD
+          right_interfaces_y%Bx(i-2, j-2, k-2) = A - dAy
+          right_interfaces_y%By(i-2, j-2, k-2) = BL
+          right_interfaces_y%Bz(i-2, j-2, k-2) = C - dCy
+#endif
        end if
 
        ! The left state at j+1/2
@@ -1579,6 +1794,11 @@ contains
           ! Fallback to first order
           if (left_interfaces_y%density (i-2, j-1, k-2) < smallr) left_interfaces_y%density (i-2, j-1, k-2) = local_subgrid%density (i, j, k)
           if (left_interfaces_y%pressure(i-2, j-1, k-2) < smallp) left_interfaces_y%pressure(i-2, j-1, k-2) = local_subgrid%pressure(i, j, k)
+#ifdef MHD
+          left_interfaces_y%Bx(i-2, j-1, k-2) = A + dAy
+          left_interfaces_y%By(i-2, j-1, k-2) = BR
+          left_interfaces_y%Bz(i-2, j-1, k-2) = C + dCy
+#endif
        end if
 
        ! The right state at k-1/2
@@ -1591,6 +1811,11 @@ contains
           ! Fallback to first order
           if (right_interfaces_z%density (i-2, j-2, k-2) < smallr) right_interfaces_z%density (i-2, j-2, k-2) = local_subgrid%density (i, j, k)
           if (right_interfaces_z%pressure(i-2, j-2, k-2) < smallp) right_interfaces_z%pressure(i-2, j-2, k-2) = local_subgrid%pressure(i, j, k)
+#ifdef MHD
+          right_interfaces_z%Bx(i-2, j-2, k-2) = A - dAz
+          right_interfaces_z%By(i-2, j-2, k-2) = B - dBz
+          right_interfaces_z%Bz(i-2, j-2, k-2) = CL
+#endif
        end if
 
        ! The left state at k+1/2
@@ -1603,7 +1828,205 @@ contains
           ! Fallback to first order
           if (left_interfaces_z%density (i-2, j-2, k-1) < smallr) left_interfaces_z%density (i-2, j-2, k-1) = local_subgrid%density (i, j, k)
           if (left_interfaces_z%pressure(i-2, j-2, k-1) < smallp) left_interfaces_z%pressure(i-2, j-2, k-1) = local_subgrid%pressure(i, j, k)
+#ifdef MHD
+          left_interfaces_z%Bx(i-2, j-2, k-1) = A + dAz
+          left_interfaces_z%By(i-2, j-2, k-1) = B + dBz
+          left_interfaces_z%Bz(i-2, j-2, k-1) = CR
+#endif
        end if
+
+#ifdef MHD
+       ! ---- Corner-state edge-feed guards -------------------------------------
+       ! Each cell corner is consumed by exactly ONE oct edge, so it is stored
+       ! straight into that edge's slot of the shared corner_x/y/z buffers (the
+       ! write-side inverse of the CPU cmp_mag_flx gather shifts,
+       ! umuscl.f90:220-258). The guards keep the mapped edge index on the
+       ! stored lattice: a +d corner maps to transverse edge index cell_d-1 in
+       ! [0,2*nsubgrid] (okp_d), a -d corner to cell_d-2 (okm_d), and the
+       ! along-axis segment to cell_a-2 in [0,2*nsubgrid-1] (oka_a). Corner
+       ! values of cells outside these ranges fed no oct edge (the cell-indexed
+       ! scheme computed and discarded them).
+       okp_x = i <= 2*nsubgrid+1; okm_x = i >= 2; oka_x = okm_x .and. okp_x
+       okp_y = j <= 2*nsubgrid+1; okm_y = j >= 2; oka_y = okm_y .and. okp_y
+       okp_z = k <= 2*nsubgrid+1; okm_z = k >= 2; oka_z = okm_z .and. okp_z
+
+       ! ---- X-edge corner states (orientation 1) (CPU trace3d:1226-1289) ------
+       ! Corner letters: R/L = the cell's +y/-y side, T/B = +z/-z. The cell's
+       ! RT corner is the LL corner of the x-edge at (i-2,j-1,k-1), etc. The
+       ! edge-parallel velocity u is not stored (no 2D EMF solver reads it);
+       ! components stay in the PHYSICAL frame (gather_corner_x permutes, C3).
+       if (oka_x .and. okp_y .and. okp_z) then   ! qRT -> LL slot
+          corner_x%density(i-2,j-1,k-1,iqLL) = r + (+dry+drz)
+          corner_x%velocity_y(i-2,j-1,k-1,iqLL) = v + (+dvy+dvz)
+          corner_x%velocity_z(i-2,j-1,k-1,iqLL) = w + (+dwy+dwz)
+          corner_x%pressure(i-2,j-1,k-1,iqLL) = p + (+dpy+dpz)
+          corner_x%Bx(i-2,j-1,k-1,iqLL) = A + (+dAy+dAz)
+          corner_x%By(i-2,j-1,k-1,iqLL) = BR + (   +dBRz)
+          corner_x%Bz(i-2,j-1,k-1,iqLL) = CR + (+dCRy   )
+          if (corner_x%density(i-2,j-1,k-1,iqLL) < smallr) corner_x%density(i-2,j-1,k-1,iqLL) = r
+          if (corner_x%pressure(i-2,j-1,k-1,iqLL) < smallp) corner_x%pressure(i-2,j-1,k-1,iqLL) = p
+       end if
+       if (oka_x .and. okp_y .and. okm_z) then   ! qRB -> LR slot
+          corner_x%density(i-2,j-1,k-2,iqLR) = r + (+dry-drz)
+          corner_x%velocity_y(i-2,j-1,k-2,iqLR) = v + (+dvy-dvz)
+          corner_x%velocity_z(i-2,j-1,k-2,iqLR) = w + (+dwy-dwz)
+          corner_x%pressure(i-2,j-1,k-2,iqLR) = p + (+dpy-dpz)
+          corner_x%Bx(i-2,j-1,k-2,iqLR) = A + (+dAy-dAz)
+          corner_x%By(i-2,j-1,k-2,iqLR) = BR + (   -dBRz)
+          corner_x%Bz(i-2,j-1,k-2,iqLR) = CL + (+dCLy   )
+          if (corner_x%density(i-2,j-1,k-2,iqLR) < smallr) corner_x%density(i-2,j-1,k-2,iqLR) = r
+          if (corner_x%pressure(i-2,j-1,k-2,iqLR) < smallp) corner_x%pressure(i-2,j-1,k-2,iqLR) = p
+       end if
+       if (oka_x .and. okm_y .and. okp_z) then   ! qLT -> RL slot
+          corner_x%density(i-2,j-2,k-1,iqRL) = r + (-dry+drz)
+          corner_x%velocity_y(i-2,j-2,k-1,iqRL) = v + (-dvy+dvz)
+          corner_x%velocity_z(i-2,j-2,k-1,iqRL) = w + (-dwy+dwz)
+          corner_x%pressure(i-2,j-2,k-1,iqRL) = p + (-dpy+dpz)
+          corner_x%Bx(i-2,j-2,k-1,iqRL) = A + (-dAy+dAz)
+          corner_x%By(i-2,j-2,k-1,iqRL) = BL + (   +dBLz)
+          corner_x%Bz(i-2,j-2,k-1,iqRL) = CR + (-dCRy   )
+          if (corner_x%density(i-2,j-2,k-1,iqRL) < smallr) corner_x%density(i-2,j-2,k-1,iqRL) = r
+          if (corner_x%pressure(i-2,j-2,k-1,iqRL) < smallp) corner_x%pressure(i-2,j-2,k-1,iqRL) = p
+       end if
+       if (oka_x .and. okm_y .and. okm_z) then   ! qLB -> RR slot
+          corner_x%density(i-2,j-2,k-2,iqRR) = r + (-dry-drz)
+          corner_x%velocity_y(i-2,j-2,k-2,iqRR) = v + (-dvy-dvz)
+          corner_x%velocity_z(i-2,j-2,k-2,iqRR) = w + (-dwy-dwz)
+          corner_x%pressure(i-2,j-2,k-2,iqRR) = p + (-dpy-dpz)
+          corner_x%Bx(i-2,j-2,k-2,iqRR) = A + (-dAy-dAz)
+          corner_x%By(i-2,j-2,k-2,iqRR) = BL + (   -dBLz)
+          corner_x%Bz(i-2,j-2,k-2,iqRR) = CL + (-dCLy   )
+          if (corner_x%density(i-2,j-2,k-2,iqRR) < smallr) corner_x%density(i-2,j-2,k-2,iqRR) = r
+          if (corner_x%pressure(i-2,j-2,k-2,iqRR) < smallp) corner_x%pressure(i-2,j-2,k-2,iqRR) = p
+       end if
+
+       ! ---- Y-edge corner states (orientation 2) (CPU trace3d:1290-1353) ------
+       ! Corner letters: R/L = the cell's +x/-x side, T/B = +z/-z. The 2D
+       ! solver's first in-plane axis for y-edges is physical z (CPU lp1=4), so
+       ! the cell's RT corner is the LL corner of edge (i-1,j-2,k-1) but RB
+       ! feeds the RL slot and LT the LR slot (cf. the CPU Ey gather swap,
+       ! umuscl.f90:236-242). The edge-parallel velocity v is not stored.
+       if (okp_x .and. oka_y .and. okp_z) then   ! qRT -> LL slot
+          corner_y%density(i-1,j-2,k-1,iqLL) = r + (+drx+drz)
+          corner_y%velocity_x(i-1,j-2,k-1,iqLL) = u + (+dux+duz)
+          corner_y%velocity_z(i-1,j-2,k-1,iqLL) = w + (+dwx+dwz)
+          corner_y%pressure(i-1,j-2,k-1,iqLL) = p + (+dpx+dpz)
+          corner_y%Bx(i-1,j-2,k-1,iqLL) = AR + (   +dARz)
+          corner_y%By(i-1,j-2,k-1,iqLL) = B + (+dBx+dBz)
+          corner_y%Bz(i-1,j-2,k-1,iqLL) = CR + (+dCRx   )
+          if (corner_y%density(i-1,j-2,k-1,iqLL) < smallr) corner_y%density(i-1,j-2,k-1,iqLL) = r
+          if (corner_y%pressure(i-1,j-2,k-1,iqLL) < smallp) corner_y%pressure(i-1,j-2,k-1,iqLL) = p
+       end if
+       if (okp_x .and. oka_y .and. okm_z) then   ! qRB -> RL slot
+          corner_y%density(i-1,j-2,k-2,iqRL) = r + (+drx-drz)
+          corner_y%velocity_x(i-1,j-2,k-2,iqRL) = u + (+dux-duz)
+          corner_y%velocity_z(i-1,j-2,k-2,iqRL) = w + (+dwx-dwz)
+          corner_y%pressure(i-1,j-2,k-2,iqRL) = p + (+dpx-dpz)
+          corner_y%Bx(i-1,j-2,k-2,iqRL) = AR + (   -dARz)
+          corner_y%By(i-1,j-2,k-2,iqRL) = B + (+dBx-dBz)
+          corner_y%Bz(i-1,j-2,k-2,iqRL) = CL + (+dCLx   )
+          if (corner_y%density(i-1,j-2,k-2,iqRL) < smallr) corner_y%density(i-1,j-2,k-2,iqRL) = r
+          if (corner_y%pressure(i-1,j-2,k-2,iqRL) < smallp) corner_y%pressure(i-1,j-2,k-2,iqRL) = p
+       end if
+       if (okm_x .and. oka_y .and. okp_z) then   ! qLT -> LR slot
+          corner_y%density(i-2,j-2,k-1,iqLR) = r + (-drx+drz)
+          corner_y%velocity_x(i-2,j-2,k-1,iqLR) = u + (-dux+duz)
+          corner_y%velocity_z(i-2,j-2,k-1,iqLR) = w + (-dwx+dwz)
+          corner_y%pressure(i-2,j-2,k-1,iqLR) = p + (-dpx+dpz)
+          corner_y%Bx(i-2,j-2,k-1,iqLR) = AL + (   +dALz)
+          corner_y%By(i-2,j-2,k-1,iqLR) = B + (-dBx+dBz)
+          corner_y%Bz(i-2,j-2,k-1,iqLR) = CR + (-dCRx   )
+          if (corner_y%density(i-2,j-2,k-1,iqLR) < smallr) corner_y%density(i-2,j-2,k-1,iqLR) = r
+          if (corner_y%pressure(i-2,j-2,k-1,iqLR) < smallp) corner_y%pressure(i-2,j-2,k-1,iqLR) = p
+       end if
+       if (okm_x .and. oka_y .and. okm_z) then   ! qLB -> RR slot
+          corner_y%density(i-2,j-2,k-2,iqRR) = r + (-drx-drz)
+          corner_y%velocity_x(i-2,j-2,k-2,iqRR) = u + (-dux-duz)
+          corner_y%velocity_z(i-2,j-2,k-2,iqRR) = w + (-dwx-dwz)
+          corner_y%pressure(i-2,j-2,k-2,iqRR) = p + (-dpx-dpz)
+          corner_y%Bx(i-2,j-2,k-2,iqRR) = AL + (   -dALz)
+          corner_y%By(i-2,j-2,k-2,iqRR) = B + (-dBx-dBz)
+          corner_y%Bz(i-2,j-2,k-2,iqRR) = CL + (-dCLx   )
+          if (corner_y%density(i-2,j-2,k-2,iqRR) < smallr) corner_y%density(i-2,j-2,k-2,iqRR) = r
+          if (corner_y%pressure(i-2,j-2,k-2,iqRR) < smallp) corner_y%pressure(i-2,j-2,k-2,iqRR) = p
+       end if
+
+       ! ---- Z-edge corner states (orientation 3) (CPU trace3d:1354-1417) ------
+       ! Corner letters: R/L = the cell's +x/-x side, T/B = +y/-y. The cell's
+       ! RT corner is the LL corner of edge (i-1,j-1,k-2), etc. The
+       ! edge-parallel velocity w is not stored.
+       if (okp_x .and. okp_y .and. oka_z) then   ! qRT -> LL slot
+          corner_z%density(i-1,j-1,k-2,iqLL) = r + (+drx+dry)
+          corner_z%velocity_x(i-1,j-1,k-2,iqLL) = u + (+dux+duy)
+          corner_z%velocity_y(i-1,j-1,k-2,iqLL) = v + (+dvx+dvy)
+          corner_z%pressure(i-1,j-1,k-2,iqLL) = p + (+dpx+dpy)
+          corner_z%Bx(i-1,j-1,k-2,iqLL) = AR + (   +dARy)
+          corner_z%By(i-1,j-1,k-2,iqLL) = BR + (+dBRx   )
+          corner_z%Bz(i-1,j-1,k-2,iqLL) = C + (+dCx+dCy)
+          if (corner_z%density(i-1,j-1,k-2,iqLL) < smallr) corner_z%density(i-1,j-1,k-2,iqLL) = r
+          if (corner_z%pressure(i-1,j-1,k-2,iqLL) < smallp) corner_z%pressure(i-1,j-1,k-2,iqLL) = p
+       end if
+       if (okp_x .and. okm_y .and. oka_z) then   ! qRB -> LR slot
+          corner_z%density(i-1,j-2,k-2,iqLR) = r + (+drx-dry)
+          corner_z%velocity_x(i-1,j-2,k-2,iqLR) = u + (+dux-duy)
+          corner_z%velocity_y(i-1,j-2,k-2,iqLR) = v + (+dvx-dvy)
+          corner_z%pressure(i-1,j-2,k-2,iqLR) = p + (+dpx-dpy)
+          corner_z%Bx(i-1,j-2,k-2,iqLR) = AR + (   -dARy)
+          corner_z%By(i-1,j-2,k-2,iqLR) = BL + (+dBLx   )
+          corner_z%Bz(i-1,j-2,k-2,iqLR) = C + (+dCx-dCy)
+          if (corner_z%density(i-1,j-2,k-2,iqLR) < smallr) corner_z%density(i-1,j-2,k-2,iqLR) = r
+          if (corner_z%pressure(i-1,j-2,k-2,iqLR) < smallp) corner_z%pressure(i-1,j-2,k-2,iqLR) = p
+       end if
+       if (okm_x .and. okp_y .and. oka_z) then   ! qLT -> RL slot
+          corner_z%density(i-2,j-1,k-2,iqRL) = r + (-drx+dry)
+          corner_z%velocity_x(i-2,j-1,k-2,iqRL) = u + (-dux+duy)
+          corner_z%velocity_y(i-2,j-1,k-2,iqRL) = v + (-dvx+dvy)
+          corner_z%pressure(i-2,j-1,k-2,iqRL) = p + (-dpx+dpy)
+          corner_z%Bx(i-2,j-1,k-2,iqRL) = AL + (   +dALy)
+          corner_z%By(i-2,j-1,k-2,iqRL) = BR + (-dBRx   )
+          corner_z%Bz(i-2,j-1,k-2,iqRL) = C + (-dCx+dCy)
+          if (corner_z%density(i-2,j-1,k-2,iqRL) < smallr) corner_z%density(i-2,j-1,k-2,iqRL) = r
+          if (corner_z%pressure(i-2,j-1,k-2,iqRL) < smallp) corner_z%pressure(i-2,j-1,k-2,iqRL) = p
+       end if
+       if (okm_x .and. okm_y .and. oka_z) then   ! qLB -> RR slot
+          corner_z%density(i-2,j-2,k-2,iqRR) = r + (-drx-dry)
+          corner_z%velocity_x(i-2,j-2,k-2,iqRR) = u + (-dux-duy)
+          corner_z%velocity_y(i-2,j-2,k-2,iqRR) = v + (-dvx-dvy)
+          corner_z%pressure(i-2,j-2,k-2,iqRR) = p + (-dpx-dpy)
+          corner_z%Bx(i-2,j-2,k-2,iqRR) = AL + (   -dALy)
+          corner_z%By(i-2,j-2,k-2,iqRR) = BL + (-dBLx   )
+          corner_z%Bz(i-2,j-2,k-2,iqRR) = C + (-dCx-dCy)
+          if (corner_z%density(i-2,j-2,k-2,iqRR) < smallr) corner_z%density(i-2,j-2,k-2,iqRR) = r
+          if (corner_z%pressure(i-2,j-2,k-2,iqRR) < smallp) corner_z%pressure(i-2,j-2,k-2,iqRR) = p
+       end if
+
+       ! ---- Passive-scalar advection predictor (CPU trace3d:1423-1448) --------
+       ! Uses the ORIGINAL cell velocities (re-read from local_subgrid), not predicted.
+       ! Scalar slopes come from compute_tvd_slopes (dscal_*, v4.1).
+       do n = 1, nvar-5
+          rscal = scalar_sub(i,j,k,n)
+          u = local_subgrid%velocity_x(i,j,k)
+          v = local_subgrid%velocity_y(i,j,k)
+          w = local_subgrid%velocity_z(i,j,k)
+          drx = dscal_x(n)
+          dry = dscal_y(n)
+          drz = dscal_z(n)
+          sr0 = -u*drx - v*dry - w*drz
+          rscal = rscal + sr0*dtdx
+          if (i > 1 .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) &
+               & right_interfaces_x%scalar(i-2,j-2,k-2,n) = rscal - drx
+          if (i < work_size .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) &
+               & left_interfaces_x%scalar(i-1,j-2,k-2,n) = rscal + drx
+          if ((i > 1 .and. i < work_size) .and. j > 1 .and. (k > 1 .and. k < work_size)) &
+               & right_interfaces_y%scalar(i-2,j-2,k-2,n) = rscal - dry
+          if ((i > 1 .and. i < work_size) .and. j < work_size .and. (k > 1 .and. k < work_size)) &
+               & left_interfaces_y%scalar(i-2,j-1,k-2,n) = rscal + dry
+          if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k > 1) &
+               & right_interfaces_z%scalar(i-2,j-2,k-2,n) = rscal - drz
+          if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k < work_size) &
+               & left_interfaces_z%scalar(i-2,j-2,k-1,n) = rscal + drz
+       end do
+#endif
     end do
 
     call syncthreads()
@@ -2443,493 +2866,6 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  !> @brief (Stage C1) Whole-subgrid MHD trace: edge-E, MUSCL predictor, face-B
-  !> prediction, 6-face qm/qp interface states, and the four edge corner states.
-  !> The MHD analog of trace_3d. Two phases over the shared subgrid with a sync
-  !> between (the predictor needs edge-E at planes k and k+1):
-  !>   Phase 1 -- raw edge-centred E (Ex,Ey,Ez) over [1,2*nsubgrid+3] (re-host of
-  !>     mhd_edge_emf / CPU trace3d:935-951): Ex=v*C-w*B, Ey=w*A-u*C, Ez=u*B-v*A,
-  !>     with 4-cell velocity averages and 2-face B averages. RAW (no dt/dx).
-  !>     Each component is stored only over its exact anisotropic extent (the
-  !>     subgrid_edge_e_t shapes) -- the guarded-out values were never read.
-  !>   Phase 2 -- predictor + corners over [1,2*nsubgrid+2] (re-host of
-  !>     mhd_trace_predict / CPU trace3d:956-1448). Cell + scalar slopes come from
-  !>     the dedicated compute_tvd_slopes_mhd device function (B3, v4.1; half*dq);
-  !>     the 12 face-B transverse slopes (CPU dbf) are recomputed inline from the
-  !>     shared bf via face_b_tvd_slope (B3) -- nothing is staged in global
-  !>     memory. Face-B predicted by the discrete curl of edge-E (single-valued
-  !>     normal B keeps divB clean); qm/qp written to the widened interface
-  !>     arrays with the same guards as trace_3d; each corner state is written
-  !>     into the slot of the ONE oct edge that consumes it (the shared
-  !>     subgrid_*edge_corner buffers, guarded to the consumed edge lattice --
-  !>     the write-side inverse of the CPU cmp_mag_flx gather shifts).
-  !> induction=.true. zeroes the velocity source terms (kinematic-dynamo mode).
-  !> The CPU floor typo at umuscl.f90:1284 (qLB X-edge pressure-floor writes the
-  !> density slot) is reproduced verbatim (flagged below) for bit-level CPU match.
-  attributes(device) subroutine trace_3d_mhd(local_mhd, scalar_sub, bf, edge_e, &
-       & corner_x, corner_y, corner_z, thread_idx, &
-       & left_x, right_x, left_y, right_y, left_z, right_z, gamma, smallr, smallc, &
-       & dx, dt, slope, slope_mag, induction)
-    type(subgrid_6x6x6cell_primitive), intent(in) :: local_mhd
-    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
-    type(subgrid_face_b_t), intent(in) :: bf
-    type(subgrid_edge_e_t), intent(inout) :: edge_e
-    type(subgrid_2x3x3edge_corner), intent(inout) :: corner_x
-    type(subgrid_3x2x3edge_corner), intent(inout) :: corner_y
-    type(subgrid_3x3x2edge_corner), intent(inout) :: corner_z
-    integer, value :: thread_idx, slope, slope_mag
-    real(kind=dp), value :: gamma, smallr, smallc, dx, dt
-    logical, value :: induction
-    type(subgrid_3x2x2cell_primitive), intent(inout) :: left_x, right_x
-    type(subgrid_2x3x2cell_primitive), intent(inout) :: left_y, right_y
-    type(subgrid_2x2x3cell_primitive), intent(inout) :: left_z, right_z
-
-    real(kind=dp), parameter :: half = 0.5_dp
-    integer, parameter :: iqLL = 1, iqRL = 2, iqLR = 3, iqRR = 4
-    real(kind=dp) :: r, u, v, w, p, A, B, C, r0, p0, dtdx, smallp, rscal
-    real(kind=dp) :: drx,dux,dvx,dwx,dpx, dry,duy,dvy,dwy,dpy, drz,duz,dvz,dwz,dpz
-    real(kind=dp) :: dBx,dCx, dAy,dCy, dAz,dBz
-    type(primitive_t) :: slopes_x, slopes_y, slopes_z
-    real(kind=dp) :: dscal_x(1:nscalar_mhd), dscal_y(1:nscalar_mhd), dscal_z(1:nscalar_mhd)
-    real(kind=dp) :: AL,AR,BL,BR,CL,CR
-    real(kind=dp) :: dALy,dARy,dALz,dARz,dBLx,dBRx,dBLz,dBRz,dCLx,dCRx,dCLy,dCRy
-    real(kind=dp) :: sAL0,sAR0,sBL0,sBR0,sCL0,sCR0
-    real(kind=dp) :: ELL,ELR,ERL,ERR,FLL,FLR,FRL,FRR,GLL,GLR,GRL,GRR
-    real(kind=dp) :: sr0,su0,sv0,sw0,sp0, uu,vv,ww,Aa,Bb,Cc
-    logical :: okp_x, okm_x, oka_x, okp_y, okm_y, oka_y, okp_z, okm_z, oka_z
-    integer :: work_idx, work_size, ix, iy, k, n
-
-    dtdx = dt/dx
-    smallp = smallr*smallc*smallc
-
-    ! ====================================================================
-    ! Phase 1: raw edge-centred E over [1, 2*nsubgrid+3] (CPU trace3d:935-951).
-    ! Each component is computed only over the exact anisotropic extent of
-    ! subgrid_edge_e_t (one short along its own axis) -- phase 2 reads Ex at
-    ! (ix, iy..iy+1, k..k+1) for ix,iy,k <= 2*nsubgrid+2, so Ex beyond
-    ! 2*nsubgrid+2 along x (and cyclically for Ey/Ez) was never consumed.
-    ! ====================================================================
-    work_size = 2*nsubgrid+3
-    do work_idx = thread_idx, work_size**3 - 1, blockDim%x
-       call index_1Dto3D(work_idx, work_size, work_size, ix, iy, k)
-       ix = ix + 1; iy = iy + 1; k = k + 1
-
-       ! Ex(ix,iy,k) = v*C - w*B   (x-edge at (i,j-1/2,k-1/2); averages over k-1,k)
-       if (ix <= 2*nsubgrid+2) then
-          vv = 0.25_dp*( local_mhd%velocity_y(ix,iy-1,k-1) + local_mhd%velocity_y(ix,iy-1,k) + &
-               &         local_mhd%velocity_y(ix,iy  ,k-1) + local_mhd%velocity_y(ix,iy  ,k) )
-          ww = 0.25_dp*( local_mhd%velocity_z(ix,iy-1,k-1) + local_mhd%velocity_z(ix,iy-1,k) + &
-               &         local_mhd%velocity_z(ix,iy  ,k-1) + local_mhd%velocity_z(ix,iy  ,k) )
-          Bb = 0.5_dp*( bf%by(ix,iy  ,k-1) + bf%by(ix,iy  ,k) )
-          Cc = 0.5_dp*( bf%bz(ix,iy-1,k  ) + bf%bz(ix,iy  ,k) )
-          edge_e%Ex(ix,iy,k) = vv*Cc - ww*Bb
-       end if
-
-       ! Ey(ix,iy,k) = w*A - u*C   (y-edge at (i-1/2,j,k-1/2); averages over k-1,k)
-       if (iy <= 2*nsubgrid+2) then
-          uu = 0.25_dp*( local_mhd%velocity_x(ix-1,iy,k-1) + local_mhd%velocity_x(ix-1,iy,k) + &
-               &         local_mhd%velocity_x(ix  ,iy,k-1) + local_mhd%velocity_x(ix  ,iy,k) )
-          ww = 0.25_dp*( local_mhd%velocity_z(ix-1,iy,k-1) + local_mhd%velocity_z(ix-1,iy,k) + &
-               &         local_mhd%velocity_z(ix  ,iy,k-1) + local_mhd%velocity_z(ix  ,iy,k) )
-          Aa = 0.5_dp*( bf%bx(ix  ,iy,k-1) + bf%bx(ix,iy,k) )
-          Cc = 0.5_dp*( bf%bz(ix-1,iy,k  ) + bf%bz(ix,iy,k) )
-          edge_e%Ey(ix,iy,k) = ww*Aa - uu*Cc
-       end if
-
-       ! Ez(ix,iy,k) = u*B - v*A   (z-edge at (i-1/2,j-1/2,k); in-plane)
-       if (k <= 2*nsubgrid+2) then
-          uu = 0.25_dp*( local_mhd%velocity_x(ix-1,iy-1,k) + local_mhd%velocity_x(ix-1,iy,k) + &
-               &         local_mhd%velocity_x(ix  ,iy-1,k) + local_mhd%velocity_x(ix  ,iy,k) )
-          vv = 0.25_dp*( local_mhd%velocity_y(ix-1,iy-1,k) + local_mhd%velocity_y(ix-1,iy,k) + &
-               &         local_mhd%velocity_y(ix  ,iy-1,k) + local_mhd%velocity_y(ix  ,iy,k) )
-          Aa = 0.5_dp*( bf%bx(ix,iy-1,k) + bf%bx(ix,iy,k) )
-          Bb = 0.5_dp*( bf%by(ix-1,iy,k) + bf%by(ix,iy,k) )
-          edge_e%Ez(ix,iy,k) = uu*Bb - vv*Aa
-       end if
-    end do
-
-    call syncthreads()
-
-    ! ====================================================================
-    ! Phase 2: cell predictor + corner states over [1, 2*nsubgrid+2].
-    ! ====================================================================
-    work_size = 2*nsubgrid+2
-    do work_idx = thread_idx, work_size**3 - 1, blockDim%x
-       call index_1Dto3D(work_idx, work_size, work_size, ix, iy, k)
-       ix = ix + 1; iy = iy + 1; k = k + 1
-
-       ! ---- Face-centred B values (CPU trace3d:961-966) -----------------------
-       AL = bf%bx(ix  ,iy  ,k  )
-       AR = bf%bx(ix+1,iy  ,k  )
-       BL = bf%by(ix  ,iy  ,k  )
-       BR = bf%by(ix  ,iy+1,k  )
-       CL = bf%bz(ix  ,iy  ,k  )
-       CR = bf%bz(ix  ,iy  ,k+1)
-
-       ! ---- Face-centred transverse slopes (0.5*dbf; CPU trace3d:969-982) -----
-       ! Recomputed inline from the shared bf via face_b_tvd_slope (B3) -- the
-       ! CPU stages these in h%dbf / the old GPU spilled them to global scratch;
-       ! they are a pure 3-point function of bf, so recomputing the 12 values
-       ! this cell needs is cheaper than a global round-trip. Slope axes follow
-       ! CPU uslope (umuscl.f90:2255-2333): dbx along y/z, dby along x/z,
-       ! dbz along x/y; L/R = the cell's low/high face on the component's axis.
-       dALy = half*face_b_tvd_slope(bf%bx(ix  ,iy-1,k), bf%bx(ix  ,iy,k), bf%bx(ix  ,iy+1,k), slope_mag)
-       dARy = half*face_b_tvd_slope(bf%bx(ix+1,iy-1,k), bf%bx(ix+1,iy,k), bf%bx(ix+1,iy+1,k), slope_mag)
-       dALz = half*face_b_tvd_slope(bf%bx(ix  ,iy,k-1), bf%bx(ix  ,iy,k), bf%bx(ix  ,iy,k+1), slope_mag)
-       dARz = half*face_b_tvd_slope(bf%bx(ix+1,iy,k-1), bf%bx(ix+1,iy,k), bf%bx(ix+1,iy,k+1), slope_mag)
-       dBLx = half*face_b_tvd_slope(bf%by(ix-1,iy  ,k), bf%by(ix,iy  ,k), bf%by(ix+1,iy  ,k), slope_mag)
-       dBRx = half*face_b_tvd_slope(bf%by(ix-1,iy+1,k), bf%by(ix,iy+1,k), bf%by(ix+1,iy+1,k), slope_mag)
-       dBLz = half*face_b_tvd_slope(bf%by(ix,iy  ,k-1), bf%by(ix,iy  ,k), bf%by(ix,iy  ,k+1), slope_mag)
-       dBRz = half*face_b_tvd_slope(bf%by(ix,iy+1,k-1), bf%by(ix,iy+1,k), bf%by(ix,iy+1,k+1), slope_mag)
-       dCLx = half*face_b_tvd_slope(bf%bz(ix-1,iy,k  ), bf%bz(ix,iy,k  ), bf%bz(ix+1,iy,k  ), slope_mag)
-       dCRx = half*face_b_tvd_slope(bf%bz(ix-1,iy,k+1), bf%bz(ix,iy,k+1), bf%bz(ix+1,iy,k+1), slope_mag)
-       dCLy = half*face_b_tvd_slope(bf%bz(ix,iy-1,k  ), bf%bz(ix,iy,k  ), bf%bz(ix,iy+1,k  ), slope_mag)
-       dCRy = half*face_b_tvd_slope(bf%bz(ix,iy-1,k+1), bf%bz(ix,iy,k+1), bf%bz(ix,iy+1,k+1), slope_mag)
-
-       ! ---- Edge-centred E gathered (CPU trace3d:985-1000) --------------------
-       ELL = edge_e%Ex(ix  ,iy  ,k  ); ELR = edge_e%Ex(ix  ,iy  ,k+1)
-       ERL = edge_e%Ex(ix  ,iy+1,k  ); ERR = edge_e%Ex(ix  ,iy+1,k+1)
-       FLL = edge_e%Ey(ix  ,iy  ,k  ); FLR = edge_e%Ey(ix  ,iy  ,k+1)
-       FRL = edge_e%Ey(ix+1,iy  ,k  ); FRR = edge_e%Ey(ix+1,iy  ,k+1)
-       GLL = edge_e%Ez(ix  ,iy  ,k  ); GLR = edge_e%Ez(ix  ,iy+1,k  )
-       GRL = edge_e%Ez(ix+1,iy  ,k  ); GRR = edge_e%Ez(ix+1,iy+1,k  )
-
-       ! ---- Face-B predicted by discrete curl of edge-E (CPU trace3d:1003-1015)
-       sAL0 = + (GLR-GLL) - (FLR-FLL)
-       sAR0 = + (GRR-GRL) - (FRR-FRL)
-       sBL0 = - (GRL-GLL) + (ELR-ELL)
-       sBR0 = - (GRR-GLR) + (ERR-ERL)
-       sCL0 = + (FRL-FLL) - (ERL-ELL)
-       sCR0 = + (FRR-FLR) - (ERR-ELR)
-       AL = AL + sAL0*dtdx*half
-       AR = AR + sAR0*dtdx*half
-       BL = BL + sBL0*dtdx*half
-       BR = BR + sBR0*dtdx*half
-       CL = CL + sCL0*dtdx*half
-       CR = CR + sCR0*dtdx*half
-
-       ! ---- Cell-centred values + TVD slopes (compute_tvd_slopes, v4.1) ---
-       r = local_mhd%density   (ix,iy,k); r0 = r
-       u = local_mhd%velocity_x(ix,iy,k)
-       v = local_mhd%velocity_y(ix,iy,k)
-       w = local_mhd%velocity_z(ix,iy,k)
-       p = local_mhd%pressure  (ix,iy,k); p0 = p
-       A = local_mhd%Bx(ix,iy,k)
-       B = local_mhd%By(ix,iy,k)
-       C = local_mhd%Bz(ix,iy,k)
-       call compute_tvd_slopes(local_mhd, ix, iy, k, slope, &
-            & scalar_sub, dscal_x, dscal_y, dscal_z, &
-            & slopes_x, slopes_y, slopes_z)
-       ! Unpack into the CPU trace3d slope names (transverse B only; the normal
-       ! B is face-predicted, so slopes_x%Bx / slopes_y%By / slopes_z%Bz unused).
-       drx = slopes_x%density;    dry = slopes_y%density;    drz = slopes_z%density
-       dux = slopes_x%velocity_x; duy = slopes_y%velocity_x; duz = slopes_z%velocity_x
-       dvx = slopes_x%velocity_y; dvy = slopes_y%velocity_y; dvz = slopes_z%velocity_y
-       dwx = slopes_x%velocity_z; dwy = slopes_y%velocity_z; dwz = slopes_z%velocity_z
-       dpx = slopes_x%pressure;   dpy = slopes_y%pressure;   dpz = slopes_z%pressure
-       dBx = slopes_x%By;         dAy = slopes_y%Bx;         dAz = slopes_z%Bx
-       dCx = slopes_x%Bz;         dCy = slopes_y%Bz;         dBz = slopes_z%By
-
-       ! ---- Source terms incl. Lorentz force (CPU trace3d:1077-1090) ----------
-       sr0 = -u*drx-v*dry-w*drz - (dux+dvy+dwz)*r
-       su0 = -u*dux-v*duy-w*duz - (dpx)/r
-       sv0 = -u*dvx-v*dvy-w*dvz - (dpy)/r
-       sw0 = -u*dwx-v*dwy-w*dwz - (dpz)/r
-       sp0 = -u*dpx-v*dpy-w*dpz - (dux+dvy+dwz)*gamma*p
-       su0 = su0 + (-(B*dBx+C*dCx)/r) + (B*dAy/r) + (C*dAz/r)
-       sv0 = sv0 + (A*dBx/r) + (-(A*dAy+C*dCy)/r) + (C*dBz/r)
-       sw0 = sw0 + (A*dCx/r) + (B*dCy/r) + (-(A*dAz+B*dBz)/r)
-       if (induction) then
-          su0 = 0.0_dp; sv0 = 0.0_dp; sw0 = 0.0_dp
-       end if
-
-       ! ---- Cell-centred predicted states (CPU trace3d:1102-1110) -------------
-       r = r + sr0*dtdx
-       u = u + su0*dtdx
-       v = v + sv0*dtdx
-       w = w + sw0*dtdx
-       p = p + sp0*dtdx
-       A = half*(AL+AR)
-       B = half*(BL+BR)
-       C = half*(CL+CR)
-
-       ! ---- X faces: qp(low-x)->right_x(ix-2), qm(high-x)->left_x(ix-1) -------
-       if (ix > 1 .and. (iy > 1 .and. iy < work_size) .and. (k > 1 .and. k < work_size)) then
-          right_x%density   (ix-2,iy-2,k-2) = r - drx
-          right_x%velocity_x(ix-2,iy-2,k-2) = u - dux
-          right_x%velocity_y(ix-2,iy-2,k-2) = v - dvx
-          right_x%velocity_z(ix-2,iy-2,k-2) = w - dwx
-          right_x%pressure  (ix-2,iy-2,k-2) = p - dpx
-          if (right_x%density (ix-2,iy-2,k-2) < smallr) right_x%density (ix-2,iy-2,k-2) = r0
-          if (right_x%pressure(ix-2,iy-2,k-2) < smallp) right_x%pressure(ix-2,iy-2,k-2) = p0
-          right_x%Bx(ix-2,iy-2,k-2) = AL
-          right_x%By(ix-2,iy-2,k-2) = B - dBx
-          right_x%Bz(ix-2,iy-2,k-2) = C - dCx
-       end if
-       if (ix < work_size .and. (iy > 1 .and. iy < work_size) .and. (k > 1 .and. k < work_size)) then
-          left_x%density   (ix-1,iy-2,k-2) = r + drx
-          left_x%velocity_x(ix-1,iy-2,k-2) = u + dux
-          left_x%velocity_y(ix-1,iy-2,k-2) = v + dvx
-          left_x%velocity_z(ix-1,iy-2,k-2) = w + dwx
-          left_x%pressure  (ix-1,iy-2,k-2) = p + dpx
-          if (left_x%density (ix-1,iy-2,k-2) < smallr) left_x%density (ix-1,iy-2,k-2) = r0
-          if (left_x%pressure(ix-1,iy-2,k-2) < smallp) left_x%pressure(ix-1,iy-2,k-2) = p0
-          left_x%Bx(ix-1,iy-2,k-2) = AR
-          left_x%By(ix-1,iy-2,k-2) = B + dBx
-          left_x%Bz(ix-1,iy-2,k-2) = C + dCx
-       end if
-
-       ! ---- Y faces: qp(low-y)->right_y(iy-2), qm(high-y)->left_y(iy-1) -------
-       if ((ix > 1 .and. ix < work_size) .and. iy > 1 .and. (k > 1 .and. k < work_size)) then
-          right_y%density   (ix-2,iy-2,k-2) = r - dry
-          right_y%velocity_x(ix-2,iy-2,k-2) = u - duy
-          right_y%velocity_y(ix-2,iy-2,k-2) = v - dvy
-          right_y%velocity_z(ix-2,iy-2,k-2) = w - dwy
-          right_y%pressure  (ix-2,iy-2,k-2) = p - dpy
-          if (right_y%density (ix-2,iy-2,k-2) < smallr) right_y%density (ix-2,iy-2,k-2) = r0
-          if (right_y%pressure(ix-2,iy-2,k-2) < smallp) right_y%pressure(ix-2,iy-2,k-2) = p0
-          right_y%Bx(ix-2,iy-2,k-2) = A - dAy
-          right_y%By(ix-2,iy-2,k-2) = BL
-          right_y%Bz(ix-2,iy-2,k-2) = C - dCy
-       end if
-       if ((ix > 1 .and. ix < work_size) .and. iy < work_size .and. (k > 1 .and. k < work_size)) then
-          left_y%density   (ix-2,iy-1,k-2) = r + dry
-          left_y%velocity_x(ix-2,iy-1,k-2) = u + duy
-          left_y%velocity_y(ix-2,iy-1,k-2) = v + dvy
-          left_y%velocity_z(ix-2,iy-1,k-2) = w + dwy
-          left_y%pressure  (ix-2,iy-1,k-2) = p + dpy
-          if (left_y%density (ix-2,iy-1,k-2) < smallr) left_y%density (ix-2,iy-1,k-2) = r0
-          if (left_y%pressure(ix-2,iy-1,k-2) < smallp) left_y%pressure(ix-2,iy-1,k-2) = p0
-          left_y%Bx(ix-2,iy-1,k-2) = A + dAy
-          left_y%By(ix-2,iy-1,k-2) = BR
-          left_y%Bz(ix-2,iy-1,k-2) = C + dCy
-       end if
-
-       ! ---- Z faces: qp(low-z)->right_z(k-2), qm(high-z)->left_z(k-1) ---------
-       if ((ix > 1 .and. ix < work_size) .and. (iy > 1 .and. iy < work_size) .and. k > 1) then
-          right_z%density   (ix-2,iy-2,k-2) = r - drz
-          right_z%velocity_x(ix-2,iy-2,k-2) = u - duz
-          right_z%velocity_y(ix-2,iy-2,k-2) = v - dvz
-          right_z%velocity_z(ix-2,iy-2,k-2) = w - dwz
-          right_z%pressure  (ix-2,iy-2,k-2) = p - dpz
-          if (right_z%density (ix-2,iy-2,k-2) < smallr) right_z%density (ix-2,iy-2,k-2) = r0
-          if (right_z%pressure(ix-2,iy-2,k-2) < smallp) right_z%pressure(ix-2,iy-2,k-2) = p0
-          right_z%Bx(ix-2,iy-2,k-2) = A - dAz
-          right_z%By(ix-2,iy-2,k-2) = B - dBz
-          right_z%Bz(ix-2,iy-2,k-2) = CL
-       end if
-       if ((ix > 1 .and. ix < work_size) .and. (iy > 1 .and. iy < work_size) .and. k < work_size) then
-          left_z%density   (ix-2,iy-2,k-1) = r + drz
-          left_z%velocity_x(ix-2,iy-2,k-1) = u + duz
-          left_z%velocity_y(ix-2,iy-2,k-1) = v + dvz
-          left_z%velocity_z(ix-2,iy-2,k-1) = w + dwz
-          left_z%pressure  (ix-2,iy-2,k-1) = p + dpz
-          if (left_z%density (ix-2,iy-2,k-1) < smallr) left_z%density (ix-2,iy-2,k-1) = r0
-          if (left_z%pressure(ix-2,iy-2,k-1) < smallp) left_z%pressure(ix-2,iy-2,k-1) = p0
-          left_z%Bx(ix-2,iy-2,k-1) = A + dAz
-          left_z%By(ix-2,iy-2,k-1) = B + dBz
-          left_z%Bz(ix-2,iy-2,k-1) = CR
-       end if
-
-       ! ---- Corner-state edge-feed guards -------------------------------------
-       ! Each cell corner is consumed by exactly ONE oct edge, so it is stored
-       ! straight into that edge's slot of the shared corner_x/y/z buffers (the
-       ! write-side inverse of the CPU cmp_mag_flx gather shifts,
-       ! umuscl.f90:220-258). The guards keep the mapped edge index on the
-       ! stored lattice: a +d corner maps to transverse edge index cell_d-1 in
-       ! [0,2*nsubgrid] (okp_d), a -d corner to cell_d-2 (okm_d), and the
-       ! along-axis segment to cell_a-2 in [0,2*nsubgrid-1] (oka_a). Corner
-       ! values of cells outside these ranges fed no oct edge (the cell-indexed
-       ! scheme computed and discarded them).
-       okp_x = ix <= 2*nsubgrid+1; okm_x = ix >= 2; oka_x = okm_x .and. okp_x
-       okp_y = iy <= 2*nsubgrid+1; okm_y = iy >= 2; oka_y = okm_y .and. okp_y
-       okp_z = k  <= 2*nsubgrid+1; okm_z = k  >= 2; oka_z = okm_z .and. okp_z
-
-       ! ---- X-edge corner states (orientation 1) (CPU trace3d:1226-1289) ------
-       ! Corner letters: R/L = the cell's +y/-y side, T/B = +z/-z. The cell's
-       ! RT corner is the LL corner of the x-edge at (ix-2,iy-1,k-1), etc. The
-       ! edge-parallel velocity u is not stored (no 2D EMF solver reads it);
-       ! components stay in the PHYSICAL frame (gather_corner_x permutes, C3).
-       if (oka_x .and. okp_y .and. okp_z) then   ! qRT -> LL slot
-          corner_x%density(ix-2,iy-1,k-1,iqLL) = r + (+dry+drz)
-          corner_x%velocity_y(ix-2,iy-1,k-1,iqLL) = v + (+dvy+dvz)
-          corner_x%velocity_z(ix-2,iy-1,k-1,iqLL) = w + (+dwy+dwz)
-          corner_x%pressure(ix-2,iy-1,k-1,iqLL) = p + (+dpy+dpz)
-          corner_x%Bx(ix-2,iy-1,k-1,iqLL) = A + (+dAy+dAz)
-          corner_x%By(ix-2,iy-1,k-1,iqLL) = BR + (   +dBRz)
-          corner_x%Bz(ix-2,iy-1,k-1,iqLL) = CR + (+dCRy   )
-          if (corner_x%density(ix-2,iy-1,k-1,iqLL) < smallr) corner_x%density(ix-2,iy-1,k-1,iqLL) = r
-          if (corner_x%pressure(ix-2,iy-1,k-1,iqLL) < smallp) corner_x%pressure(ix-2,iy-1,k-1,iqLL) = p
-       end if
-       if (oka_x .and. okp_y .and. okm_z) then   ! qRB -> LR slot
-          corner_x%density(ix-2,iy-1,k-2,iqLR) = r + (+dry-drz)
-          corner_x%velocity_y(ix-2,iy-1,k-2,iqLR) = v + (+dvy-dvz)
-          corner_x%velocity_z(ix-2,iy-1,k-2,iqLR) = w + (+dwy-dwz)
-          corner_x%pressure(ix-2,iy-1,k-2,iqLR) = p + (+dpy-dpz)
-          corner_x%Bx(ix-2,iy-1,k-2,iqLR) = A + (+dAy-dAz)
-          corner_x%By(ix-2,iy-1,k-2,iqLR) = BR + (   -dBRz)
-          corner_x%Bz(ix-2,iy-1,k-2,iqLR) = CL + (+dCLy   )
-          if (corner_x%density(ix-2,iy-1,k-2,iqLR) < smallr) corner_x%density(ix-2,iy-1,k-2,iqLR) = r
-          if (corner_x%pressure(ix-2,iy-1,k-2,iqLR) < smallp) corner_x%pressure(ix-2,iy-1,k-2,iqLR) = p
-       end if
-       if (oka_x .and. okm_y .and. okp_z) then   ! qLT -> RL slot
-          corner_x%density(ix-2,iy-2,k-1,iqRL) = r + (-dry+drz)
-          corner_x%velocity_y(ix-2,iy-2,k-1,iqRL) = v + (-dvy+dvz)
-          corner_x%velocity_z(ix-2,iy-2,k-1,iqRL) = w + (-dwy+dwz)
-          corner_x%pressure(ix-2,iy-2,k-1,iqRL) = p + (-dpy+dpz)
-          corner_x%Bx(ix-2,iy-2,k-1,iqRL) = A + (-dAy+dAz)
-          corner_x%By(ix-2,iy-2,k-1,iqRL) = BL + (   +dBLz)
-          corner_x%Bz(ix-2,iy-2,k-1,iqRL) = CR + (-dCRy   )
-          if (corner_x%density(ix-2,iy-2,k-1,iqRL) < smallr) corner_x%density(ix-2,iy-2,k-1,iqRL) = r
-          if (corner_x%pressure(ix-2,iy-2,k-1,iqRL) < smallp) corner_x%pressure(ix-2,iy-2,k-1,iqRL) = p
-       end if
-       if (oka_x .and. okm_y .and. okm_z) then   ! qLB -> RR slot
-          corner_x%density(ix-2,iy-2,k-2,iqRR) = r + (-dry-drz)
-          corner_x%velocity_y(ix-2,iy-2,k-2,iqRR) = v + (-dvy-dvz)
-          corner_x%velocity_z(ix-2,iy-2,k-2,iqRR) = w + (-dwy-dwz)
-          corner_x%pressure(ix-2,iy-2,k-2,iqRR) = p + (-dpy-dpz)
-          corner_x%Bx(ix-2,iy-2,k-2,iqRR) = A + (-dAy-dAz)
-          corner_x%By(ix-2,iy-2,k-2,iqRR) = BL + (   -dBLz)
-          corner_x%Bz(ix-2,iy-2,k-2,iqRR) = CL + (-dCLy   )
-          if (corner_x%density(ix-2,iy-2,k-2,iqRR) < smallr) corner_x%density(ix-2,iy-2,k-2,iqRR) = r
-          if (corner_x%pressure(ix-2,iy-2,k-2,iqRR) < smallp) corner_x%pressure(ix-2,iy-2,k-2,iqRR) = p
-       end if
-
-       ! ---- Y-edge corner states (orientation 2) (CPU trace3d:1290-1353) ------
-       ! Corner letters: R/L = the cell's +x/-x side, T/B = +z/-z. The 2D
-       ! solver's first in-plane axis for y-edges is physical z (CPU lp1=4), so
-       ! the cell's RT corner is the LL corner of edge (ix-1,iy-2,k-1) but RB
-       ! feeds the RL slot and LT the LR slot (cf. the CPU Ey gather swap,
-       ! umuscl.f90:236-242). The edge-parallel velocity v is not stored.
-       if (okp_x .and. oka_y .and. okp_z) then   ! qRT -> LL slot
-          corner_y%density(ix-1,iy-2,k-1,iqLL) = r + (+drx+drz)
-          corner_y%velocity_x(ix-1,iy-2,k-1,iqLL) = u + (+dux+duz)
-          corner_y%velocity_z(ix-1,iy-2,k-1,iqLL) = w + (+dwx+dwz)
-          corner_y%pressure(ix-1,iy-2,k-1,iqLL) = p + (+dpx+dpz)
-          corner_y%Bx(ix-1,iy-2,k-1,iqLL) = AR + (   +dARz)
-          corner_y%By(ix-1,iy-2,k-1,iqLL) = B + (+dBx+dBz)
-          corner_y%Bz(ix-1,iy-2,k-1,iqLL) = CR + (+dCRx   )
-          if (corner_y%density(ix-1,iy-2,k-1,iqLL) < smallr) corner_y%density(ix-1,iy-2,k-1,iqLL) = r
-          if (corner_y%pressure(ix-1,iy-2,k-1,iqLL) < smallp) corner_y%pressure(ix-1,iy-2,k-1,iqLL) = p
-       end if
-       if (okp_x .and. oka_y .and. okm_z) then   ! qRB -> RL slot
-          corner_y%density(ix-1,iy-2,k-2,iqRL) = r + (+drx-drz)
-          corner_y%velocity_x(ix-1,iy-2,k-2,iqRL) = u + (+dux-duz)
-          corner_y%velocity_z(ix-1,iy-2,k-2,iqRL) = w + (+dwx-dwz)
-          corner_y%pressure(ix-1,iy-2,k-2,iqRL) = p + (+dpx-dpz)
-          corner_y%Bx(ix-1,iy-2,k-2,iqRL) = AR + (   -dARz)
-          corner_y%By(ix-1,iy-2,k-2,iqRL) = B + (+dBx-dBz)
-          corner_y%Bz(ix-1,iy-2,k-2,iqRL) = CL + (+dCLx   )
-          if (corner_y%density(ix-1,iy-2,k-2,iqRL) < smallr) corner_y%density(ix-1,iy-2,k-2,iqRL) = r
-          if (corner_y%pressure(ix-1,iy-2,k-2,iqRL) < smallp) corner_y%pressure(ix-1,iy-2,k-2,iqRL) = p
-       end if
-       if (okm_x .and. oka_y .and. okp_z) then   ! qLT -> LR slot
-          corner_y%density(ix-2,iy-2,k-1,iqLR) = r + (-drx+drz)
-          corner_y%velocity_x(ix-2,iy-2,k-1,iqLR) = u + (-dux+duz)
-          corner_y%velocity_z(ix-2,iy-2,k-1,iqLR) = w + (-dwx+dwz)
-          corner_y%pressure(ix-2,iy-2,k-1,iqLR) = p + (-dpx+dpz)
-          corner_y%Bx(ix-2,iy-2,k-1,iqLR) = AL + (   +dALz)
-          corner_y%By(ix-2,iy-2,k-1,iqLR) = B + (-dBx+dBz)
-          corner_y%Bz(ix-2,iy-2,k-1,iqLR) = CR + (-dCRx   )
-          if (corner_y%density(ix-2,iy-2,k-1,iqLR) < smallr) corner_y%density(ix-2,iy-2,k-1,iqLR) = r
-          if (corner_y%pressure(ix-2,iy-2,k-1,iqLR) < smallp) corner_y%pressure(ix-2,iy-2,k-1,iqLR) = p
-       end if
-       if (okm_x .and. oka_y .and. okm_z) then   ! qLB -> RR slot
-          corner_y%density(ix-2,iy-2,k-2,iqRR) = r + (-drx-drz)
-          corner_y%velocity_x(ix-2,iy-2,k-2,iqRR) = u + (-dux-duz)
-          corner_y%velocity_z(ix-2,iy-2,k-2,iqRR) = w + (-dwx-dwz)
-          corner_y%pressure(ix-2,iy-2,k-2,iqRR) = p + (-dpx-dpz)
-          corner_y%Bx(ix-2,iy-2,k-2,iqRR) = AL + (   -dALz)
-          corner_y%By(ix-2,iy-2,k-2,iqRR) = B + (-dBx-dBz)
-          corner_y%Bz(ix-2,iy-2,k-2,iqRR) = CL + (-dCLx   )
-          if (corner_y%density(ix-2,iy-2,k-2,iqRR) < smallr) corner_y%density(ix-2,iy-2,k-2,iqRR) = r
-          if (corner_y%pressure(ix-2,iy-2,k-2,iqRR) < smallp) corner_y%pressure(ix-2,iy-2,k-2,iqRR) = p
-       end if
-
-       ! ---- Z-edge corner states (orientation 3) (CPU trace3d:1354-1417) ------
-       ! Corner letters: R/L = the cell's +x/-x side, T/B = +y/-y. The cell's
-       ! RT corner is the LL corner of edge (ix-1,iy-1,k-2), etc. The
-       ! edge-parallel velocity w is not stored.
-       if (okp_x .and. okp_y .and. oka_z) then   ! qRT -> LL slot
-          corner_z%density(ix-1,iy-1,k-2,iqLL) = r + (+drx+dry)
-          corner_z%velocity_x(ix-1,iy-1,k-2,iqLL) = u + (+dux+duy)
-          corner_z%velocity_y(ix-1,iy-1,k-2,iqLL) = v + (+dvx+dvy)
-          corner_z%pressure(ix-1,iy-1,k-2,iqLL) = p + (+dpx+dpy)
-          corner_z%Bx(ix-1,iy-1,k-2,iqLL) = AR + (   +dARy)
-          corner_z%By(ix-1,iy-1,k-2,iqLL) = BR + (+dBRx   )
-          corner_z%Bz(ix-1,iy-1,k-2,iqLL) = C + (+dCx+dCy)
-          if (corner_z%density(ix-1,iy-1,k-2,iqLL) < smallr) corner_z%density(ix-1,iy-1,k-2,iqLL) = r
-          if (corner_z%pressure(ix-1,iy-1,k-2,iqLL) < smallp) corner_z%pressure(ix-1,iy-1,k-2,iqLL) = p
-       end if
-       if (okp_x .and. okm_y .and. oka_z) then   ! qRB -> LR slot
-          corner_z%density(ix-1,iy-2,k-2,iqLR) = r + (+drx-dry)
-          corner_z%velocity_x(ix-1,iy-2,k-2,iqLR) = u + (+dux-duy)
-          corner_z%velocity_y(ix-1,iy-2,k-2,iqLR) = v + (+dvx-dvy)
-          corner_z%pressure(ix-1,iy-2,k-2,iqLR) = p + (+dpx-dpy)
-          corner_z%Bx(ix-1,iy-2,k-2,iqLR) = AR + (   -dARy)
-          corner_z%By(ix-1,iy-2,k-2,iqLR) = BL + (+dBLx   )
-          corner_z%Bz(ix-1,iy-2,k-2,iqLR) = C + (+dCx-dCy)
-          if (corner_z%density(ix-1,iy-2,k-2,iqLR) < smallr) corner_z%density(ix-1,iy-2,k-2,iqLR) = r
-          if (corner_z%pressure(ix-1,iy-2,k-2,iqLR) < smallp) corner_z%pressure(ix-1,iy-2,k-2,iqLR) = p
-       end if
-       if (okm_x .and. okp_y .and. oka_z) then   ! qLT -> RL slot
-          corner_z%density(ix-2,iy-1,k-2,iqRL) = r + (-drx+dry)
-          corner_z%velocity_x(ix-2,iy-1,k-2,iqRL) = u + (-dux+duy)
-          corner_z%velocity_y(ix-2,iy-1,k-2,iqRL) = v + (-dvx+dvy)
-          corner_z%pressure(ix-2,iy-1,k-2,iqRL) = p + (-dpx+dpy)
-          corner_z%Bx(ix-2,iy-1,k-2,iqRL) = AL + (   +dALy)
-          corner_z%By(ix-2,iy-1,k-2,iqRL) = BR + (-dBRx   )
-          corner_z%Bz(ix-2,iy-1,k-2,iqRL) = C + (-dCx+dCy)
-          if (corner_z%density(ix-2,iy-1,k-2,iqRL) < smallr) corner_z%density(ix-2,iy-1,k-2,iqRL) = r
-          if (corner_z%pressure(ix-2,iy-1,k-2,iqRL) < smallp) corner_z%pressure(ix-2,iy-1,k-2,iqRL) = p
-       end if
-       if (okm_x .and. okm_y .and. oka_z) then   ! qLB -> RR slot
-          corner_z%density(ix-2,iy-2,k-2,iqRR) = r + (-drx-dry)
-          corner_z%velocity_x(ix-2,iy-2,k-2,iqRR) = u + (-dux-duy)
-          corner_z%velocity_y(ix-2,iy-2,k-2,iqRR) = v + (-dvx-dvy)
-          corner_z%pressure(ix-2,iy-2,k-2,iqRR) = p + (-dpx-dpy)
-          corner_z%Bx(ix-2,iy-2,k-2,iqRR) = AL + (   -dALy)
-          corner_z%By(ix-2,iy-2,k-2,iqRR) = BL + (-dBLx   )
-          corner_z%Bz(ix-2,iy-2,k-2,iqRR) = C + (-dCx-dCy)
-          if (corner_z%density(ix-2,iy-2,k-2,iqRR) < smallr) corner_z%density(ix-2,iy-2,k-2,iqRR) = r
-          if (corner_z%pressure(ix-2,iy-2,k-2,iqRR) < smallp) corner_z%pressure(ix-2,iy-2,k-2,iqRR) = p
-       end if
-
-       ! ---- Passive-scalar advection predictor (CPU trace3d:1423-1448) --------
-       ! Uses the ORIGINAL cell velocities (re-read from local_mhd), not predicted.
-       ! Scalar slopes come from compute_tvd_slopes_mhd (dscal_*, v4.1).
-       do n = 1, nvar-5
-          rscal = scalar_sub(ix,iy,k,n)
-          u = local_mhd%velocity_x(ix,iy,k)
-          v = local_mhd%velocity_y(ix,iy,k)
-          w = local_mhd%velocity_z(ix,iy,k)
-          drx = dscal_x(n)
-          dry = dscal_y(n)
-          drz = dscal_z(n)
-          sr0 = -u*drx - v*dry - w*drz
-          rscal = rscal + sr0*dtdx
-          if (ix > 1 .and. (iy > 1 .and. iy < work_size) .and. (k > 1 .and. k < work_size)) &
-               & right_x%scalar(ix-2,iy-2,k-2,n) = rscal - drx
-          if (ix < work_size .and. (iy > 1 .and. iy < work_size) .and. (k > 1 .and. k < work_size)) &
-               & left_x%scalar(ix-1,iy-2,k-2,n) = rscal + drx
-          if ((ix > 1 .and. ix < work_size) .and. iy > 1 .and. (k > 1 .and. k < work_size)) &
-               & right_y%scalar(ix-2,iy-2,k-2,n) = rscal - dry
-          if ((ix > 1 .and. ix < work_size) .and. iy < work_size .and. (k > 1 .and. k < work_size)) &
-               & left_y%scalar(ix-2,iy-1,k-2,n) = rscal + dry
-          if ((ix > 1 .and. ix < work_size) .and. (iy > 1 .and. iy < work_size) .and. k > 1) &
-               & right_z%scalar(ix-2,iy-2,k-2,n) = rscal - drz
-          if ((ix > 1 .and. ix < work_size) .and. (iy > 1 .and. iy < work_size) .and. k < work_size) &
-               & left_z%scalar(ix-2,iy-2,k-1,n) = rscal + drz
-       end do
-
-    end do
-
-    call syncthreads()
-
-  end subroutine trace_3d_mhd
-  ! =========================================================================
-
-  ! =========================================================================
   !> @brief (Stage C2 helper) Passive-scalar interface flux, matched to the chosen
   !> 1D solver: HLLD upwinds by the (HLLD) mass flux fdens (CPU riemann_hlld:1240-
   !> 1244, fgdnv(s)=fgdnv(1)*qleft/qright); HLL (and the fall-throughs) use the full
@@ -3188,7 +3124,7 @@ contains
   !> edge from the shared corner_x/y/z buffers -- shift-free: the CPU's
   !> orientation-specific gather shifts (and the qRT/qRB/qLT/qLB ->
   !> qLL/qLR/qRL/qRR remap, umuscl.f90:220-258) were applied at the WRITE side
-  !> in trace_3d_mhd, so slot iqLL of edge (I,J,K) already holds what the CPU
+  !> in trace_3d, so slot iqLL of edge (I,J,K) already holds what the CPU
   !> gather would fetch. The per-orientation component permutation into the 2D
   !> solver frame happens in gather_corner_x/y/z. emf_solve then enforces the
   !> parallel-B continuity and dispatches the 2D solver. RAW E is stored (the
@@ -4108,9 +4044,10 @@ contains
 
     ! C1: edge-E + MUSCL predictor (with inline face-B dbf slopes, B3) + qm/qp
     !     + corner states into the shared edge-corner buffers
-    call trace_3d_mhd(local_mhd, scalar_subgrid, bf, edge_e, &
-         & corner_x, corner_y, corner_z, thread_idx, left_x, right_x, left_y, right_y, &
-         & left_z, right_z, gamma, smallr, smallc, dx, dt, slope, slope_mag, induction)
+    call trace_3d(local_mhd, thread_idx, &
+         & scalar_subgrid, bf, edge_e, corner_x, corner_y, corner_z, &
+         & smallr, smallc, slope_mag, induction, &
+         & left_x, right_x, left_y, right_y, left_z, right_z, gamma, dtdx, slope)
 
     ! C2: 1D MHD fluxes (written back into the left_* interface arrays)
     call riemann_driver_mhd(left_x, right_x, left_y, right_y, left_z, right_z, &
