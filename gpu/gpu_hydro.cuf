@@ -1456,8 +1456,8 @@ contains
     endif
 
     if (err_grad_p > 0.0_dp) then
-       err_lft = abs((prim_mid%pressure - prim_lft%pressure) / (prim_mid%pressure + prim_lft%pressure + floor_d))
-       err_rgt = abs((prim_rgt%pressure - prim_mid%pressure) / (prim_rgt%pressure + prim_mid%pressure + floor_d))
+       err_lft = abs((prim_mid%pressure - prim_lft%pressure) / (prim_mid%pressure + prim_lft%pressure + floor_p))
+       err_rgt = abs((prim_rgt%pressure - prim_mid%pressure) / (prim_rgt%pressure + prim_mid%pressure + floor_p))
        error = 2.0_dp*max(err_lft, err_rgt)
        if (error > err_grad_p) ok = .true.
     endif
