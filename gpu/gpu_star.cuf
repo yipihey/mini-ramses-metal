@@ -221,7 +221,7 @@ end subroutine compute_star_swap_table
 
 !> Create star particles and update gas variables.
 ! =========================================================================
-attributes(global) subroutine star_formation_kernel(grid, uold, flag1, f, swap_local, &
+attributes(global) subroutine star_formation_kernel(grid, uold, f, flag1, swap_local, &
      & star_xp, star_vp, star_mp, star_tp, star_zp, star_levelp, star_idp, &
      & head_idx, num_star, ilevel, levelmin, levelmax, dx, vol, mstar, d_skip, leading, &
      & dt, texp, aexp, gamma, metal, imetal, z_ave, ientropy, dual_energy)
