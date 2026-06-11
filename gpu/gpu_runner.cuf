@@ -720,14 +720,12 @@ contains
        call sort_scatter_flag<<<num_blocks, num_threads>>>(flag1, flag2, head_idx, num_octs)
 #endif
 #ifdef HYDRO
-       call sort_gather_hydro<<<num_blocks_2, dim3(threadsX_per_block,threadsY_per_block,1)>>>(unew, uold, &
+       call sort_gather_hydro<<<num_blocks_2, dim3(threadsX_per_block,threadsY_per_block,1)>>>(unew, uold, bnew, bold, &
             & swap_global, head_idx, num_octs)
        info = cudaMemcpy(uold(1,1,head_idx), unew(1,1,head_idx), twotondim*nvar*num_octs)
-#endif
 #ifdef MHD
-       call sort_gather_mhd<<<num_blocks_2, dim3(threadsX_per_block,threadsY_per_block,1)>>>(bnew, bold, &
-            & swap_global, head_idx, num_octs)
        info = cudaMemcpy(bold(1,1,head_idx), bnew(1,1,head_idx), twotondim*6*num_octs)
+#endif
 #endif
 #ifdef GRAV
 #if defined(FUSE_SCATTER_GATHER)

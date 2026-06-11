@@ -818,26 +818,33 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine sort_gather_hydro(unew, uold, swap_global, head_idx, num_octs)
+  attributes(global) subroutine sort_gather_hydro(unew, uold, bnew, bold, swap_global, head_idx, num_octs)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*) ! Unused without MHD
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: swap_global(*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
 
-    call sort_gather_hydro_impl(unew, uold, swap_global, head_idx, num_octs)
+    call sort_gather_hydro_impl(unew, uold, bnew, bold, swap_global, head_idx, num_octs)
 
   end subroutine sort_gather_hydro
 
   ! =========================================================================
-  attributes(device) subroutine sort_gather_hydro_impl(unew, uold, swap_global, head_idx, num_octs)
+  attributes(device) subroutine sort_gather_hydro_impl(unew, uold, bnew, bold, swap_global, head_idx, num_octs)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*) ! Unused without MHD
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: swap_global(*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
 
     integer :: oct_idx, cell_idx, thread_idx, block_idx, old_oct_idx, ivar
+#ifdef MHD
+    integer :: ib
+#endif
 
     ! Compute block idx
     block_idx = blockIdx%x - 1
@@ -858,54 +865,15 @@ contains
        unew(cell_idx, ivar, oct_idx) = uold(cell_idx, ivar, old_oct_idx)
     end do
 
-  end subroutine sort_gather_hydro_impl
-  ! =========================================================================
-
 #ifdef MHD
-  ! =========================================================================
-  attributes(global) subroutine sort_gather_mhd(bnew, bold, swap_global, head_idx, num_octs)
-    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
-    real(kind=dp), device :: bold(1:twotondim,1:6,*)
-    integer(kind=4), device :: swap_global(*)
-    integer(kind=4), intent(in), value :: head_idx
-    integer(kind=4), intent(in), value :: num_octs
-
-    call sort_gather_mhd_impl(bnew, bold, swap_global, head_idx, num_octs)
-
-  end subroutine sort_gather_mhd
-
-  ! =========================================================================
-  attributes(device) subroutine sort_gather_mhd_impl(bnew, bold, swap_global, head_idx, num_octs)
-    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
-    real(kind=dp), device :: bold(1:twotondim,1:6,*)
-    integer(kind=4), device :: swap_global(*)
-    integer(kind=4), intent(in), value :: head_idx
-    integer(kind=4), intent(in), value :: num_octs
-
-    integer :: oct_idx, cell_idx, block_idx, old_oct_idx, ib
-
-    ! Compute block idx
-    block_idx = blockIdx%x - 1
-
-    ! Compute oct idx
-    oct_idx = block_idx * blockDim%y + threadIdx%y - 1
-    if (oct_idx >= num_octs) return
-    oct_idx = head_idx + oct_idx
-
-    ! Compute cell idx
-    cell_idx = threadIdx%x
-
-    ! Update the global swap table
-    old_oct_idx = swap_global(oct_idx)
-
     ! Gather bold into bnew
     do ib = 1, 6
        bnew(cell_idx, ib, oct_idx) = bold(cell_idx, ib, old_oct_idx)
     end do
-
-  end subroutine sort_gather_mhd_impl
-  ! =========================================================================
 #endif
+
+  end subroutine sort_gather_hydro_impl
+  ! =========================================================================
 
   ! =========================================================================
   attributes(global) subroutine sort_scatter_hydro(uold, unew, head_idx, num_octs)
