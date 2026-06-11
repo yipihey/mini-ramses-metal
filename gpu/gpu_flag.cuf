@@ -343,13 +343,13 @@ contains
 
   ! =========================================================================
   attributes(global) subroutine poisson_flag_kernel(flag1, nref, uold, head_idx, num_octs, &
-       & gamma, mass_sph, m_refine, jeans_refine, factG, dx_loc)
+       & gamma, smallr, smallc2, mass_sph, m_refine, jeans_refine, factG, dx_loc)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: nref(1:twotondim,*)
     integer(kind=4), device :: flag1(1:twotondim,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
-    real(kind=dp), intent(in), value :: gamma, factG
+    real(kind=dp), intent(in), value :: gamma, smallr, smallc2, factG
     real(kind=dp), intent(in), value :: mass_sph, dx_loc
     real(kind=dp), intent(in), value :: m_refine, jeans_refine
 
@@ -390,16 +390,16 @@ contains
     if (jeans_refine >= 0) then
 
        ! Convert to primitive variables
-       density    = uold(cell_idx, 1, oct_idx)
+       density    = max(uold(cell_idx, 1, oct_idx), smallr)
        momentum_x = uold(cell_idx, 2, oct_idx)
        momentum_y = uold(cell_idx, 3, oct_idx)
        momentum_z = uold(cell_idx, 4, oct_idx)
        energy     = uold(cell_idx, 5, oct_idx)
        pressure   = energy - 0.5d0*(momentum_x**2 + momentum_y**2 + momentum_z**2) / density
-       pressure   = (gamma - 1d0) * pressure
+       pressure   = max((gamma - 1d0) * pressure, smallc2 * density)
 
        ! Compute Jeans length
-       c_iso = sqrt(max(real(pressure,kind=8) / real(density,kind=8), 1d-20))
+       c_iso = sqrt(pressure / density)
        t_ff = sqrt(ACOS(-1d0) /density / factG)
        jeans_length = c_iso * t_ff
 

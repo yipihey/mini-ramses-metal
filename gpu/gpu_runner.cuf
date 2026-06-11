@@ -112,12 +112,14 @@ contains
 
     integer(kind=4) :: head_idx, num_octs
     integer :: num_threads, num_blocks
-    real(kind=dp) :: gamma, dx, courant_factor
+    real(kind=dp) :: gamma, smallr, smallc2, dx, courant_factor
     real(kind=8), device, dimension(5) :: d_data !mass, ekin, eint, emag, dt
     real(kind=8), dimension(5) :: h_data
 
     courant_factor = sim%r%courant_factor
     gamma = sim%r%gamma
+    smallr = sim%r%smallr
+    smallc2 = sim%r%smallc**2
     dx = sim%r%boxlen/2**ilevel
     dt = courant_factor*dx/sim%r%smallc
 
@@ -132,7 +134,7 @@ contains
     call nvtxStartRange("GPU cmpdt", color=0)!green
     call cmpdt_kernel<<<num_blocks, num_threads>>>(grid, uold, f, &
         & constant_gravity, head_idx, num_octs, d_data, dx, gamma, &
-        & courant_factor)
+        & smallr, smallc2, courant_factor)
     call nvtxEndRange()
 
     ! move results to host
@@ -223,9 +225,11 @@ contains
 
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
-    real(kind=dp) :: gamma
+    real(kind=dp) :: gamma, smallr, smallc2
 
-    gamma = real(sim%r%gamma, kind=dp)
+    gamma = sim%r%gamma
+    smallr = sim%r%smallr
+    smallc2 = sim%r%smallc**2
 
     head_idx = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
@@ -235,7 +239,7 @@ contains
 
     call nvtxStartRange("GPU sync_hydro", color=0)!green
     call sync_hydro<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, f, constant_gravity, &
-         & head_idx, num_octs, gamma, dt)
+         & head_idx, num_octs, gamma, smallr, smallc2, dt)
     call nvtxEndRange()
 
   end subroutine gpu_sync_hydro
@@ -257,10 +261,12 @@ contains
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
     real(kind=8) :: dt
-    real(kind=dp) :: gamma
+    real(kind=dp) :: gamma, smallr, smallc2
 
     dt = 0.5 * sim%g%dtnew(ilevel)
-    gamma = real(sim%r%gamma, kind=dp)
+    gamma = sim%r%gamma
+    smallr = sim%r%smallr
+    smallc2= sim%r%smallc**2
 
     head_idx = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
@@ -270,7 +276,7 @@ contains
 
     call nvtxStartRange("GPU grav_hydro", color=0)!green
     call grav_hydro<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, unew, f, constant_gravity, &
-         & head_idx, num_octs, gamma, dt)
+         & head_idx, num_octs, gamma, smallr, smallc2, dt)
     call nvtxEndRange()
 
   end subroutine gpu_grav_hydro
@@ -320,13 +326,13 @@ contains
     threads_per_block = ((threads_per_block + 31) / 32) * 32
     call hydro_integrator_paper_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
          & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
-         & gamma, smallr, smallc2, dt, dx, slope, riemann, constant_gravity)
+         & gamma, dt, dx, slope, riemann, constant_gravity)
 #else
     if(nsubgrid == 1)threads_per_block = 64
     if(nsubgrid == 2)threads_per_block = 256
     call hydro_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
          & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
-         & gamma, dt, dx, slope, riemann, constant_gravity)
+         & gamma, smallr, smallc2, dt, dx, slope, riemann, constant_gravity)
 #endif
     call GPU_Error_Check(__FILE__, __LINE__)
     call nvtxEndRange()
@@ -351,7 +357,7 @@ contains
     !
     integer(kind=4) :: head_idx, num_octs
     integer(kind=4) :: num_threads, num_blocks
-    real(kind=dp) :: smallr, smallc2
+    real(kind=dp) :: gamma, smallr, smallc2
     logical :: internal_energy
 
     if (sim%r%interpol_var == 1) then
@@ -359,6 +365,7 @@ contains
     else
        internal_energy = .false.
     endif
+    gamma   = sim%r%gamma
     smallr  = sim%r%smallr
     smallc2 = sim%r%smallc**2
 
@@ -370,7 +377,7 @@ contains
     if (num_octs > 0) then
        call nvtxStartRange("GPU upload", color=0)!green
        call upload_kernel<<<num_blocks, num_threads>>>(grid, father, uold, head_idx, num_octs, &
-            & internal_energy, smallr, smallc2)
+            & internal_energy, gamma, smallr, smallc2)
        call nvtxEndRange()
     endif
 
@@ -1025,7 +1032,7 @@ contains
 
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_threads, num_blocks
-    real(kind=dp) :: gamma, err_grad_d, err_grad_p, floor_d, floor_p
+    real(kind=dp) :: gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p
     real(kind=dp) :: m_refine, jeans_refine, mass_sph, dx, factG
     integer(kind=8), device :: nflag_d
     integer(kind=8) :: nflag_h
@@ -1034,6 +1041,8 @@ contains
     factG = 1
     if (sim%r%cosmo) factG = 3d0 / 8d0 /ACOS(-1d0) * sim%g%omega_m * sim%g%aexp
     gamma = sim%r%gamma
+    smallr = sim%r%smallr
+    smallc2 = sim%r%smallc**2
     err_grad_d = sim%r%err_grad_d
     err_grad_p = sim%r%err_grad_p
     floor_d = sim%r%floor_d
@@ -1051,7 +1060,7 @@ contains
     if(num_octs > 0)then
        call nvtxStartRange("GPU user_flag", color=2)!yellow
        call poisson_flag_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(flag1, nref, uold, &
-            & head_idx, num_octs, gamma, mass_sph, m_refine, jeans_refine, factG, dx)
+            & head_idx, num_octs, gamma, smallr, smallc2, mass_sph, m_refine, jeans_refine, factG, dx)
        call nvtxEndRange()
     endif
 
@@ -1064,7 +1073,7 @@ contains
        if(num_octs > 0)then
           call nvtxStartRange("GPU user_flag", color=2)!yellow
           call hydro_flag_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(flag1, grid, nbor, uold, &
-               & head_idx, num_octs, gamma, err_grad_d, err_grad_p, floor_d, floor_p)
+               & head_idx, num_octs, gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p)
           call nvtxEndRange()
        endif
     endif
