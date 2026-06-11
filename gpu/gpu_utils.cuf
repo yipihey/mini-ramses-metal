@@ -20,9 +20,14 @@ module gpu_utils
   !> where the inner 2 by 2 by 2 cells are "real" and the outer 2 cells are ghost/halo cells.
   !> Can either be used on it's own or allocated in shared memory. Note that it is zero
   !> indexed to make 1D to 3D indexing easier.
-  !> Under MHD it additionally carries the *cell-centred* magnetic field
-  !> (Bx, By, Bz) computed as 0.5*(B_left + B_right) per axis from the
-  !> face-centred B field.
+  !> Under MHD the cell-centred magnetic field is NOT stored: every consumer
+  !> recomputes it as 0.5*(bf_low + bf_high) from the shared face-B buffer
+  !> (bitwise equal to the CPU ctoprim cell-centring because the two stored
+  !> copies of each face are maintained bitwise identical -- the face-B
+  !> redundancy invariant). Under MHD `refined` is also stored byte-wide and
+  !> only on the consumed [1, 2*nsubgrid+2]^3 lattice (zero_fine_fluxes /
+  !> zero_fine_emf read nothing outside it) -- both are shared-memory
+  !> occupancy savings for the MHD integrator kernel.
   type, public :: subgrid_6x6x6cell_primitive
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: density
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_x
@@ -30,11 +35,10 @@ module gpu_utils
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_z
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: pressure
 #ifdef MHD
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: Bx
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: By
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: Bz
-#endif
+     logical(kind=1), dimension(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2) :: refined
+#else
      logical      , dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: refined
+#endif
   end type subgrid_6x6x6cell_primitive
 
   !> @brief

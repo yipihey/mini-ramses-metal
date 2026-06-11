@@ -103,11 +103,16 @@ module hydro_device
 
 #ifdef MHD
   !> @brief
-  !> Face-centred magnetic field subgrid (CPU h%bf).
+  !> Face-centred magnetic field subgrid (CPU h%bf). Exact extents: each
+  !> component drops the outermost LOW plane along its own axis (bx(0,*,*) /
+  !> by(*,0,*) / bz(*,*,0)) -- those faces would need an oct outside the 3x3x3
+  !> nbor stencil and were verified unread by every consumer (edge_e phase
+  !> reads bx at i>=1 cyclically, the trace and the cell-B recompute read
+  !> bx/by/bz at their own-axis index >= 1).
   type, public :: subgrid_face_b_t
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: bx
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: by
-     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: bz
+     real(kind=dp), dimension(1:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: bx
+     real(kind=dp), dimension(0:2*nsubgrid+3, 1:2*nsubgrid+3, 0:2*nsubgrid+3) :: by
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:2*nsubgrid+3) :: bz
   end type subgrid_face_b_t
 
   !> @brief
@@ -316,10 +321,14 @@ contains
   !> @param[in] slope : The slope limiter id (0: 1st order, 1: minmod, 2: moncen)
   !> @param[out] slopes_x, slopes_y, slopes_z : The limited half*dq slopes
   !> @param[in] scalar_sub (MHD) : The passive-scalar subgrid (1:nvar-5)
+  !> @param[in] bf (MHD) : The face-continuous face-B buffer (the cell-centred
+  !>           B of this cell and its 6 face neighbours is recomputed here as
+  !>           0.5*(bf_low + bf_high) -- bitwise equal to the formerly stored
+  !>           cell-centred B under the face-B redundancy invariant)
   !> @param[out] dscal_x, dscal_y, dscal_z (MHD) : The limited half*dq scalar slopes
   attributes(device) subroutine compute_tvd_slopes(local_subgrid, i, j, k, slope, &
 #ifdef MHD
-       & scalar_sub, dscal_x, dscal_y, dscal_z, &
+       & scalar_sub, bf, dscal_x, dscal_y, dscal_z, &
 #endif
        & slopes_x, slopes_y, slopes_z)
     type(subgrid_6x6x6cell_primitive), intent(in) :: local_subgrid
@@ -328,8 +337,13 @@ contains
     type(primitive_t) :: cell
 #ifdef MHD
     real(kind=dp), intent(in) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
+    type(subgrid_face_b_t), intent(in) :: bf
     real(kind=dp), intent(out) :: dscal_x(1:nscalar_mhd), dscal_y(1:nscalar_mhd), dscal_z(1:nscalar_mhd)
     real(kind=dp) :: rscal
+    real(kind=dp) :: Bxc, Byc, Bzc
+    real(kind=dp) :: Byc_xm, Byc_xp, Bzc_xm, Bzc_xp
+    real(kind=dp) :: Bxc_ym, Bxc_yp, Bzc_ym, Bzc_yp
+    real(kind=dp) :: Bxc_zm, Bxc_zp, Byc_zm, Byc_zp
     integer :: n
 #endif
 
@@ -340,9 +354,22 @@ contains
     cell%velocity_z = local_subgrid%velocity_z(i, j, k)
     cell%pressure   = local_subgrid%pressure  (i, j, k)
 #ifdef MHD
-    cell%Bx         = local_subgrid%Bx(i, j, k)
-    cell%By         = local_subgrid%By(i, j, k)
-    cell%Bz         = local_subgrid%Bz(i, j, k)
+    ! Cell-centred B of this cell and of the 6 face neighbours, from bf
+    Bxc    = 0.5_dp*(bf%bx(i  ,j,k) + bf%bx(i+1,j  ,k))
+    Byc    = 0.5_dp*(bf%by(i,j  ,k) + bf%by(i  ,j+1,k))
+    Bzc    = 0.5_dp*(bf%bz(i,j,k  ) + bf%bz(i  ,j,k+1))
+    Byc_xm = 0.5_dp*(bf%by(i-1,j,k) + bf%by(i-1,j+1,k))
+    Byc_xp = 0.5_dp*(bf%by(i+1,j,k) + bf%by(i+1,j+1,k))
+    Bzc_xm = 0.5_dp*(bf%bz(i-1,j,k) + bf%bz(i-1,j,k+1))
+    Bzc_xp = 0.5_dp*(bf%bz(i+1,j,k) + bf%bz(i+1,j,k+1))
+    Bxc_ym = 0.5_dp*(bf%bx(i,j-1,k) + bf%bx(i+1,j-1,k))
+    Bxc_yp = 0.5_dp*(bf%bx(i,j+1,k) + bf%bx(i+1,j+1,k))
+    Bzc_ym = 0.5_dp*(bf%bz(i,j-1,k) + bf%bz(i,j-1,k+1))
+    Bzc_yp = 0.5_dp*(bf%bz(i,j+1,k) + bf%bz(i,j+1,k+1))
+    Bxc_zm = 0.5_dp*(bf%bx(i,j,k-1) + bf%bx(i+1,j,k-1))
+    Bxc_zp = 0.5_dp*(bf%bx(i,j,k+1) + bf%bx(i+1,j,k+1))
+    Byc_zm = 0.5_dp*(bf%by(i,j,k-1) + bf%by(i,j+1,k-1))
+    Byc_zp = 0.5_dp*(bf%by(i,j,k+1) + bf%by(i,j+1,k+1))
 #endif
 
     slopes_x%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i - 1, j, k), cell%density,    local_subgrid%density   (i + 1, j, k), slope)
@@ -351,12 +378,14 @@ contains
     slopes_x%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i - 1, j, k), cell%velocity_z, local_subgrid%velocity_z(i + 1, j, k), slope)
     slopes_x%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i - 1, j, k), cell%pressure,   local_subgrid%pressure  (i + 1, j, k), slope)
 #ifdef MHD
-    ! All three B slopes are returned per direction (mirroring CPU uslope, which
-    ! limits every primitive); the trace consumes only the transverse ones (the
-    ! normal B is face-predicted).
-    slopes_x%Bx         = 0.5_dp * slope_moncen(local_subgrid%Bx(i - 1, j, k), cell%Bx, local_subgrid%Bx(i + 1, j, k), slope)
-    slopes_x%By         = 0.5_dp * slope_moncen(local_subgrid%By(i - 1, j, k), cell%By, local_subgrid%By(i + 1, j, k), slope)
-    slopes_x%Bz         = 0.5_dp * slope_moncen(local_subgrid%Bz(i - 1, j, k), cell%Bz, local_subgrid%Bz(i + 1, j, k), slope)
+    ! Transverse B slopes only, on the bf-derived cell-centred B. The normal-B
+    ! slopes (slopes_x%Bx / slopes_y%By / slopes_z%Bz) are consumed by NOTHING
+    ! (the normal B is face-predicted in the trace), so they are zero-filled
+    ! instead of computed -- 3 limiter evaluations and their stencil loads
+    ! removed per cell.
+    slopes_x%Bx         = 0.0_dp
+    slopes_x%By         = 0.5_dp * slope_moncen(Byc_xm, Byc, Byc_xp, slope)
+    slopes_x%Bz         = 0.5_dp * slope_moncen(Bzc_xm, Bzc, Bzc_xp, slope)
 #endif
 
     slopes_y%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i, j - 1, k), cell%density,    local_subgrid%density(   i, j + 1, k), slope)
@@ -365,9 +394,9 @@ contains
     slopes_y%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i, j - 1, k), cell%velocity_z, local_subgrid%velocity_z(i, j + 1, k), slope)
     slopes_y%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i, j - 1, k), cell%pressure,   local_subgrid%pressure(  i, j + 1, k), slope)
 #ifdef MHD
-    slopes_y%Bx         = 0.5_dp * slope_moncen(local_subgrid%Bx(i, j - 1, k), cell%Bx, local_subgrid%Bx(i, j + 1, k), slope)
-    slopes_y%By         = 0.5_dp * slope_moncen(local_subgrid%By(i, j - 1, k), cell%By, local_subgrid%By(i, j + 1, k), slope)
-    slopes_y%Bz         = 0.5_dp * slope_moncen(local_subgrid%Bz(i, j - 1, k), cell%Bz, local_subgrid%Bz(i, j + 1, k), slope)
+    slopes_y%Bx         = 0.5_dp * slope_moncen(Bxc_ym, Bxc, Bxc_yp, slope)
+    slopes_y%By         = 0.0_dp
+    slopes_y%Bz         = 0.5_dp * slope_moncen(Bzc_ym, Bzc, Bzc_yp, slope)
 #endif
 
     slopes_z%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i, j, k - 1), cell%density,    local_subgrid%density   (i, j, k + 1), slope)
@@ -376,9 +405,9 @@ contains
     slopes_z%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i, j, k - 1), cell%velocity_z, local_subgrid%velocity_z(i, j, k + 1), slope)
     slopes_z%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i, j, k - 1), cell%pressure,   local_subgrid%pressure  (i, j, k + 1), slope)
 #ifdef MHD
-    slopes_z%Bx         = 0.5_dp * slope_moncen(local_subgrid%Bx(i, j, k - 1), cell%Bx, local_subgrid%Bx(i, j, k + 1), slope)
-    slopes_z%By         = 0.5_dp * slope_moncen(local_subgrid%By(i, j, k - 1), cell%By, local_subgrid%By(i, j, k + 1), slope)
-    slopes_z%Bz         = 0.5_dp * slope_moncen(local_subgrid%Bz(i, j, k - 1), cell%Bz, local_subgrid%Bz(i, j, k + 1), slope)
+    slopes_z%Bx         = 0.5_dp * slope_moncen(Bxc_zm, Bxc, Bxc_zp, slope)
+    slopes_z%By         = 0.5_dp * slope_moncen(Byc_zm, Byc, Byc_zp, slope)
+    slopes_z%Bz         = 0.0_dp
 
     ! Passive-scalar slopes (consumed by the scalar advection predictor, C1)
     do n = 1, nvar-5
@@ -1340,35 +1369,36 @@ contains
        ! -1 -> the low-d neighbouring oct (fetched via the periodic nbor stencil,
        ! like load_bfield in 6e6a715b). The OUTERMOST low faces bx(0,*,*)/by(*,0,*)/
        ! bz(*,*,0) would need an oct outside the 3x3x3 nbor stencil; they are never
-       ! read (edge_e reads bx at i>=1, by at j>=1, bz at k>=1; the trace reads
-       ! bx/by/bz at index>=1), so we fill them with the cell's own low face -- a
-       ! harmless unread value -- and skip the out-of-stencil oct fetch.
+       ! read (edge_e reads bx at i>=1, by at j>=1, bz at k>=1; the trace and the
+       ! cell-B recompute read bx/by/bz at their own-axis index >= 1), so the
+       ! trimmed subgrid_face_b_t no longer stores them and the fill skips both
+       ! the write and the out-of-stencil oct fetch.
        ! Low-x face of this cell:
-       if (i == 0) then
-          bf%bx(i,j,k) = b0(1)
-       else if (iii(cell_idx,1) == 0) then
-          bf%bx(i,j,k) = 0.5_dp*(b0(1) + bold(hhh(cell_idx,1), 4, source_idx))
-       else
-          ind_nbor_xm = (i_subgrid_idx-1) + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx + 1
-          bf%bx(i,j,k) = 0.5_dp*(b0(1) + bold(hhh(cell_idx,1), 4, nbor(ind_nbor_xm, subgrid_idx)))
+       if (i >= 1) then
+          if (iii(cell_idx,1) == 0) then
+             bf%bx(i,j,k) = 0.5_dp*(b0(1) + bold(hhh(cell_idx,1), 4, source_idx))
+          else
+             ind_nbor_xm = (i_subgrid_idx-1) + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx + 1
+             bf%bx(i,j,k) = 0.5_dp*(b0(1) + bold(hhh(cell_idx,1), 4, nbor(ind_nbor_xm, subgrid_idx)))
+          endif
        endif
        ! Low-y face of this cell:
-       if (j == 0) then
-          bf%by(i,j,k) = b0(2)
-       else if (iii(cell_idx,3) == 0) then
-          bf%by(i,j,k) = 0.5_dp*(b0(2) + bold(hhh(cell_idx,3), 5, source_idx))
-       else
-          ind_nbor_ym = i_subgrid_idx + nsubgridp2*(j_subgrid_idx-1) + nsubgridp2sq*k_subgrid_idx + 1
-          bf%by(i,j,k) = 0.5_dp*(b0(2) + bold(hhh(cell_idx,3), 5, nbor(ind_nbor_ym, subgrid_idx)))
+       if (j >= 1) then
+          if (iii(cell_idx,3) == 0) then
+             bf%by(i,j,k) = 0.5_dp*(b0(2) + bold(hhh(cell_idx,3), 5, source_idx))
+          else
+             ind_nbor_ym = i_subgrid_idx + nsubgridp2*(j_subgrid_idx-1) + nsubgridp2sq*k_subgrid_idx + 1
+             bf%by(i,j,k) = 0.5_dp*(b0(2) + bold(hhh(cell_idx,3), 5, nbor(ind_nbor_ym, subgrid_idx)))
+          endif
        endif
        ! Low-z face of this cell:
-       if (k == 0) then
-          bf%bz(i,j,k) = b0(3)
-       else if (iii(cell_idx,5) == 0) then
-          bf%bz(i,j,k) = 0.5_dp*(b0(3) + bold(hhh(cell_idx,5), 6, source_idx))
-       else
-          ind_nbor_zm = i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*(k_subgrid_idx-1) + 1
-          bf%bz(i,j,k) = 0.5_dp*(b0(3) + bold(hhh(cell_idx,5), 6, nbor(ind_nbor_zm, subgrid_idx)))
+       if (k >= 1) then
+          if (iii(cell_idx,5) == 0) then
+             bf%bz(i,j,k) = 0.5_dp*(b0(3) + bold(hhh(cell_idx,5), 6, source_idx))
+          else
+             ind_nbor_zm = i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*(k_subgrid_idx-1) + 1
+             bf%bz(i,j,k) = 0.5_dp*(b0(3) + bold(hhh(cell_idx,5), 6, nbor(ind_nbor_zm, subgrid_idx)))
+          endif
        endif
 
        ! Cell-centred B = average of the two opposing faces of THIS cell.
@@ -1391,9 +1421,6 @@ contains
        smalle = smallc**2/gamma/(gamma - 1.0_dp)
        eint = max(uold(cell_idx,5,source_idx) - Ekin - emag, smalle*rho)
        primitive%pressure = (gamma - 1.0_dp)*eint
-       primitive%Bx = Bxc
-       primitive%By = Byc
-       primitive%Bz = Bzc
 #else
        ! Load the cell
        conserved%density    = uold(cell_idx, 1, source_idx)
@@ -1424,18 +1451,26 @@ contains
        local_subgrid%velocity_z(i, j, k) = primitive%velocity_z
        local_subgrid%pressure  (i, j, k) = primitive%pressure
 #ifdef MHD
-       local_subgrid%Bx(i, j, k) = primitive%Bx
-       local_subgrid%By(i, j, k) = primitive%By
-       local_subgrid%Bz(i, j, k) = primitive%Bz
+       ! The cell-centred B is NOT stored: consumers recompute it from the
+       ! shared bf as 0.5*(bf_low + bf_high), which is bitwise equal to the
+       ! own-face average used for the pressure correction above as long as
+       ! the two stored copies of each face are bitwise identical (the face-B
+       ! redundancy invariant the CT update preserves).
 
        ! Passive scalars q(ie+n) = uold(5+n)/rho (CPU ctoprim:1870-1879).
        do n = 1, nvar-5
           scalar_sub(i, j, k, n) = uold(cell_idx, 5+n, source_idx) * invD
        end do
-#endif
 
+       ! Store refinement map (MHD stores only the consumed lattice)
+       if (i >= 1 .and. i <= 2*nsubgrid+2 .and. j >= 1 .and. j <= 2*nsubgrid+2 &
+            & .and. k >= 1 .and. k <= 2*nsubgrid+2) then
+          local_subgrid%refined(i, j, k) = grid(source_idx)%refined(cell_idx)
+       endif
+#else
        ! Store refinement map
        local_subgrid%refined   (i, j, k) = grid(source_idx)%refined(cell_idx)
+#endif
 
     end do
 
@@ -1601,6 +1636,15 @@ contains
        CL = bf%bz(i  ,j  ,k  )
        CR = bf%bz(i  ,j  ,k+1)
 
+       ! ---- Cell-centred B = mean of the two UNPREDICTED faces ----------------
+       ! Replaces the formerly stored local_subgrid%Bx/By/Bz (CPU ctoprim q(6:8));
+       ! bitwise equal to the own-face average under the face-B redundancy
+       ! invariant, and free: AL..CR are already in registers. Must be taken
+       ! BEFORE the curl predictor advances AL..CR below.
+       A = half*(AL+AR)
+       B = half*(BL+BR)
+       C = half*(CL+CR)
+
        ! ---- Face-centred transverse slopes (0.5*dbf; CPU trace3d:969-982) -----
        ! Recomputed inline from the shared bf via face_b_tvd_slope (B3) -- the
        ! CPU stages these in h%dbf / the old GPU spilled them to global scratch;
@@ -1651,21 +1695,19 @@ contains
        cell%velocity_z = local_subgrid%velocity_z(i, j, k)
        cell%pressure   = local_subgrid%pressure  (i, j, k)
 #ifdef MHD
-       ! CPU trace3d scalar names: original (pre-predictor) cell values + cell B
+       ! CPU trace3d scalar names: original (pre-predictor) cell values (the
+       ! cell-centred B A/B/C was formed from AL..CR above)
        r = local_subgrid%density   (i,j,k)
        u = local_subgrid%velocity_x(i,j,k)
        v = local_subgrid%velocity_y(i,j,k)
        w = local_subgrid%velocity_z(i,j,k)
        p = local_subgrid%pressure  (i,j,k)
-       A = local_subgrid%Bx(i,j,k)
-       B = local_subgrid%By(i,j,k)
-       C = local_subgrid%Bz(i,j,k)
 #endif
 
        ! Compute the TVD Slopes (dedicated device function, v4.1; half*dq)
        call compute_tvd_slopes(local_subgrid, i, j, k, slope, &
 #ifdef MHD
-            & scalar_sub, dscal_x, dscal_y, dscal_z, &
+            & scalar_sub, bf, dscal_x, dscal_y, dscal_z, &
 #endif
             & slopes_x, slopes_y, slopes_z)
 #ifdef MHD
@@ -2001,13 +2043,14 @@ contains
        end if
 
        ! ---- Passive-scalar advection predictor (CPU trace3d:1423-1448) --------
-       ! Uses the ORIGINAL cell velocities (re-read from local_subgrid), not predicted.
+       ! Uses the ORIGINAL cell velocities (re-read from local_subgrid once,
+       ! hoisted out of the scalar loop), not predicted.
        ! Scalar slopes come from compute_tvd_slopes (dscal_*, v4.1).
+       u = local_subgrid%velocity_x(i,j,k)
+       v = local_subgrid%velocity_y(i,j,k)
+       w = local_subgrid%velocity_z(i,j,k)
        do n = 1, nvar-5
           rscal = scalar_sub(i,j,k,n)
-          u = local_subgrid%velocity_x(i,j,k)
-          v = local_subgrid%velocity_y(i,j,k)
-          w = local_subgrid%velocity_z(i,j,k)
           drx = dscal_x(n)
           dry = dscal_y(n)
           drz = dscal_z(n)
@@ -2297,12 +2340,125 @@ contains
     type(primitive_t) :: left_interface, right_interface
     type(conserved_t) :: flux
 #ifdef MHD
-    real(kind=dp) :: SL, SR, sLin, sRin
+    real(kind=dp) :: SL, SR
+    real(kind=dp) :: sLin(1:nscalar_mhd), sRin(1:nscalar_mhd), fscal(1:nscalar_mhd)
     integer :: n
 #endif
 
     interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
 
+#ifdef MHD
+    ! Unified gather -> ONE solver call site -> scatter. The three direction
+    ! sub-branches split lanes of the SAME warp (x: work_idx < 12, y: < 24,
+    ! z: < 36 at nsubgrid=1), so branching the full solver per direction made
+    ! each warp execute the inlined HLLD/HLL body once per sub-branch it
+    ! covers (up to 3x serially) and inlined three copies of the solver into
+    ! the kernel text. Here only the cheap frame permutations diverge; the 1D
+    ! solver, wave speeds and passive-scalar flux run convergently at a single
+    ! call site. Frames and operands are IDENTICAL to the former per-branch
+    ! code (y = the CPU cmpflxm SWAP frame, z = the cyclic frame), so the
+    ! arithmetic is bitwise unchanged.
+    do work_idx = thread_idx, interface_array_size * 3 - 1, blockDim%x
+       if (work_idx < interface_array_size) then
+          ! X interfaces: normal frame is identity
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
+          left_interface%density    = left_interfaces_x%density(i,j,k)
+          left_interface%velocity_x = left_interfaces_x%velocity_x(i,j,k)
+          left_interface%velocity_y = left_interfaces_x%velocity_y(i,j,k)
+          left_interface%velocity_z = left_interfaces_x%velocity_z(i,j,k)
+          left_interface%pressure   = left_interfaces_x%pressure(i,j,k)
+          left_interface%Bx = left_interfaces_x%Bx(i,j,k); left_interface%By = left_interfaces_x%By(i,j,k); left_interface%Bz = left_interfaces_x%Bz(i,j,k)
+          right_interface%density    = right_interfaces_x%density(i,j,k)
+          right_interface%velocity_x = right_interfaces_x%velocity_x(i,j,k)
+          right_interface%velocity_y = right_interfaces_x%velocity_y(i,j,k)
+          right_interface%velocity_z = right_interfaces_x%velocity_z(i,j,k)
+          right_interface%pressure   = right_interfaces_x%pressure(i,j,k)
+          right_interface%Bx = right_interfaces_x%Bx(i,j,k); right_interface%By = right_interfaces_x%By(i,j,k); right_interface%Bz = right_interfaces_x%Bz(i,j,k)
+          do n = 1, nvar-5
+             sLin(n) = left_interfaces_x%scalar(i,j,k,n); sRin(n) = right_interfaces_x%scalar(i,j,k,n)
+          end do
+       else if (work_idx < 2 * interface_array_size) then
+          ! Y interfaces: normal=vy/By, t1=vx/Bx, t2=vz/Bz (the CPU cmpflxm
+          ! ln/lt1/lt2 SWAP frame -- the hydro build keeps its cyclic Y frame
+          ! in the #else loop below; the two send different states through the
+          ! solver's t1/t2 slots and must not be merged)
+          call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
+          left_interface%density = left_interfaces_y%density(i,j,k);  left_interface%pressure = left_interfaces_y%pressure(i,j,k)
+          left_interface%velocity_x = left_interfaces_y%velocity_y(i,j,k); left_interface%velocity_y = left_interfaces_y%velocity_x(i,j,k)
+          left_interface%velocity_z = left_interfaces_y%velocity_z(i,j,k)
+          left_interface%Bx = left_interfaces_y%By(i,j,k); left_interface%By = left_interfaces_y%Bx(i,j,k); left_interface%Bz = left_interfaces_y%Bz(i,j,k)
+          right_interface%density = right_interfaces_y%density(i,j,k); right_interface%pressure = right_interfaces_y%pressure(i,j,k)
+          right_interface%velocity_x = right_interfaces_y%velocity_y(i,j,k); right_interface%velocity_y = right_interfaces_y%velocity_x(i,j,k)
+          right_interface%velocity_z = right_interfaces_y%velocity_z(i,j,k)
+          right_interface%Bx = right_interfaces_y%By(i,j,k); right_interface%By = right_interfaces_y%Bx(i,j,k); right_interface%Bz = right_interfaces_y%Bz(i,j,k)
+          do n = 1, nvar-5
+             sLin(n) = left_interfaces_y%scalar(i,j,k,n); sRin(n) = right_interfaces_y%scalar(i,j,k,n)
+          end do
+       else
+          ! Z interfaces: normal=vz/Bz, t1=vx/Bx, t2=vy/By (cyclic frame, same
+          ! as the hydro Z gather)
+          call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
+          left_interface%density    = left_interfaces_z%density(i,j,k)
+          left_interface%velocity_x = left_interfaces_z%velocity_z(i,j,k)
+          left_interface%velocity_y = left_interfaces_z%velocity_x(i,j,k)
+          left_interface%velocity_z = left_interfaces_z%velocity_y(i,j,k)
+          left_interface%pressure   = left_interfaces_z%pressure(i,j,k)
+          left_interface%Bx = left_interfaces_z%Bz(i,j,k); left_interface%By = left_interfaces_z%Bx(i,j,k); left_interface%Bz = left_interfaces_z%By(i,j,k)
+          right_interface%density    = right_interfaces_z%density(i,j,k)
+          right_interface%velocity_x = right_interfaces_z%velocity_z(i,j,k)
+          right_interface%velocity_y = right_interfaces_z%velocity_x(i,j,k)
+          right_interface%velocity_z = right_interfaces_z%velocity_y(i,j,k)
+          right_interface%pressure   = right_interfaces_z%pressure(i,j,k)
+          right_interface%Bx = right_interfaces_z%Bz(i,j,k); right_interface%By = right_interfaces_z%Bx(i,j,k); right_interface%Bz = right_interfaces_z%By(i,j,k)
+          do n = 1, nvar-5
+             sLin(n) = left_interfaces_z%scalar(i,j,k,n); sRin(n) = right_interfaces_z%scalar(i,j,k,n)
+          end do
+       end if
+
+       ! The ONE solver call site (convergent across the warp). Order matches
+       ! the former per-branch code: core flux, wave speeds, scalar fluxes.
+       flux = riemann_mhd_fluxes(left_interface, right_interface, gamma, smallr, smallc, riemann)
+       call hll_mhd_wavespeeds(left_interface, right_interface, gamma, smallr, smallc, SL, SR)
+       do n = 1, nvar-5
+          fscal(n) = mhd_scalar_flux(riemann, flux%density, SL, SR, &
+               & max(left_interface%density,smallr), left_interface%velocity_x, sLin(n), &
+               & max(right_interface%density,smallr), right_interface%velocity_x, sRin(n))
+       end do
+
+       ! Per-direction scatter (inverse frame permutation)
+       if (work_idx < interface_array_size) then
+          left_interfaces_x%density   (i,j,k) = flux%density
+          left_interfaces_x%velocity_x(i,j,k) = flux%momentum_x
+          left_interfaces_x%velocity_y(i,j,k) = flux%momentum_y
+          left_interfaces_x%velocity_z(i,j,k) = flux%momentum_z
+          left_interfaces_x%pressure  (i,j,k) = flux%energy
+          left_interfaces_x%Bx(i,j,k) = flux%Bx; left_interfaces_x%By(i,j,k) = flux%By; left_interfaces_x%Bz(i,j,k) = flux%Bz
+          do n = 1, nvar-5
+             left_interfaces_x%scalar(i,j,k,n) = fscal(n)
+          end do
+       else if (work_idx < 2 * interface_array_size) then
+          left_interfaces_y%density(i,j,k) = flux%density
+          left_interfaces_y%velocity_y(i,j,k) = flux%momentum_x   ! normal momentum
+          left_interfaces_y%velocity_x(i,j,k) = flux%momentum_y   ! tangential 1
+          left_interfaces_y%velocity_z(i,j,k) = flux%momentum_z   ! tangential 2
+          left_interfaces_y%pressure(i,j,k) = flux%energy
+          left_interfaces_y%By(i,j,k) = flux%Bx; left_interfaces_y%Bx(i,j,k) = flux%By; left_interfaces_y%Bz(i,j,k) = flux%Bz
+          do n = 1, nvar-5
+             left_interfaces_y%scalar(i,j,k,n) = fscal(n)
+          end do
+       else
+          left_interfaces_z%density   (i,j,k) = flux%density
+          left_interfaces_z%velocity_x(i,j,k) = flux%momentum_y
+          left_interfaces_z%velocity_y(i,j,k) = flux%momentum_z
+          left_interfaces_z%velocity_z(i,j,k) = flux%momentum_x
+          left_interfaces_z%pressure  (i,j,k) = flux%energy
+          left_interfaces_z%Bz(i,j,k) = flux%Bx; left_interfaces_z%Bx(i,j,k) = flux%By; left_interfaces_z%By(i,j,k) = flux%Bz
+          do n = 1, nvar-5
+             left_interfaces_z%scalar(i,j,k,n) = fscal(n)
+          end do
+       end if
+    end do
+#else
     do work_idx = thread_idx, interface_array_size * 3 - 1, blockDim%x
        if (work_idx < interface_array_size) then ! Compute fluxes across the x interfaces
           ! Compute the indices in the interface state arrays
@@ -2320,19 +2476,9 @@ contains
           right_interface%velocity_y = right_interfaces_x%velocity_y(i,j,k)
           right_interface%velocity_z = right_interfaces_x%velocity_z(i,j,k)
           right_interface%pressure   = right_interfaces_x%pressure(i,j,k)
-#ifdef MHD
-          ! X interfaces: normal frame is identity
-          left_interface%Bx = left_interfaces_x%Bx(i,j,k); left_interface%By = left_interfaces_x%By(i,j,k); left_interface%Bz = left_interfaces_x%Bz(i,j,k)
-          right_interface%Bx = right_interfaces_x%Bx(i,j,k); right_interface%By = right_interfaces_x%By(i,j,k); right_interface%Bz = right_interfaces_x%Bz(i,j,k)
-#endif
 
           ! Call the Riemann Solver
-#ifdef MHD
-          flux = riemann_mhd_fluxes(left_interface, right_interface, gamma, smallr, smallc, riemann)
-          call hll_mhd_wavespeeds(left_interface, right_interface, gamma, smallr, smallc, SL, SR)
-#else
           flux = riemann_fluxes(left_interface, right_interface, gamma, riemann)
-#endif
 
           ! Unpack the fluxes into the interface state arrays
           left_interfaces_x%density   (i,j,k) = flux%density
@@ -2340,50 +2486,11 @@ contains
           left_interfaces_x%velocity_y(i,j,k) = flux%momentum_y
           left_interfaces_x%velocity_z(i,j,k) = flux%momentum_z
           left_interfaces_x%pressure  (i,j,k) = flux%energy
-#ifdef MHD
-          left_interfaces_x%Bx(i,j,k) = flux%Bx; left_interfaces_x%By(i,j,k) = flux%By; left_interfaces_x%Bz(i,j,k) = flux%Bz
-          do n = 1, nvar-5
-             sLin = left_interfaces_x%scalar(i,j,k,n); sRin = right_interfaces_x%scalar(i,j,k,n)
-             left_interfaces_x%scalar(i,j,k,n) = mhd_scalar_flux(riemann, flux%density, SL, SR, &
-                  & max(left_interface%density,smallr), left_interface%velocity_x, sLin, max(right_interface%density,smallr), right_interface%velocity_x, sRin)
-          end do
-#endif
 
        else if (work_idx < 2 * interface_array_size) then ! Compute fluxes across the y interfaces
           ! Compute the indices in the interface state arrays
           call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
 
-#ifdef MHD
-          ! Y interfaces: normal=vy/By, t1=vx/Bx, t2=vz/Bz. NOTE this MHD frame
-          ! is a SWAP (matching the CPU cmpflxm ln/lt1/lt2 convention) while the
-          ! hydro Y frame below is a CYCLIC rotation. The two send different
-          ! states through the t1/t2 slots of the solver, so the Y branch cannot
-          ! be merged additively without changing one of them bitwise -- it is
-          ! kept as an alternative block.
-          left_interface%density = left_interfaces_y%density(i,j,k);  left_interface%pressure = left_interfaces_y%pressure(i,j,k)
-          left_interface%velocity_x = left_interfaces_y%velocity_y(i,j,k); left_interface%velocity_y = left_interfaces_y%velocity_x(i,j,k)
-          left_interface%velocity_z = left_interfaces_y%velocity_z(i,j,k)
-          left_interface%Bx = left_interfaces_y%By(i,j,k); left_interface%By = left_interfaces_y%Bx(i,j,k); left_interface%Bz = left_interfaces_y%Bz(i,j,k)
-          right_interface%density = right_interfaces_y%density(i,j,k); right_interface%pressure = right_interfaces_y%pressure(i,j,k)
-          right_interface%velocity_x = right_interfaces_y%velocity_y(i,j,k); right_interface%velocity_y = right_interfaces_y%velocity_x(i,j,k)
-          right_interface%velocity_z = right_interfaces_y%velocity_z(i,j,k)
-          right_interface%Bx = right_interfaces_y%By(i,j,k); right_interface%By = right_interfaces_y%Bx(i,j,k); right_interface%Bz = right_interfaces_y%Bz(i,j,k)
-
-          flux = riemann_mhd_fluxes(left_interface, right_interface, gamma, smallr, smallc, riemann)
-          call hll_mhd_wavespeeds(left_interface, right_interface, gamma, smallr, smallc, SL, SR)
-
-          left_interfaces_y%density(i,j,k) = flux%density
-          left_interfaces_y%velocity_y(i,j,k) = flux%momentum_x   ! normal momentum
-          left_interfaces_y%velocity_x(i,j,k) = flux%momentum_y   ! tangential 1
-          left_interfaces_y%velocity_z(i,j,k) = flux%momentum_z   ! tangential 2
-          left_interfaces_y%pressure(i,j,k) = flux%energy
-          left_interfaces_y%By(i,j,k) = flux%Bx; left_interfaces_y%Bx(i,j,k) = flux%By; left_interfaces_y%Bz(i,j,k) = flux%Bz
-          do n = 1, nvar-5
-             sLin = left_interfaces_y%scalar(i,j,k,n); sRin = right_interfaces_y%scalar(i,j,k,n)
-             left_interfaces_y%scalar(i,j,k,n) = mhd_scalar_flux(riemann, flux%density, SL, SR, &
-                  & max(left_interface%density,smallr), left_interface%velocity_x, sLin, max(right_interface%density,smallr), right_interface%velocity_x, sRin)
-          end do
-#else
           ! Gather the interface states
           left_interface%density    = left_interfaces_y%density(i,j,k)
           left_interface%velocity_x = left_interfaces_y%velocity_y(i,j,k)
@@ -2406,7 +2513,6 @@ contains
           left_interfaces_y%velocity_y(i,j,k) = flux%momentum_x
           left_interfaces_y%velocity_z(i,j,k) = flux%momentum_y
           left_interfaces_y%pressure  (i,j,k) = flux%energy
-#endif
        else ! Compute fluxes across the z interfaces
           ! Compute the indices in the interface state arrays
           call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
@@ -2423,20 +2529,9 @@ contains
           right_interface%velocity_y = right_interfaces_z%velocity_x(i,j,k)
           right_interface%velocity_z = right_interfaces_z%velocity_y(i,j,k)
           right_interface%pressure   = right_interfaces_z%pressure(i,j,k)
-#ifdef MHD
-          ! Z interfaces: normal=vz/Bz, t1=vx/Bx, t2=vy/By (same cyclic frame
-          ! as the hydro gather above)
-          left_interface%Bx = left_interfaces_z%Bz(i,j,k); left_interface%By = left_interfaces_z%Bx(i,j,k); left_interface%Bz = left_interfaces_z%By(i,j,k)
-          right_interface%Bx = right_interfaces_z%Bz(i,j,k); right_interface%By = right_interfaces_z%Bx(i,j,k); right_interface%Bz = right_interfaces_z%By(i,j,k)
-#endif
 
           ! Call the Riemann Solver
-#ifdef MHD
-          flux = riemann_mhd_fluxes(left_interface, right_interface, gamma, smallr, smallc, riemann)
-          call hll_mhd_wavespeeds(left_interface, right_interface, gamma, smallr, smallc, SL, SR)
-#else
           flux = riemann_fluxes(left_interface, right_interface, gamma, riemann)
-#endif
 
           ! Unpack the fluxes into the interface state arrays
           left_interfaces_z%density   (i,j,k) = flux%density
@@ -2444,16 +2539,9 @@ contains
           left_interfaces_z%velocity_y(i,j,k) = flux%momentum_z
           left_interfaces_z%velocity_z(i,j,k) = flux%momentum_x
           left_interfaces_z%pressure  (i,j,k) = flux%energy
-#ifdef MHD
-          left_interfaces_z%Bz(i,j,k) = flux%Bx; left_interfaces_z%Bx(i,j,k) = flux%By; left_interfaces_z%By(i,j,k) = flux%Bz
-          do n = 1, nvar-5
-             sLin = left_interfaces_z%scalar(i,j,k,n); sRin = right_interfaces_z%scalar(i,j,k,n)
-             left_interfaces_z%scalar(i,j,k,n) = mhd_scalar_flux(riemann, flux%density, SL, SR, &
-                  & max(left_interface%density,smallr), left_interface%velocity_x, sLin, max(right_interface%density,smallr), right_interface%velocity_x, sRin)
-          end do
-#endif
        end if
     end do
+#endif
 
     call syncthreads()
 
@@ -3402,11 +3490,18 @@ contains
     integer, parameter :: iqLL = 1, iqRL = 2, iqLR = 3, iqRR = 4
     integer :: work_idx, emf_size, I, J, K
     type(primitive_t) :: qLL, qLR, qRL, qRR
+    real(kind=dp) :: E
 
     ! 18 edges per orientation (v4.1 edge family): 3x3 edge lines in the
     ! transverse plane x 2*nsubgrid segments along the edge direction.
     emf_size = (2*nsubgrid+1)**2 * (2*nsubgrid)
 
+    ! Unified gather -> ONE emf_solve call site -> scatter: the orientation
+    ! sub-branches split lanes of the same warp, so branching the full 2D
+    ! solver per orientation made each warp execute the inlined HLLD/HLL EMF
+    ! body once per sub-branch it covers (and inlined three copies of it).
+    ! Only the cheap per-orientation corner gathers and the one store diverge;
+    ! operands are identical, so the arithmetic is bitwise unchanged.
     do work_idx = thread_idx, emf_size*3 - 1, blockDim%x
        if (work_idx < emf_size) then
           ! ---- EMF z (orientation 3): lp1=2 lp2=3 lor=4, bp1=6 bp2=7 bor=8 ----
@@ -3416,9 +3511,6 @@ contains
           qRL = gather_corner_z(corner_z, iqRL, I, J, K)
           qLR = gather_corner_z(corner_z, iqLR, I, J, K)
           qRR = gather_corner_z(corner_z, iqRR, I, J, K)
-          emfz%edge_e(I,J,K) = emf_solve(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
-               & switch_llf_dmin, switch_llf_pmin, riemann2d)
-
        else if (work_idx < 2*emf_size) then
           ! ---- EMF y (orientation 2): lp1=4 lp2=2 lor=3, bp1=8 bp2=6 bor=7 ----
           ! Edges parallel to y: I,K in [0,2*nsubgrid], J in [0,2*nsubgrid-1].
@@ -3427,9 +3519,6 @@ contains
           qRL = gather_corner_y(corner_y, iqRL, I, J, K)
           qLR = gather_corner_y(corner_y, iqLR, I, J, K)
           qRR = gather_corner_y(corner_y, iqRR, I, J, K)
-          emfy%edge_e(I,J,K) = emf_solve(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
-               & switch_llf_dmin, switch_llf_pmin, riemann2d)
-
        else
           ! ---- EMF x (orientation 1): lp1=3 lp2=4 lor=2, bp1=7 bp2=8 bor=6 ----
           ! Edges parallel to x: J,K in [0,2*nsubgrid], I in [0,2*nsubgrid-1].
@@ -3438,8 +3527,18 @@ contains
           qRL = gather_corner_x(corner_x, iqRL, I, J, K)
           qLR = gather_corner_x(corner_x, iqLR, I, J, K)
           qRR = gather_corner_x(corner_x, iqRR, I, J, K)
-          emfx%edge_e(I,J,K) = emf_solve(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
-               & switch_llf_dmin, switch_llf_pmin, riemann2d)
+       end if
+
+       ! The ONE 2D solver call site (convergent across the warp)
+       E = emf_solve(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
+            & switch_llf_dmin, switch_llf_pmin, riemann2d)
+
+       if (work_idx < emf_size) then
+          emfz%edge_e(I,J,K) = E
+       else if (work_idx < 2*emf_size) then
+          emfy%edge_e(I,J,K) = E
+       else
+          emfx%edge_e(I,J,K) = E
        end if
     end do
 
@@ -3583,39 +3682,55 @@ contains
   ! ##########################################################################
   !
   ! The fused MHD Godunov+CT kernel keeps EVERY working buffer in shared memory
-  ! -- no global scratch, mirroring the hydro kernel. Two observations make the
-  ! footprint fit where the original cell-indexed design (~202 KB) could not:
+  ! -- no global scratch, mirroring the hydro kernel. Four observations shape
+  ! the footprint (1-2 made it fit where the cell-indexed design (~202 KB)
+  ! could not; 3-4 are the 2026-06-11 occupancy diet, NCU-driven: static
+  ! shared was the occupancy limiter at 7 blocks/SM on A100):
   !
   !   1. The four 2D-Riemann corner states are consumed ONLY on the oct's edges
   !      (3x3x2 = 18 edges per orientation at nsubgrid=1, 4 corner slots each),
   !      so they are stored on that edge lattice (the subgrid_*edge_corner
   !      family) instead of the full 6^3 cell lattice: 165888 B -> 12096 B
   !      (the edge-parallel velocity is not stored -- no 2D solver reads it).
-  !      This is the same anisotropic-extent move the v4.1 edge-EMF family made
-  !      for the EMF outputs. The former global spill (mhd_corner_scratch,
-  !      ~162 KB x the level's block count, i.e. tens of GB at production
-  !      grids, plus a full global write+read round-trip per block) is GONE.
   !   2. The face-B transverse slopes (CPU dbf) are a pure 3-point limiter of
   !      the shared bf, so the trace recomputes the 12 values each cell needs
-  !      inline (face_b_tvd_slope) instead of staging 12096 B per block in the
-  !      former mhd_dbf_scratch global array. Cheaper than the round-trip.
+  !      inline (face_b_tvd_slope) instead of staging them anywhere.
+  !   3. The cell-centred B (CPU ctoprim q(6:8)) is NOT stored: every consumer
+  !      recomputes it as 0.5*(bf_low + bf_high) from the shared bf (the trace
+  !      gets it free from the AL..CR registers it already loads). This is
+  !      bitwise equal to the own-face average the CPU stores BECAUSE the two
+  !      stored copies of every face are maintained bitwise identical (the
+  !      face-B redundancy invariant that CT preserves and divB requires).
+  !      -3*216 reals.
+  !   4. Exact extents everywhere: bf drops the never-read outermost low plane
+  !      of each component (-3*36 reals); `refined` is stored byte-wide on the
+  !      consumed [1,2*nsubgrid+2]^3 lattice only (zero_fine_fluxes /
+  !      zero_fine_emf read nothing else); edge_e/emf/corner families were
+  !      already exact.
   !
-  ! Resident shared per block (nsubgrid=1, nvar=8, FP64; logical = 4 B):
-  !   (A) subgrid_6x6x6cell_primitive  8*216*8 + 216*4         = 14688 B
+  ! Resident shared per block (nsubgrid=1, nvar=8, FP64; refined = 1 B):
+  !   (A) subgrid_6x6x6cell_primitive  5*216*8 + 64*1          =  8704 B
   !       scalar_subgrid (nvar-5=3)        3*216*8                 =  5184 B
-  !   (B) subgrid_face_b_t (bf)            3*216*8                 =  5184 B
+  !   (B) subgrid_face_b_t (bf, trimmed)   3*180*8                 =  4320 B
   !   (D) subgrid_edge_e_t (exact extents) 3*(4*5*5)*8             =  2400 B
   !   (E) emfx+emfy+emfz (v4.1 family)     3*18*8                  =   432 B
   !   (F) corner_x/y/z (4 slots * 18 edges
   !       * 7 fields per orientation)      3*4032                  = 12096 B
   !   (G) 6 MHD interface arrays (11-wide) 6*12*11*8               =  6336 B
   !       ------------------------------------------------------------------
-  !       TOTAL resident                                           = 46320 B
-  !                                       = 45.2 KB < 48 KB static limit. OK.
+  !       TOTAL resident                                           = 39472 B
+  !                  = 38.5 KB < 48 KB static limit (was 46320 B = 45.2 KB).
+  !
+  ! At NPRE=4 (the production A100 config) the reals halve: ~19.8 KB static
+  ! (was ~23.6 KB modelled / 20.9 KB by NCU) -> 8-9 blocks/SM on A100
+  ! (164 KB carveout, +1 KB/block driver reserve), up from 7. If the cluster
+  ! ptxas report lands just above a block boundary, the next lever is
+  ! recomputing edge_e inline in the trace (-3*100 reals, +~100 LDS/cell).
   !
   ! Reference: hydro_integrator_kernel resident shared is 12384 B = 12.1 KB
-  ! (subgrid_6x6x6cell_primitive 9504 + 6 interface arrays 2880); MHD is ~3.7x
-  ! that, under the default 48 KB static limit at 64 threads/block -- no opt-in.
+  ! (subgrid_6x6x6cell_primitive 9504 + 6 interface arrays 2880); the hydro
+  ! build is textually untouched by all of the above (every change is inside
+  ! #ifdef MHD).
   ! NOTE: reducing threads/block does NOT shrink per-block shared memory (the
   ! subgrids are sized by nsubgrid, compile-time); raising nsubgrid past 1 will
   ! NOT fit (the corner family alone grows ~5.6x at nsubgrid=2) -- re-derive
@@ -3660,7 +3775,8 @@ contains
     type(subgrid_6x6x6cell_primitive), shared :: local_subgrid
 #ifdef MHD
     ! MHD-only resident shared buffers -- see the shared-memory budget block
-    ! above: 46320 B total at nsubgrid=1, nvar=8 -> fits the 48 KB static limit.
+    ! above: 39472 B total at nsubgrid=1, nvar=8, FP64 (~19.8 KB at NPRE=4)
+    ! -> fits the 48 KB static limit with ~8.5 KB headroom.
     real(kind=dp), shared :: scalar_subgrid(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
     type(subgrid_face_b_t), shared :: bf
     type(subgrid_edge_e_t), shared :: edge_e
