@@ -1,0 +1,44 @@
+This namelist runs a uniform 32^3 Orszag-Tang MHD vortex (levelmin=5 => 2^5 cells).
+Compile using:
+make NDIM=3 MPI=1 HYDRO=1 MHD=1 INIT=OT
+
+&RUN_PARAMS 
+hydro=.true.
+ncontrol=1
+nsubcycle=1,2
+verbose=.true.
+nsuperoct=0
+nrestart=0
+nstepmax=5
+/
+
+&AMR_PARAMS
+levelmin=5
+levelmax=5
+ngridmax=400000
+ngridtot=400000
+nexpand=1
+boxlen=1.0
+/
+
+&INIT_PARAMS
+/
+
+&OUTPUT_PARAMS
+foutput=100
+tout=0.5
+/
+
+&HYDRO_PARAMS
+gamma=1.6666667
+courant_factor=0.8
+slope_type=2
+riemann='hlld'
+riemann2d='hlld'
+/
+
+&REFINE_PARAMS 
+err_grad_p=0.15
+interpol_var=0
+interpol_type=2
+/
