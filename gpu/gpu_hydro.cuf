@@ -2461,6 +2461,9 @@ contains
   ! =========================================================================
 
   ! =========================================================================
+  !> Zero the conserved fluxes at faces touching a refined cell. Under MHD this
+  !> also zeroes the passive-scalar fluxes and the unused-in-3D transverse-B
+  !> advection fluxes, for CPU fidelity (CPU godunov_fine.f90:648-664).
   attributes(device) subroutine zero_fine_fluxes(local_subgrid, fluxes_x, fluxes_y, fluxes_z, thread_idx)
     type(subgrid_6x6x6cell_primitive), intent(in)    :: local_subgrid
     type(subgrid_3x2x2cell_primitive), intent(inout) :: fluxes_x
@@ -2470,6 +2473,9 @@ contains
 
     integer :: work_idx, interface_array_size
     integer :: i, j, k
+#ifdef MHD
+    integer :: n
+#endif
 
     interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
 
@@ -2485,6 +2491,12 @@ contains
              fluxes_x%velocity_y(i, j, k) = 0_dp
              fluxes_x%velocity_z(i, j, k) = 0_dp
              fluxes_x%pressure  (i, j, k) = 0_dp
+#ifdef MHD
+             fluxes_x%Bx(i,j,k) = 0_dp; fluxes_x%By(i,j,k) = 0_dp; fluxes_x%Bz(i,j,k) = 0_dp
+             do n = 1, nvar-5
+                fluxes_x%scalar(i,j,k,n) = 0_dp
+             end do
+#endif
           endif
 
        else if (work_idx < 2 * interface_array_size) then ! Zero fluxes across the y interfaces
@@ -2497,6 +2509,12 @@ contains
              fluxes_y%velocity_y(i, j, k) = 0_dp
              fluxes_y%velocity_z(i, j, k) = 0_dp
              fluxes_y%pressure  (i, j, k) = 0_dp
+#ifdef MHD
+             fluxes_y%Bx(i,j,k) = 0_dp; fluxes_y%By(i,j,k) = 0_dp; fluxes_y%Bz(i,j,k) = 0_dp
+             do n = 1, nvar-5
+                fluxes_y%scalar(i,j,k,n) = 0_dp
+             end do
+#endif
           endif
 
        else ! Zero fluxes across the z interfaces
@@ -2509,6 +2527,12 @@ contains
              fluxes_z%velocity_y(i, j, k) = 0_dp
              fluxes_z%velocity_z(i, j, k) = 0_dp
              fluxes_z%pressure  (i, j, k) = 0_dp
+#ifdef MHD
+             fluxes_z%Bx(i,j,k) = 0_dp; fluxes_z%By(i,j,k) = 0_dp; fluxes_z%Bz(i,j,k) = 0_dp
+             do n = 1, nvar-5
+                fluxes_z%scalar(i,j,k,n) = 0_dp
+             end do
+#endif
           endif
 
        end if
@@ -2520,13 +2544,30 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(device) subroutine conservative_update(unew, nbor, fluxes_x, fluxes_y, fluxes_z, &
+  !> Conservative update at the current level. Under MHD this also updates the
+  !> passive scalars (CPU godunov_fine.f90:764-769) and advances the 6 face-B of
+  !> each cell by the discrete curl of the EMFs (constrained transport, CPU
+  !> godunov_fine.f90:823-861), with the EMF *dt/dx scaling APPLIED EXACTLY ONCE
+  !> HERE (the trace and EMF solve keep raw E). bnew was pre-loaded with bold by
+  !> set_unew, so bnew = bold + dt/dx*curl(E). Each cell writes its own 6 faces
+  !> -- no atomics at the current level (the shared oct-boundary edges get
+  !> identical EMFs from both blocks, preserving the face-B redundancy / divB).
+  attributes(device) subroutine conservative_update(unew, bnew, nbor, fluxes_x, fluxes_y, fluxes_z, &
+#ifdef MHD
+       & emfx, emfy, emfz, &
+#endif
        & head_idx, block_idx, thread_idx, dtdx)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*) ! Unused without MHD
     integer(kind=4), device :: nbor(1:subgridsize,*)
     type(subgrid_3x2x2cell_primitive), intent(in) :: fluxes_x
     type(subgrid_2x3x2cell_primitive), intent(in) :: fluxes_y
     type(subgrid_2x2x3cell_primitive), intent(in) :: fluxes_z
+#ifdef MHD
+    type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
+    type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
+    type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
+#endif
     integer(kind=4), value :: head_idx
     integer, value :: block_idx, thread_idx
     real(kind=dp), value :: dtdx
@@ -2535,6 +2576,10 @@ contains
     integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
     integer :: work_idx, subgrid_idx, oct_idx, cell_idx, ind_nbor
     type(conserved_t) :: update_term
+#ifdef MHD
+    integer :: n
+    real(kind=dp) :: supd, dflux
+#endif
 
     ! Compute the size of the section of the subgrid to operate on
     work_size = 2*nsubgrid
@@ -2597,21 +2642,63 @@ contains
        unew(cell_idx, 4, oct_idx) = unew(cell_idx, 4, oct_idx) + update_term%momentum_z
        unew(cell_idx, 5, oct_idx) = unew(cell_idx, 5, oct_idx) + update_term%energy
 
+#ifdef MHD
+       ! ---- Passive scalars: unew(5+n) += scalar-flux diff --------------------
+       do n = 1, nvar-5
+          supd = (fluxes_x%scalar(i,j,k,n) - fluxes_x%scalar(i+1,j,k,n)) * dtdx &
+               & + (fluxes_y%scalar(i,j,k,n) - fluxes_y%scalar(i,j+1,k,n)) * dtdx &
+               & + (fluxes_z%scalar(i,j,k,n) - fluxes_z%scalar(i,j,k+1,n)) * dtdx
+          unew(cell_idx, 5+n, oct_idx) = unew(cell_idx, 5+n, oct_idx) + supd
+       end do
+
+       ! ---- Constrained-transport update of the 6 face-B (CPU :823-861) -------
+       ! EMF indices are in the per-orientation edge frame (v4.1 family); (i,j,k)
+       ! here is the oct-local cell coord {0,1} (i_subgrid_idx==1 for nsubgrid=1).
+       ! *dtdx ONCE.
+       dflux = ( (emfy%edge_e(i,j,k)-emfy%edge_e(i,j,k+1)) - (emfz%edge_e(i,j,k)-emfz%edge_e(i,j+1,k)) ) * dtdx
+       bnew(cell_idx, 1, oct_idx) = bnew(cell_idx, 1, oct_idx) + dflux
+       dflux = ( (emfy%edge_e(i+1,j,k)-emfy%edge_e(i+1,j,k+1)) - (emfz%edge_e(i+1,j,k)-emfz%edge_e(i+1,j+1,k)) ) * dtdx
+       bnew(cell_idx, 4, oct_idx) = bnew(cell_idx, 4, oct_idx) + dflux
+       dflux = ( (emfz%edge_e(i,j,k)-emfz%edge_e(i+1,j,k)) - (emfx%edge_e(i,j,k)-emfx%edge_e(i,j,k+1)) ) * dtdx
+       bnew(cell_idx, 2, oct_idx) = bnew(cell_idx, 2, oct_idx) + dflux
+       dflux = ( (emfz%edge_e(i,j+1,k)-emfz%edge_e(i+1,j+1,k)) - (emfx%edge_e(i,j+1,k)-emfx%edge_e(i,j+1,k+1)) ) * dtdx
+       bnew(cell_idx, 5, oct_idx) = bnew(cell_idx, 5, oct_idx) + dflux
+       dflux = ( (emfx%edge_e(i,j,k)-emfx%edge_e(i,j+1,k)) - (emfy%edge_e(i,j,k)-emfy%edge_e(i+1,j,k)) ) * dtdx
+       bnew(cell_idx, 3, oct_idx) = bnew(cell_idx, 3, oct_idx) + dflux
+       dflux = ( (emfx%edge_e(i,j,k+1)-emfx%edge_e(i,j+1,k+1)) - (emfy%edge_e(i,j,k+1)-emfy%edge_e(i+1,j,k+1)) ) * dtdx
+       bnew(cell_idx, 6, oct_idx) = bnew(cell_idx, 6, oct_idx) + dflux
+#endif
+
     end do
 
   end subroutine conservative_update
   ! =========================================================================
 
   ! =========================================================================
-  attributes(device) subroutine coarse_cell_update(grid, unew, father, nbor, fluxes_x, fluxes_y, fluxes_z, &
+  !> Coarse/fine flux correction into the parent level. Under MHD it also
+  !> corrects the passive scalars (unew slot 5+n from the scalar flux) and, in
+  !> Part 2, applies the coarse/fine EMF correction (CPU godunov_fine.f90:
+  !> 1037-1282): at each of the central oct's 12 boundary edges the fine EMF is
+  !> averaged (*0.25*weight) into the coarse face-B of whichever of the (up to
+  !> 3) octs sharing the edge are coarse; weight=0.5 if any sharer is refined.
+  attributes(device) subroutine coarse_cell_update(grid, unew, bnew, father, nbor, fluxes_x, fluxes_y, fluxes_z, &
+#ifdef MHD
+       & emfx, emfy, emfz, &
+#endif
        & head_idx, block_idx, thread_idx, ngridmax, dtdx)
     type(oct), device :: grid(*)
     integer, device :: father(*)
     integer, device :: nbor(1:subgridsize,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*) ! Unused without MHD
     type(subgrid_3x2x2cell_primitive), intent(in) :: fluxes_x
     type(subgrid_2x3x2cell_primitive), intent(in) :: fluxes_y
     type(subgrid_2x2x3cell_primitive), intent(in) :: fluxes_z
+#ifdef MHD
+    type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
+    type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
+    type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
+#endif
     integer, value :: head_idx
     integer, value :: block_idx
     integer, value :: thread_idx
@@ -2624,6 +2711,12 @@ contains
     integer :: interface_array_size, info, ind_nbor
     type(conserved_t) :: flux
     real(kind=dp) :: coarse_flux_scale
+#ifdef MHD
+    integer :: n
+    real(kind=dp) :: fs(1:nscalar_mhd), dflux, weight
+    logical :: c1, c2, c3
+    integer :: oc1, oc2, oc3, cc1, cc2, cc3
+#endif
 
     interface_array_size = nsubgrid**(ndim-1)
     coarse_flux_scale = dtdx * inv_twotondim
@@ -2650,6 +2743,9 @@ contains
        flux%momentum_y = 0_dp
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
+#ifdef MHD
+       do n=1,nvar-5; fs(n)=0_dp; end do
+#endif
        do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
           do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
              flux%density    = flux%density    - fluxes_x%density   (0, j, k) * coarse_flux_scale
@@ -2657,6 +2753,9 @@ contains
              flux%momentum_y = flux%momentum_y - fluxes_x%velocity_y(0, j, k) * coarse_flux_scale
              flux%momentum_z = flux%momentum_z - fluxes_x%velocity_z(0, j, k) * coarse_flux_scale
              flux%energy     = flux%energy     - fluxes_x%pressure  (0, j, k) * coarse_flux_scale
+#ifdef MHD
+             do n=1,nvar-5; fs(n) = fs(n) - fluxes_x%scalar(0,j,k,n)*coarse_flux_scale; end do
+#endif
           end do
        end do
 
@@ -2674,6 +2773,9 @@ contains
           info = atomicadd(unew(cell_idx, 3, father_idx), flux%momentum_y)
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
+#ifdef MHD
+          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
+#endif
        endif
 
     else if (thread_idx < 2 * interface_array_size) then
@@ -2691,6 +2793,9 @@ contains
        flux%momentum_y = 0_dp
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
+#ifdef MHD
+       do n=1,nvar-5; fs(n)=0_dp; end do
+#endif
        do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
           do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
              flux%density    = flux%density    + fluxes_x%density   (2*nsubgrid, j, k) * coarse_flux_scale
@@ -2698,6 +2803,9 @@ contains
              flux%momentum_y = flux%momentum_y + fluxes_x%velocity_y(2*nsubgrid, j, k) * coarse_flux_scale
              flux%momentum_z = flux%momentum_z + fluxes_x%velocity_z(2*nsubgrid, j, k) * coarse_flux_scale
              flux%energy     = flux%energy     + fluxes_x%pressure  (2*nsubgrid, j, k) * coarse_flux_scale
+#ifdef MHD
+             do n=1,nvar-5; fs(n) = fs(n) + fluxes_x%scalar(2*nsubgrid,j,k,n)*coarse_flux_scale; end do
+#endif
           end do
        end do
 
@@ -2715,6 +2823,9 @@ contains
           info = atomicadd(unew(cell_idx, 3, father_idx), flux%momentum_y)
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
+#ifdef MHD
+          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
+#endif
        endif
 
     !============
@@ -2736,6 +2847,9 @@ contains
        flux%momentum_y = 0_dp
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
+#ifdef MHD
+       do n=1,nvar-5; fs(n)=0_dp; end do
+#endif
        do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
           do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
              flux%density    = flux%density    - fluxes_y%density   (i, 0, k) * coarse_flux_scale
@@ -2743,6 +2857,9 @@ contains
              flux%momentum_y = flux%momentum_y - fluxes_y%velocity_y(i, 0, k) * coarse_flux_scale
              flux%momentum_z = flux%momentum_z - fluxes_y%velocity_z(i, 0, k) * coarse_flux_scale
              flux%energy     = flux%energy     - fluxes_y%pressure  (i, 0, k) * coarse_flux_scale
+#ifdef MHD
+             do n=1,nvar-5; fs(n) = fs(n) - fluxes_y%scalar(i,0,k,n)*coarse_flux_scale; end do
+#endif
           end do
        end do
     
@@ -2760,6 +2877,9 @@ contains
           info = atomicadd(unew(cell_idx, 3, father_idx), flux%momentum_y)
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
+#ifdef MHD
+          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
+#endif
        endif
 
     else if (thread_idx < 4 * interface_array_size) then
@@ -2777,6 +2897,9 @@ contains
        flux%momentum_y = 0_dp
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
+#ifdef MHD
+       do n=1,nvar-5; fs(n)=0_dp; end do
+#endif
        do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
           do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
              flux%density    = flux%density    + fluxes_y%density   (i, 2*nsubgrid, k) * coarse_flux_scale
@@ -2784,6 +2907,9 @@ contains
              flux%momentum_y = flux%momentum_y + fluxes_y%velocity_y(i, 2*nsubgrid, k) * coarse_flux_scale
              flux%momentum_z = flux%momentum_z + fluxes_y%velocity_z(i, 2*nsubgrid, k) * coarse_flux_scale
              flux%energy     = flux%energy     + fluxes_y%pressure  (i, 2*nsubgrid, k) * coarse_flux_scale
+#ifdef MHD
+             do n=1,nvar-5; fs(n) = fs(n) + fluxes_y%scalar(i,2*nsubgrid,k,n)*coarse_flux_scale; end do
+#endif
           end do
        end do
 
@@ -2801,6 +2927,9 @@ contains
           info = atomicadd(unew(cell_idx, 3, father_idx), flux%momentum_y)
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
+#ifdef MHD
+          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
+#endif
        endif
 
     !============
@@ -2822,6 +2951,9 @@ contains
        flux%momentum_y = 0_dp
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
+#ifdef MHD
+       do n=1,nvar-5; fs(n)=0_dp; end do
+#endif
        do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
           do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
              flux%density    = flux%density    - fluxes_z%density   (i, j, 0) * coarse_flux_scale
@@ -2829,6 +2961,9 @@ contains
              flux%momentum_y = flux%momentum_y - fluxes_z%velocity_y(i, j, 0) * coarse_flux_scale
              flux%momentum_z = flux%momentum_z - fluxes_z%velocity_z(i, j, 0) * coarse_flux_scale
              flux%energy     = flux%energy     - fluxes_z%pressure  (i, j, 0) * coarse_flux_scale
+#ifdef MHD
+             do n=1,nvar-5; fs(n) = fs(n) - fluxes_z%scalar(i,j,0,n)*coarse_flux_scale; end do
+#endif
           end do
        end do
     
@@ -2846,6 +2981,9 @@ contains
           info = atomicadd(unew(cell_idx, 3, father_idx), flux%momentum_y)
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
+#ifdef MHD
+          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
+#endif
        endif
 
     else if (thread_idx < 6 * interface_array_size) then
@@ -2863,6 +3001,9 @@ contains
        flux%momentum_y = 0_dp
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
+#ifdef MHD
+       do n=1,nvar-5; fs(n)=0_dp; end do
+#endif
        do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
           do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
              flux%density    = flux%density    + fluxes_z%density   (i, j, 2*nsubgrid) * coarse_flux_scale
@@ -2870,6 +3011,9 @@ contains
              flux%momentum_y = flux%momentum_y + fluxes_z%velocity_y(i, j, 2*nsubgrid) * coarse_flux_scale
              flux%momentum_z = flux%momentum_z + fluxes_z%velocity_z(i, j, 2*nsubgrid) * coarse_flux_scale
              flux%energy     = flux%energy     + fluxes_z%pressure  (i, j, 2*nsubgrid) * coarse_flux_scale
+#ifdef MHD
+             do n=1,nvar-5; fs(n) = fs(n) + fluxes_z%scalar(i,j,2*nsubgrid,n)*coarse_flux_scale; end do
+#endif
           end do
        end do
 
@@ -2887,9 +3031,155 @@ contains
           info = atomicadd(unew(cell_idx, 3, father_idx), flux%momentum_y)
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
+#ifdef MHD
+          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
+#endif
        endif
 
     end if
+
+#ifdef MHD
+    ! =================================================================
+    ! Part 2: coarse/fine EMF correction (CPU godunov_fine.f90:1037-1282).
+    ! Done by thread 0; emfx/emfy/emfz are the fine EMFs in the per-orientation
+    ! edge frame (v4.1 family); offsets
+    ! (di,dj,dk) index the octs sharing each of the 12 boundary edges. c1/c2/c3 =
+    ! is_coarse for those neighbours (CPU .not.ok1/2/3); weight=0.5 if any is
+    ! refined. atomicadd handles other blocks correcting the same coarse cell.
+    ! NB the GPU edge arrays hold RAW E (C5 scales its own curl inline), whereas
+    ! the CPU h%emf* are stored dt/dx-scaled before this correction runs -- so
+    ! every dflux below carries the *dtdx that the CPU applied at store time.
+    ! =================================================================
+    if (thread_idx == 0) then
+
+       ! ---- 4 EMFz edges ----
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1,-1, 0, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfz%edge_e(0,0,0)+emfz%edge_e(0,0,1))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,1,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,4,oc2),dflux);  info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,4,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 1, 0, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfz%edge_e(0,2,0)+emfz%edge_e(0,2,1))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,4,oc1),dflux);  info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,4,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,1,oc3),-dflux); info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 1, 0, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfz%edge_e(2,2,0)+emfz%edge_e(2,2,1))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,4,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,1,oc2),-dflux); info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,1,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1,-1, 0, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfz%edge_e(2,0,0)+emfz%edge_e(2,0,1))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,1,oc1),-dflux); info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,1,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,4,oc3),dflux);  info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
+       end if
+
+       ! ---- 4 EMFx edges ----
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1,-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfx%edge_e(0,0,0)+emfx%edge_e(1,0,0))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,6,oc1),dflux);  info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,6,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,3,oc3),-dflux); info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfx%edge_e(0,0,2)+emfx%edge_e(1,0,2))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,6,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,3,oc2),-dflux); info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,3,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfx%edge_e(0,2,2)+emfx%edge_e(1,2,2))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,3,oc1),-dflux); info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,3,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,6,oc3),dflux);  info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1,-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfx%edge_e(0,2,0)+emfx%edge_e(1,2,0))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,3,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,6,oc2),dflux);  info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,6,oc3),-dflux); endif
+       end if
+
+       ! ---- 4 EMFy edges ----
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0,-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfy%edge_e(0,0,0)+emfy%edge_e(0,1,0))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,6,oc1),-dflux); info=atomicadd(bnew(cc1,1,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,4,oc2),-dflux); info=atomicadd(bnew(cc2,6,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,3,oc3),dflux);  info=atomicadd(bnew(cc3,4,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfy%edge_e(0,0,2)+emfy%edge_e(0,1,2))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,4,oc1),-dflux); info=atomicadd(bnew(cc1,6,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,3,oc2),dflux);  info=atomicadd(bnew(cc2,4,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,1,oc3),dflux);  info=atomicadd(bnew(cc3,3,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfy%edge_e(2,0,2)+emfy%edge_e(2,1,2))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,3,oc1),dflux);  info=atomicadd(bnew(cc1,4,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,1,oc2),dflux);  info=atomicadd(bnew(cc2,3,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,6,oc3),-dflux); info=atomicadd(bnew(cc3,1,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0,-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfy%edge_e(2,0,0)+emfy%edge_e(2,1,0))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,1,oc1),dflux);  info=atomicadd(bnew(cc1,3,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,6,oc2),-dflux); info=atomicadd(bnew(cc2,1,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,4,oc3),-dflux); info=atomicadd(bnew(cc3,6,oc3),dflux);  endif
+       end if
+
+    end if
+#endif
 
   end subroutine coarse_cell_update
   ! =========================================================================
@@ -3160,63 +3450,6 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  !> @brief (Stage C4a) MHD analog of zero_fine_fluxes. Zero the conserved fluxes
-  !> (and passive-scalar fluxes; and the unused-in-3D transverse-B advection
-  !> fluxes, for CPU fidelity) at faces touching a refined cell. Same refined-mask
-  !> stencil as the hydro zero_fine_fluxes (CPU godunov_fine.f90:648-664).
-  attributes(device) subroutine zero_fine_fluxes_mhd(local_mhd, fluxes_x, fluxes_y, fluxes_z, thread_idx)
-    type(subgrid_6x6x6cell_primitive), intent(in) :: local_mhd
-    type(subgrid_3x2x2cell_primitive), intent(inout) :: fluxes_x
-    type(subgrid_2x3x2cell_primitive), intent(inout) :: fluxes_y
-    type(subgrid_2x2x3cell_primitive), intent(inout) :: fluxes_z
-    integer, value :: thread_idx
-    integer :: work_idx, interface_array_size, i, j, k, n
-
-    interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
-
-    do work_idx = thread_idx, interface_array_size * 3 - 1, blockDim%x
-       if (work_idx < interface_array_size) then
-          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
-          if (local_mhd%refined(i+1,j+2,k+2) .or. local_mhd%refined(i+2,j+2,k+2)) then
-             fluxes_x%density(i,j,k) = 0_dp;  fluxes_x%velocity_x(i,j,k) = 0_dp
-             fluxes_x%velocity_y(i,j,k) = 0_dp; fluxes_x%velocity_z(i,j,k) = 0_dp
-             fluxes_x%pressure(i,j,k) = 0_dp
-             fluxes_x%Bx(i,j,k) = 0_dp; fluxes_x%By(i,j,k) = 0_dp; fluxes_x%Bz(i,j,k) = 0_dp
-             do n = 1, nvar-5
-                fluxes_x%scalar(i,j,k,n) = 0_dp
-             end do
-          end if
-       else if (work_idx < 2 * interface_array_size) then
-          call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
-          if (local_mhd%refined(i+2,j+1,k+2) .or. local_mhd%refined(i+2,j+2,k+2)) then
-             fluxes_y%density(i,j,k) = 0_dp;  fluxes_y%velocity_x(i,j,k) = 0_dp
-             fluxes_y%velocity_y(i,j,k) = 0_dp; fluxes_y%velocity_z(i,j,k) = 0_dp
-             fluxes_y%pressure(i,j,k) = 0_dp
-             fluxes_y%Bx(i,j,k) = 0_dp; fluxes_y%By(i,j,k) = 0_dp; fluxes_y%Bz(i,j,k) = 0_dp
-             do n = 1, nvar-5
-                fluxes_y%scalar(i,j,k,n) = 0_dp
-             end do
-          end if
-       else
-          call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
-          if (local_mhd%refined(i+2,j+2,k+1) .or. local_mhd%refined(i+2,j+2,k+2)) then
-             fluxes_z%density(i,j,k) = 0_dp;  fluxes_z%velocity_x(i,j,k) = 0_dp
-             fluxes_z%velocity_y(i,j,k) = 0_dp; fluxes_z%velocity_z(i,j,k) = 0_dp
-             fluxes_z%pressure(i,j,k) = 0_dp
-             fluxes_z%Bx(i,j,k) = 0_dp; fluxes_z%By(i,j,k) = 0_dp; fluxes_z%Bz(i,j,k) = 0_dp
-             do n = 1, nvar-5
-                fluxes_z%scalar(i,j,k,n) = 0_dp
-             end do
-          end if
-       end if
-    end do
-
-    call syncthreads()
-
-  end subroutine zero_fine_fluxes_mhd
-  ! =========================================================================
-
-  ! =========================================================================
   !> @brief Pure-induction (kinematic dynamo) mode: zero ALL Euler fluxes so the
   !> conservative update leaves rho/momentum/energy/scalars untouched and only
   !> the CT update advances B. Mirrors CPU godunov_fine.f90:667
@@ -3312,104 +3545,6 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  !> @brief (Stage C5) MHD conservative + constrained-transport update at the
-  !> current level. The hydro part mirrors conservative_update (density/momentum/
-  !> energy) and extends it to passive scalars (CPU godunov_fine.f90:764-769,
-  !> unew(5+n) += scalar-flux diff). The CT part advances the 6 face-B of each
-  !> cell by the discrete curl of the EMFs (CPU godunov_fine.f90:823-861), with the
-  !> EMF *dt/dx scaling APPLIED EXACTLY ONCE HERE (C1/C3 keep raw E). bnew was
-  !> pre-loaded with bold by set_unew (A3), so bnew = bold + dt/dx*curl(E). Each
-  !> cell writes its own 6 faces -- no atomics at the current level (the shared
-  !> oct-boundary edges get identical EMFs from both blocks, preserving the face-B
-  !> redundancy / divB).
-  attributes(device) subroutine conservative_update_mhd(unew, bnew, nbor, fluxes_x, fluxes_y, fluxes_z, &
-       & emfx, emfy, emfz, head_idx, block_idx, thread_idx, dtdx)
-    real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
-    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
-    integer(kind=4), device :: nbor(1:subgridsize,*)
-    type(subgrid_3x2x2cell_primitive), intent(in) :: fluxes_x
-    type(subgrid_2x3x2cell_primitive), intent(in) :: fluxes_y
-    type(subgrid_2x2x3cell_primitive), intent(in) :: fluxes_z
-    type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
-    type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
-    type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
-    integer(kind=4), value :: head_idx
-    integer, value :: block_idx, thread_idx
-    real(kind=dp), value :: dtdx
-
-    integer :: work_size, i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
-    integer :: work_idx, subgrid_idx, oct_idx, cell_idx, ind_nbor, n
-    real(kind=dp) :: ud, umx, umy, umz, ue, supd, dflux
-
-    work_size = 2*nsubgrid
-
-    do work_idx = thread_idx, work_size**3 - 1, blockDim%x
-       subgrid_idx = head_idx + block_idx
-       call index_1Dto3D(work_idx/8, work_size/2, work_size/2, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx)
-       i_subgrid_idx = i_subgrid_idx + 1
-       j_subgrid_idx = j_subgrid_idx + 1
-       k_subgrid_idx = k_subgrid_idx + 1
-       ind_nbor = 1 + i_subgrid_idx + nsubgridp2 * j_subgrid_idx + nsubgridp2sq * k_subgrid_idx
-       oct_idx = nbor(ind_nbor, subgrid_idx)
-       cell_idx = mod(work_idx, 8) + 1
-       call index_1Dto3D(cell_idx - 1, 2, 2, i, j, k)
-       i = i + 2*(i_subgrid_idx - 1)
-       j = j + 2*(j_subgrid_idx - 1)
-       k = k + 2*(k_subgrid_idx - 1)
-
-       ! ---- Hydro conservative update (density, momentum, energy) -------------
-       ud  = (fluxes_x%density   (i,j,k) - fluxes_x%density   (i+1,j,k)) * dtdx
-       umx = (fluxes_x%velocity_x(i,j,k) - fluxes_x%velocity_x(i+1,j,k)) * dtdx
-       umy = (fluxes_x%velocity_y(i,j,k) - fluxes_x%velocity_y(i+1,j,k)) * dtdx
-       umz = (fluxes_x%velocity_z(i,j,k) - fluxes_x%velocity_z(i+1,j,k)) * dtdx
-       ue  = (fluxes_x%pressure  (i,j,k) - fluxes_x%pressure  (i+1,j,k)) * dtdx
-       ud  = ud  + (fluxes_y%density   (i,j,k) - fluxes_y%density   (i,j+1,k)) * dtdx
-       umx = umx + (fluxes_y%velocity_x(i,j,k) - fluxes_y%velocity_x(i,j+1,k)) * dtdx
-       umy = umy + (fluxes_y%velocity_y(i,j,k) - fluxes_y%velocity_y(i,j+1,k)) * dtdx
-       umz = umz + (fluxes_y%velocity_z(i,j,k) - fluxes_y%velocity_z(i,j+1,k)) * dtdx
-       ue  = ue  + (fluxes_y%pressure  (i,j,k) - fluxes_y%pressure  (i,j+1,k)) * dtdx
-       ud  = ud  + (fluxes_z%density   (i,j,k) - fluxes_z%density   (i,j,k+1)) * dtdx
-       umx = umx + (fluxes_z%velocity_x(i,j,k) - fluxes_z%velocity_x(i,j,k+1)) * dtdx
-       umy = umy + (fluxes_z%velocity_y(i,j,k) - fluxes_z%velocity_y(i,j,k+1)) * dtdx
-       umz = umz + (fluxes_z%velocity_z(i,j,k) - fluxes_z%velocity_z(i,j,k+1)) * dtdx
-       ue  = ue  + (fluxes_z%pressure  (i,j,k) - fluxes_z%pressure  (i,j,k+1)) * dtdx
-       unew(cell_idx, 1, oct_idx) = unew(cell_idx, 1, oct_idx) + ud
-       unew(cell_idx, 2, oct_idx) = unew(cell_idx, 2, oct_idx) + umx
-       unew(cell_idx, 3, oct_idx) = unew(cell_idx, 3, oct_idx) + umy
-       unew(cell_idx, 4, oct_idx) = unew(cell_idx, 4, oct_idx) + umz
-       unew(cell_idx, 5, oct_idx) = unew(cell_idx, 5, oct_idx) + ue
-
-       ! ---- Passive scalars: unew(5+n) += scalar-flux diff --------------------
-       do n = 1, nvar-5
-          supd = (fluxes_x%scalar(i,j,k,n) - fluxes_x%scalar(i+1,j,k,n)) * dtdx &
-               & + (fluxes_y%scalar(i,j,k,n) - fluxes_y%scalar(i,j+1,k,n)) * dtdx &
-               & + (fluxes_z%scalar(i,j,k,n) - fluxes_z%scalar(i,j,k+1,n)) * dtdx
-          unew(cell_idx, 5+n, oct_idx) = unew(cell_idx, 5+n, oct_idx) + supd
-       end do
-
-       ! ---- Constrained-transport update of the 6 face-B (CPU :823-861) -------
-       ! EMF indices are in the per-orientation edge frame (v4.1 family); (i,j,k)
-       ! here is the oct-local cell coord {0,1} (i_subgrid_idx==1 for nsubgrid=1).
-       ! *dtdx ONCE.
-       dflux = ( (emfy%edge_e(i,j,k)-emfy%edge_e(i,j,k+1)) - (emfz%edge_e(i,j,k)-emfz%edge_e(i,j+1,k)) ) * dtdx
-       bnew(cell_idx, 1, oct_idx) = bnew(cell_idx, 1, oct_idx) + dflux
-       dflux = ( (emfy%edge_e(i+1,j,k)-emfy%edge_e(i+1,j,k+1)) - (emfz%edge_e(i+1,j,k)-emfz%edge_e(i+1,j+1,k)) ) * dtdx
-       bnew(cell_idx, 4, oct_idx) = bnew(cell_idx, 4, oct_idx) + dflux
-       dflux = ( (emfz%edge_e(i,j,k)-emfz%edge_e(i+1,j,k)) - (emfx%edge_e(i,j,k)-emfx%edge_e(i,j,k+1)) ) * dtdx
-       bnew(cell_idx, 2, oct_idx) = bnew(cell_idx, 2, oct_idx) + dflux
-       dflux = ( (emfz%edge_e(i,j+1,k)-emfz%edge_e(i+1,j+1,k)) - (emfx%edge_e(i,j+1,k)-emfx%edge_e(i,j+1,k+1)) ) * dtdx
-       bnew(cell_idx, 5, oct_idx) = bnew(cell_idx, 5, oct_idx) + dflux
-       dflux = ( (emfx%edge_e(i,j,k)-emfx%edge_e(i,j+1,k)) - (emfy%edge_e(i,j,k)-emfy%edge_e(i+1,j,k)) ) * dtdx
-       bnew(cell_idx, 3, oct_idx) = bnew(cell_idx, 3, oct_idx) + dflux
-       dflux = ( (emfx%edge_e(i,j,k+1)-emfx%edge_e(i,j+1,k+1)) - (emfy%edge_e(i,j,k+1)-emfy%edge_e(i+1,j,k+1)) ) * dtdx
-       bnew(cell_idx, 6, oct_idx) = bnew(cell_idx, 6, oct_idx) + dflux
-
-    end do
-
-  end subroutine conservative_update_mhd
-  ! =========================================================================
-
-  ! =========================================================================
   !> @brief (Stage C6 helper) For the neighbouring oct at oct-offset (di,dj,dk)
   !> from this block's central oct, report whether it is a COARSE (cache) oct and,
   !> if so, the parent coarse oct index + cell index it stands for. This is the
@@ -3442,362 +3577,6 @@ contains
   end subroutine get_cf_cell
   ! =========================================================================
 
-  ! =========================================================================
-  !> @brief (Stage C6) MHD coarse/fine correction at level ilevel-1. Two parts:
-  !>  (1) Hydro flux correction -- mirrors the (proven) cube coarse_cell_update,
-  !>      extended to passive scalars (unew slot 5+n from the scalar flux). The 6
-  !>      oct-boundary faces' summed fine fluxes are atomicadded into the coarse
-  !>      parent cell (found via nbor>ngridmax -> father -> ckey).
-  !>  (2) Coarse/fine EMF correction -- port of CPU godunov_fine.f90:1037-1282. At
-  !>      each of the central oct's 12 boundary edges, the fine EMF is averaged
-  !>      (*0.25*weight) into the coarse face-B of whichever of the (up to 3) octs
-  !>      sharing the edge are coarse. weight=0.5 if any sharer is refined, else 1.
-  !>      Done by thread 0 only (12 edges; atomicadd handles cross-block races).
-  !>
-  !>  ##### HIGHEST-RISK / LEAST-VERIFIED STAGE. ##### The CPU uses a childloc/
-  !>  gridloc/cellloc neighbourhood workspace; this re-expresses it on the GPU
-  !>  nbor/father/ckey model. It is NOT exercised by E2 (level-min: C6 is never
-  !>  called) and reaching E3 (AMR) also needs D4 (interpol_mhd, out of scope). The
-  !>  edge slot/sign/weight tables below are transcribed from the CPU; they are the
-  !>  primary thing to validate (max|divB| over time) once E3 is reachable.
-  attributes(device) subroutine coarse_cell_update_mhd(grid, unew, bnew, father, nbor, &
-       & fluxes_x, fluxes_y, fluxes_z, emfx, emfy, emfz, head_idx, block_idx, thread_idx, ngridmax, dtdx)
-    type(oct), device :: grid(*)
-    integer, device :: father(*)
-    integer, device :: nbor(1:subgridsize,*)
-    real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
-    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
-    type(subgrid_3x2x2cell_primitive), intent(in) :: fluxes_x
-    type(subgrid_2x3x2cell_primitive), intent(in) :: fluxes_y
-    type(subgrid_2x2x3cell_primitive), intent(in) :: fluxes_z
-    type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
-    type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
-    type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
-    integer, value :: head_idx, block_idx, thread_idx, ngridmax
-    real(kind=dp), value :: dtdx
-    real(kind=dp), parameter :: inv_twotondim = 1.0_dp / real(twotondim, kind=dp)
-
-    integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
-    integer :: subgrid_idx, cell_idx, source_idx, father_idx, work_idx
-    integer :: interface_array_size, info, ind_nbor, n
-    real(kind=dp) :: fd, fmx, fmy, fmz, fe, fs(1:nscalar_mhd), scale, dflux, weight
-    logical :: c1, c2, c3
-    integer :: oc1, oc2, oc3, cc1, cc2, cc3
-
-    interface_array_size = nsubgrid**(ndim-1)
-    scale = dtdx * inv_twotondim
-    subgrid_idx = head_idx + block_idx
-
-    ! =================================================================
-    ! Part 1: hydro flux + passive-scalar coarse/fine correction
-    ! =================================================================
-    if (thread_idx < interface_array_size) then            ! left X
-       work_idx = thread_idx
-       call index_1Dto2D(work_idx, nsubgrid, j_subgrid_idx, k_subgrid_idx)
-       i_subgrid_idx = 0; j_subgrid_idx = j_subgrid_idx + 1; k_subgrid_idx = k_subgrid_idx + 1
-       fd=0_dp; fmx=0_dp; fmy=0_dp; fmz=0_dp; fe=0_dp
-       do n=1,nvar-5; fs(n)=0_dp; end do
-       do j = 2*j_subgrid_idx-2, 2*j_subgrid_idx-1
-          do k = 2*k_subgrid_idx-2, 2*k_subgrid_idx-1
-             fd  = fd  - fluxes_x%density   (0,j,k)*scale; fmx = fmx - fluxes_x%velocity_x(0,j,k)*scale
-             fmy = fmy - fluxes_x%velocity_y(0,j,k)*scale; fmz = fmz - fluxes_x%velocity_z(0,j,k)*scale
-             fe  = fe  - fluxes_x%pressure  (0,j,k)*scale
-             do n=1,nvar-5; fs(n) = fs(n) - fluxes_x%scalar(0,j,k,n)*scale; end do
-          end do
-       end do
-       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
-       source_idx = nbor(ind_nbor, subgrid_idx)
-       if (source_idx > ngridmax) then
-          father_idx = father(source_idx)
-          i = grid(source_idx)%ckey(1) - 2*grid(father_idx)%ckey(1)
-          j = grid(source_idx)%ckey(2) - 2*grid(father_idx)%ckey(2)
-          k = grid(source_idx)%ckey(3) - 2*grid(father_idx)%ckey(3)
-          cell_idx = 1 + i + 2*j + 4*k
-          info = atomicadd(unew(cell_idx,1,father_idx), fd);  info = atomicadd(unew(cell_idx,2,father_idx), fmx)
-          info = atomicadd(unew(cell_idx,3,father_idx), fmy); info = atomicadd(unew(cell_idx,4,father_idx), fmz)
-          info = atomicadd(unew(cell_idx,5,father_idx), fe)
-          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
-       end if
-    else if (thread_idx < 2*interface_array_size) then     ! right X
-       work_idx = thread_idx - interface_array_size
-       call index_1Dto2D(work_idx, nsubgrid, j_subgrid_idx, k_subgrid_idx)
-       i_subgrid_idx = nsubgrid+1; j_subgrid_idx = j_subgrid_idx + 1; k_subgrid_idx = k_subgrid_idx + 1
-       fd=0_dp; fmx=0_dp; fmy=0_dp; fmz=0_dp; fe=0_dp
-       do n=1,nvar-5; fs(n)=0_dp; end do
-       do j = 2*j_subgrid_idx-2, 2*j_subgrid_idx-1
-          do k = 2*k_subgrid_idx-2, 2*k_subgrid_idx-1
-             fd  = fd  + fluxes_x%density   (2*nsubgrid,j,k)*scale; fmx = fmx + fluxes_x%velocity_x(2*nsubgrid,j,k)*scale
-             fmy = fmy + fluxes_x%velocity_y(2*nsubgrid,j,k)*scale; fmz = fmz + fluxes_x%velocity_z(2*nsubgrid,j,k)*scale
-             fe  = fe  + fluxes_x%pressure  (2*nsubgrid,j,k)*scale
-             do n=1,nvar-5; fs(n) = fs(n) + fluxes_x%scalar(2*nsubgrid,j,k,n)*scale; end do
-          end do
-       end do
-       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
-       source_idx = nbor(ind_nbor, subgrid_idx)
-       if (source_idx > ngridmax) then
-          father_idx = father(source_idx)
-          i = grid(source_idx)%ckey(1) - 2*grid(father_idx)%ckey(1)
-          j = grid(source_idx)%ckey(2) - 2*grid(father_idx)%ckey(2)
-          k = grid(source_idx)%ckey(3) - 2*grid(father_idx)%ckey(3)
-          cell_idx = 1 + i + 2*j + 4*k
-          info = atomicadd(unew(cell_idx,1,father_idx), fd);  info = atomicadd(unew(cell_idx,2,father_idx), fmx)
-          info = atomicadd(unew(cell_idx,3,father_idx), fmy); info = atomicadd(unew(cell_idx,4,father_idx), fmz)
-          info = atomicadd(unew(cell_idx,5,father_idx), fe)
-          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
-       end if
-    else if (thread_idx < 3*interface_array_size) then     ! left Y
-       work_idx = thread_idx - 2*interface_array_size
-       call index_1Dto2D(work_idx, nsubgrid, i_subgrid_idx, k_subgrid_idx)
-       i_subgrid_idx = i_subgrid_idx + 1; j_subgrid_idx = 0; k_subgrid_idx = k_subgrid_idx + 1
-       fd=0_dp; fmx=0_dp; fmy=0_dp; fmz=0_dp; fe=0_dp
-       do n=1,nvar-5; fs(n)=0_dp; end do
-       do i = 2*i_subgrid_idx-2, 2*i_subgrid_idx-1
-          do k = 2*k_subgrid_idx-2, 2*k_subgrid_idx-1
-             fd  = fd  - fluxes_y%density   (i,0,k)*scale; fmx = fmx - fluxes_y%velocity_x(i,0,k)*scale
-             fmy = fmy - fluxes_y%velocity_y(i,0,k)*scale; fmz = fmz - fluxes_y%velocity_z(i,0,k)*scale
-             fe  = fe  - fluxes_y%pressure  (i,0,k)*scale
-             do n=1,nvar-5; fs(n) = fs(n) - fluxes_y%scalar(i,0,k,n)*scale; end do
-          end do
-       end do
-       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
-       source_idx = nbor(ind_nbor, subgrid_idx)
-       if (source_idx > ngridmax) then
-          father_idx = father(source_idx)
-          i = grid(source_idx)%ckey(1) - 2*grid(father_idx)%ckey(1)
-          j = grid(source_idx)%ckey(2) - 2*grid(father_idx)%ckey(2)
-          k = grid(source_idx)%ckey(3) - 2*grid(father_idx)%ckey(3)
-          cell_idx = 1 + i + 2*j + 4*k
-          info = atomicadd(unew(cell_idx,1,father_idx), fd);  info = atomicadd(unew(cell_idx,2,father_idx), fmx)
-          info = atomicadd(unew(cell_idx,3,father_idx), fmy); info = atomicadd(unew(cell_idx,4,father_idx), fmz)
-          info = atomicadd(unew(cell_idx,5,father_idx), fe)
-          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
-       end if
-    else if (thread_idx < 4*interface_array_size) then     ! right Y
-       work_idx = thread_idx - 3*interface_array_size
-       call index_1Dto2D(work_idx, nsubgrid, i_subgrid_idx, k_subgrid_idx)
-       i_subgrid_idx = i_subgrid_idx + 1; j_subgrid_idx = nsubgrid+1; k_subgrid_idx = k_subgrid_idx + 1
-       fd=0_dp; fmx=0_dp; fmy=0_dp; fmz=0_dp; fe=0_dp
-       do n=1,nvar-5; fs(n)=0_dp; end do
-       do i = 2*i_subgrid_idx-2, 2*i_subgrid_idx-1
-          do k = 2*k_subgrid_idx-2, 2*k_subgrid_idx-1
-             fd  = fd  + fluxes_y%density   (i,2*nsubgrid,k)*scale; fmx = fmx + fluxes_y%velocity_x(i,2*nsubgrid,k)*scale
-             fmy = fmy + fluxes_y%velocity_y(i,2*nsubgrid,k)*scale; fmz = fmz + fluxes_y%velocity_z(i,2*nsubgrid,k)*scale
-             fe  = fe  + fluxes_y%pressure  (i,2*nsubgrid,k)*scale
-             do n=1,nvar-5; fs(n) = fs(n) + fluxes_y%scalar(i,2*nsubgrid,k,n)*scale; end do
-          end do
-       end do
-       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
-       source_idx = nbor(ind_nbor, subgrid_idx)
-       if (source_idx > ngridmax) then
-          father_idx = father(source_idx)
-          i = grid(source_idx)%ckey(1) - 2*grid(father_idx)%ckey(1)
-          j = grid(source_idx)%ckey(2) - 2*grid(father_idx)%ckey(2)
-          k = grid(source_idx)%ckey(3) - 2*grid(father_idx)%ckey(3)
-          cell_idx = 1 + i + 2*j + 4*k
-          info = atomicadd(unew(cell_idx,1,father_idx), fd);  info = atomicadd(unew(cell_idx,2,father_idx), fmx)
-          info = atomicadd(unew(cell_idx,3,father_idx), fmy); info = atomicadd(unew(cell_idx,4,father_idx), fmz)
-          info = atomicadd(unew(cell_idx,5,father_idx), fe)
-          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
-       end if
-    else if (thread_idx < 5*interface_array_size) then     ! left Z
-       work_idx = thread_idx - 4*interface_array_size
-       call index_1Dto2D(work_idx, nsubgrid, i_subgrid_idx, j_subgrid_idx)
-       i_subgrid_idx = i_subgrid_idx + 1; j_subgrid_idx = j_subgrid_idx + 1; k_subgrid_idx = 0
-       fd=0_dp; fmx=0_dp; fmy=0_dp; fmz=0_dp; fe=0_dp
-       do n=1,nvar-5; fs(n)=0_dp; end do
-       do i = 2*i_subgrid_idx-2, 2*i_subgrid_idx-1
-          do j = 2*j_subgrid_idx-2, 2*j_subgrid_idx-1
-             fd  = fd  - fluxes_z%density   (i,j,0)*scale; fmx = fmx - fluxes_z%velocity_x(i,j,0)*scale
-             fmy = fmy - fluxes_z%velocity_y(i,j,0)*scale; fmz = fmz - fluxes_z%velocity_z(i,j,0)*scale
-             fe  = fe  - fluxes_z%pressure  (i,j,0)*scale
-             do n=1,nvar-5; fs(n) = fs(n) - fluxes_z%scalar(i,j,0,n)*scale; end do
-          end do
-       end do
-       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
-       source_idx = nbor(ind_nbor, subgrid_idx)
-       if (source_idx > ngridmax) then
-          father_idx = father(source_idx)
-          i = grid(source_idx)%ckey(1) - 2*grid(father_idx)%ckey(1)
-          j = grid(source_idx)%ckey(2) - 2*grid(father_idx)%ckey(2)
-          k = grid(source_idx)%ckey(3) - 2*grid(father_idx)%ckey(3)
-          cell_idx = 1 + i + 2*j + 4*k
-          info = atomicadd(unew(cell_idx,1,father_idx), fd);  info = atomicadd(unew(cell_idx,2,father_idx), fmx)
-          info = atomicadd(unew(cell_idx,3,father_idx), fmy); info = atomicadd(unew(cell_idx,4,father_idx), fmz)
-          info = atomicadd(unew(cell_idx,5,father_idx), fe)
-          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
-       end if
-    else if (thread_idx < 6*interface_array_size) then     ! right Z
-       work_idx = thread_idx - 5*interface_array_size
-       call index_1Dto2D(work_idx, nsubgrid, i_subgrid_idx, j_subgrid_idx)
-       i_subgrid_idx = i_subgrid_idx + 1; j_subgrid_idx = j_subgrid_idx + 1; k_subgrid_idx = nsubgrid+1
-       fd=0_dp; fmx=0_dp; fmy=0_dp; fmz=0_dp; fe=0_dp
-       do n=1,nvar-5; fs(n)=0_dp; end do
-       do i = 2*i_subgrid_idx-2, 2*i_subgrid_idx-1
-          do j = 2*j_subgrid_idx-2, 2*j_subgrid_idx-1
-             fd  = fd  + fluxes_z%density   (i,j,2*nsubgrid)*scale; fmx = fmx + fluxes_z%velocity_x(i,j,2*nsubgrid)*scale
-             fmy = fmy + fluxes_z%velocity_y(i,j,2*nsubgrid)*scale; fmz = fmz + fluxes_z%velocity_z(i,j,2*nsubgrid)*scale
-             fe  = fe  + fluxes_z%pressure  (i,j,2*nsubgrid)*scale
-             do n=1,nvar-5; fs(n) = fs(n) + fluxes_z%scalar(i,j,2*nsubgrid,n)*scale; end do
-          end do
-       end do
-       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
-       source_idx = nbor(ind_nbor, subgrid_idx)
-       if (source_idx > ngridmax) then
-          father_idx = father(source_idx)
-          i = grid(source_idx)%ckey(1) - 2*grid(father_idx)%ckey(1)
-          j = grid(source_idx)%ckey(2) - 2*grid(father_idx)%ckey(2)
-          k = grid(source_idx)%ckey(3) - 2*grid(father_idx)%ckey(3)
-          cell_idx = 1 + i + 2*j + 4*k
-          info = atomicadd(unew(cell_idx,1,father_idx), fd);  info = atomicadd(unew(cell_idx,2,father_idx), fmx)
-          info = atomicadd(unew(cell_idx,3,father_idx), fmy); info = atomicadd(unew(cell_idx,4,father_idx), fmz)
-          info = atomicadd(unew(cell_idx,5,father_idx), fe)
-          do n=1,nvar-5; info = atomicadd(unew(cell_idx,5+n,father_idx), fs(n)); end do
-       end if
-    end if
-
-    ! =================================================================
-    ! Part 2: coarse/fine EMF correction (CPU godunov_fine.f90:1037-1282).
-    ! Done by thread 0; emfx/emfy/emfz are the fine EMFs in the per-orientation
-    ! edge frame (v4.1 family); offsets
-    ! (di,dj,dk) index the octs sharing each of the 12 boundary edges. c1/c2/c3 =
-    ! is_coarse for those neighbours (CPU .not.ok1/2/3); weight=0.5 if any is
-    ! refined. atomicadd handles other blocks correcting the same coarse cell.
-    ! NB the GPU edge arrays hold RAW E (C5 scales its own curl inline), whereas
-    ! the CPU h%emf* are stored dt/dx-scaled before this correction runs -- so
-    ! every dflux below carries the *dtdx that the CPU applied at store time.
-    ! =================================================================
-    if (thread_idx == 0) then
-
-       ! ---- 4 EMFz edges ----
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1,-1, 0, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfz%edge_e(0,0,0)+emfz%edge_e(0,0,1))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,1,oc1),dflux);  endif
-          if(c2)then; info=atomicadd(bnew(cc2,4,oc2),dflux);  info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
-          if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,4,oc3),-dflux); endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 1, 0, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfz%edge_e(0,2,0)+emfz%edge_e(0,2,1))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,4,oc1),dflux);  info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
-          if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,4,oc2),-dflux); endif
-          if(c3)then; info=atomicadd(bnew(cc3,1,oc3),-dflux); info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 1, 0, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfz%edge_e(2,2,0)+emfz%edge_e(2,2,1))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,4,oc1),-dflux); endif
-          if(c2)then; info=atomicadd(bnew(cc2,1,oc2),-dflux); info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
-          if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,1,oc3),dflux);  endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1,-1, 0, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfz%edge_e(2,0,0)+emfz%edge_e(2,0,1))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,1,oc1),-dflux); info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
-          if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,1,oc2),dflux);  endif
-          if(c3)then; info=atomicadd(bnew(cc3,4,oc3),dflux);  info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
-       end if
-
-       ! ---- 4 EMFx edges ----
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1,-1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfx%edge_e(0,0,0)+emfx%edge_e(1,0,0))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,6,oc1),dflux);  info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
-          if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,6,oc2),-dflux); endif
-          if(c3)then; info=atomicadd(bnew(cc3,3,oc3),-dflux); info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfx%edge_e(0,0,2)+emfx%edge_e(1,0,2))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,6,oc1),-dflux); endif
-          if(c2)then; info=atomicadd(bnew(cc2,3,oc2),-dflux); info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
-          if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,3,oc3),dflux);  endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfx%edge_e(0,2,2)+emfx%edge_e(1,2,2))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,3,oc1),-dflux); info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
-          if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,3,oc2),dflux);  endif
-          if(c3)then; info=atomicadd(bnew(cc3,6,oc3),dflux);  info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1,-1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfx%edge_e(0,2,0)+emfx%edge_e(1,2,0))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,3,oc1),dflux);  endif
-          if(c2)then; info=atomicadd(bnew(cc2,6,oc2),dflux);  info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
-          if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,6,oc3),-dflux); endif
-       end if
-
-       ! ---- 4 EMFy edges ----
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0,-1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfy%edge_e(0,0,0)+emfy%edge_e(0,1,0))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,6,oc1),-dflux); info=atomicadd(bnew(cc1,1,oc1),-dflux); endif
-          if(c2)then; info=atomicadd(bnew(cc2,4,oc2),-dflux); info=atomicadd(bnew(cc2,6,oc2),dflux);  endif
-          if(c3)then; info=atomicadd(bnew(cc3,3,oc3),dflux);  info=atomicadd(bnew(cc3,4,oc3),dflux);  endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfy%edge_e(0,0,2)+emfy%edge_e(0,1,2))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,4,oc1),-dflux); info=atomicadd(bnew(cc1,6,oc1),dflux);  endif
-          if(c2)then; info=atomicadd(bnew(cc2,3,oc2),dflux);  info=atomicadd(bnew(cc2,4,oc2),dflux);  endif
-          if(c3)then; info=atomicadd(bnew(cc3,1,oc3),dflux);  info=atomicadd(bnew(cc3,3,oc3),-dflux); endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfy%edge_e(2,0,2)+emfy%edge_e(2,1,2))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,3,oc1),dflux);  info=atomicadd(bnew(cc1,4,oc1),dflux);  endif
-          if(c2)then; info=atomicadd(bnew(cc2,1,oc2),dflux);  info=atomicadd(bnew(cc2,3,oc2),-dflux); endif
-          if(c3)then; info=atomicadd(bnew(cc3,6,oc3),-dflux); info=atomicadd(bnew(cc3,1,oc3),-dflux); endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0,-1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfy%edge_e(2,0,0)+emfy%edge_e(2,1,0))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,1,oc1),dflux);  info=atomicadd(bnew(cc1,3,oc1),-dflux); endif
-          if(c2)then; info=atomicadd(bnew(cc2,6,oc2),-dflux); info=atomicadd(bnew(cc2,1,oc2),-dflux); endif
-          if(c3)then; info=atomicadd(bnew(cc3,4,oc3),-dflux); info=atomicadd(bnew(cc3,6,oc3),dflux);  endif
-       end if
-
-    end if
-
-  end subroutine coarse_cell_update_mhd
-  ! =========================================================================
 #endif
 
   ! ##########################################################################
@@ -3929,14 +3708,14 @@ contains
     ! =======================================================================
     ! Update the conserved variables at current level.
     ! =======================================================================
-    call conservative_update(unew, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, head_idx, block_idx, &
+    call conservative_update(unew, bnew, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, head_idx, block_idx, &
          & thread_idx, dtdx)
 
     ! =======================================================================
     ! Update the conserved variables at coarser level.
     ! =======================================================================
     if (ilevel > levelmin) then
-       call coarse_cell_update(grid, unew, father, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, &
+       call coarse_cell_update(grid, unew, bnew, father, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, &
             & head_idx, block_idx, thread_idx, ngridmax, dtdx)
     endif
 
@@ -4036,18 +3815,20 @@ contains
 
     ! C4: zero fluxes + EMFs at refined boundaries (only if finer levels exist)
     if (ilevel < levelmax) then
-       call zero_fine_fluxes_mhd(local_mhd, left_x, left_y, left_z, thread_idx)
+       call zero_fine_fluxes(local_mhd, left_x, left_y, left_z, thread_idx)
        call zero_fine_emf(local_mhd, emfx, emfy, emfz, thread_idx)
     endif
 
     ! C5: conservative update at current level + constrained-transport B update
-    call conservative_update_mhd(unew, bnew, nbor, left_x, left_y, left_z, emfx, emfy, emfz, &
+    call conservative_update(unew, bnew, nbor, left_x, left_y, left_z, &
+         & emfx, emfy, emfz, &
          & head_idx, block_idx, thread_idx, dtdx)
 
     ! C6: coarse/fine flux + EMF correction into the parent level
     if (ilevel > levelmin) then
-       call coarse_cell_update_mhd(grid, unew, bnew, father, nbor, left_x, left_y, left_z, &
-            & emfx, emfy, emfz, head_idx, block_idx, thread_idx, ngridmax, dtdx)
+       call coarse_cell_update(grid, unew, bnew, father, nbor, left_x, left_y, left_z, &
+            & emfx, emfy, emfz, &
+            & head_idx, block_idx, thread_idx, ngridmax, dtdx)
     endif
 
   end subroutine mhd_integrator_kernel
@@ -4354,7 +4135,7 @@ contains
     uold(cell_idx, 5, oct_idx) = unew(cell_idx, 5, oct_idx)
 
     ! Set bold to bnew (mirrors CPU set_uold, godunov_fine.f90:213 m%bold(:,:,i)=m%bnew(:,:,i))
-    ! and write back the passive scalars that conservative_update_mhd advanced
+    ! and write back the passive scalars that conservative_update advanced
     ! (slots 6:nvar; the cube hydro path never touches them, so do this only for MHD).
 #ifdef MHD
     do ib = 1, 6
@@ -4402,7 +4183,7 @@ contains
     unew(cell_idx, 5, oct_idx) = uold(cell_idx, 5, oct_idx)
 
     ! Set bnew to bold (mirrors CPU set_unew, godunov_fine.f90:150 m%bnew(:,:,i)=m%bold(:,:,i))
-    ! and seed unew with the passive scalars so conservative_update_mhd accumulates
+    ! and seed unew with the passive scalars so conservative_update accumulates
     ! onto uold (slots 6:nvar; MHD-only, the cube hydro path never touches them).
 #ifdef MHD
     do ib = 1, 6
