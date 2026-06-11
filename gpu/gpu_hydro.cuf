@@ -119,11 +119,9 @@ module hydro_device
   !> reads bx at i>=1 cyclically, the trace and the cell-B recompute read
   !> bx/by/bz at their own-axis index >= 1).
   type, public :: subgrid_face_b_t
-     ! P0c bank-conflict fix: pad the stride-1 dimension while preserving the
-     ! trimmed live face extents. The extra high-i slot is dead padding.
-     real(kind=dp), dimension(1:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: bx
-     real(kind=dp), dimension(0:2*nsubgrid+4, 1:2*nsubgrid+3, 0:2*nsubgrid+3) :: by
-     real(kind=dp), dimension(0:2*nsubgrid+4, 0:2*nsubgrid+3, 1:2*nsubgrid+3) :: bz
+     real(kind=dp), dimension(1:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: bx
+     real(kind=dp), dimension(0:2*nsubgrid+3, 1:2*nsubgrid+3, 0:2*nsubgrid+3) :: by
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:2*nsubgrid+3) :: bz
   end type subgrid_face_b_t
 
   !> @brief
@@ -350,7 +348,7 @@ contains
     type(primitive_t), intent(out) :: slopes_x, slopes_y, slopes_z
     type(primitive_t) :: cell
 #if NVAR>5+NENER
-    real(kind=dp), intent(in) :: scalar_sub(0:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
+    real(kind=dp), intent(in) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
     real(kind=dp), intent(out) :: dscal_x(1:nscalar), dscal_y(1:nscalar), dscal_z(1:nscalar)
     real(kind=dp) :: rscal
     integer :: n
@@ -1335,7 +1333,7 @@ contains
     real(kind=dp), value :: dt
     type(subgrid_6x6x6cell_primitive), intent(inout) :: local_subgrid
 #if NVAR>5+NENER
-    real(kind=dp) :: scalar_sub(0:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
+    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
     integer :: n
 #endif
 #ifdef MHD
@@ -1622,7 +1620,7 @@ contains
     integer :: i, j, k    ! Cell indices
     integer :: work_size
 #if NVAR>5+NENER
-    real(kind=dp) :: scalar_sub(0:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
+    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
     real(kind=dp) :: dscal_x(1:nscalar), dscal_y(1:nscalar), dscal_z(1:nscalar)
     real(kind=dp) :: rscal, srscal, uscal, vscal, wscal
     real(kind=dp) :: dscalx, dscaly, dscalz
@@ -3873,8 +3871,8 @@ contains
   ! Resident shared per block (nsubgrid=1, nvar=8, FP64; refined = 1 B):
   !   (A) subgrid_6x6x6cell_primitive  5*252*8 + 64*1          = 10144 B
   !       (P0 bank-conflict fix: leading dim padded 6->7; +1440 B vs 8704)
-  !       scalar_subgrid (nvar-5=3, P0b)   3*252*8                 =  6048 B
-  !   (B) subgrid_face_b_t (bf, P0c pad)   (216+210+210)*8         =  5088 B
+  !       scalar_subgrid (nvar-5=3)        3*216*8                 =  5184 B
+  !   (B) subgrid_face_b_t (bf, trimmed)   3*180*8                 =  4320 B
   !   (D) subgrid_edge_e_t                  REMOVED (P1)            =     0 B
   !       (was 3*(4*5*5)*8 = 2400 B; recomputed inline via edge_e_{x,y,z})
   !   (E) emfx+emfy+emfz (v4.1 family)     3*18*8                  =   432 B
@@ -3882,15 +3880,15 @@ contains
   !       * 7 fields per orientation)      3*4032                  = 12096 B
   !   (G) 6 MHD interface arrays (11-wide) 6*12*11*8               =  6336 B
   !       ------------------------------------------------------------------
-  !       TOTAL resident                                           = 40144 B
-  !                  = 39.2 KB < 48 KB static limit (was 38512 B pre P0b/P0c).
+  !       TOTAL resident                                           = 38512 B
+  !                  = 37.6 KB < 48 KB static limit (was 39472 B pre P0/P1).
   !
   ! At NPRE=4 (the production A100 config) the reals halve. NCU measured the
-  ! pre-P0/P1 static at 16998 B = 16.6 KiB -> 9 blocks/SM. With P0/P1 plus
-  ! P0b (+432 B scalar pad) and P0c (+384 B bf pad) the model is ~17334 B
+  ! pre-P0/P1 static at 16998 B = 16.6 KiB -> 9 blocks/SM. With P0 (+720 B
+  ! local_subgrid pad) and P1 (-1200 B edge_e removed) the net is ~16518 B
   ! -> still 9 blocks/SM (164 KB carveout, +1 KB/block driver reserve). edge_e
   ! is now recomputed inline; the next lever for 10 blocks/SM (needs <15770 B)
-  ! is full corner_x/y/z recompute (-6048 B FP32), not per-field slimming.
+  ! is slimming the corner_x/y/z family (-6048 B FP32) -- physics audit first.
   !
   ! Reference: hydro_integrator_kernel resident shared is 12384 B = 12.1 KB
   ! (subgrid_6x6x6cell_primitive 9504 + 6 interface arrays 2880); the hydro
@@ -3939,12 +3937,12 @@ contains
     type(subgrid_2x2x3cell_primitive), shared :: left_interfaces_z, right_interfaces_z
     type(subgrid_6x6x6cell_primitive), shared :: local_subgrid
 #if NVAR>5+NENER
-    real(kind=dp), shared :: scalar_subgrid(0:2*nsubgrid+4, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
+    real(kind=dp), shared :: scalar_subgrid(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
 #endif
 #ifdef MHD
     ! MHD-only resident shared buffers -- see the shared-memory budget block
-    ! above: 40144 B total at nsubgrid=1, nvar=8, FP64 (~20.1 KB at NPRE=4)
-    ! -> fits the 48 KB static limit; A100 occupancy should remain at 9 blocks/SM.
+    ! above: 39472 B total at nsubgrid=1, nvar=8, FP64 (~19.8 KB at NPRE=4)
+    ! -> fits the 48 KB static limit with ~8.5 KB headroom.
     type(subgrid_face_b_t), shared :: bf
     ! P1 diet: resident subgrid_edge_e_t (1200 B FP32) removed -- the 12 edge-E
     ! values each cell needs are recomputed inline in trace_3d via edge_e_{x,y,z}.
