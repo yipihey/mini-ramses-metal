@@ -3186,23 +3186,22 @@ contains
 
 #ifdef MHD
   ! #########################################################################
-  ! ##  CUBE ("rock") MHD INTEGRATOR DEVICE ROUTINES (Stages B2-C6)        ##
+  ! ##  MHD-ONLY DEVICE ROUTINES (no hydro analog)                         ##
   ! ##                                                                     ##
-  ! ##  These are the MHD analogs of the hydro pipeline helpers above. Each##
-  ! ##  loops over the whole 6^3 shared subgrid (NOT a z-plane ring); they ##
-  ! ##  re-host the adversarially-verified plane-sweep physics from history##
-  ! ##  (git show 6e6a715b:gpu/gpu_hydro.cuf -- mhd_ctoprim_fill/load_bfield##
-  ! ##  /mhd_face_b_slopes/mhd_edge_emf/mhd_trace_predict) and the CPU      ##
-  ! ##  originals in hydro/umuscl.f90 + hydro/godunov_fine.f90. Only the    ##
-  ! ##  iteration structure changed: z-ring slot (slot,ic/im/ip) -> whole- ##
-  ! ##  subgrid index k-1/k/k+1; the math/signs/floors are unchanged.       ##
-  ! ##  EVERY working buffer lives in shared memory (B1 budget): the four   ##
-  ! ##  corner states are stored only on the consumed oct-edge lattice (the ##
-  ! ##  subgrid_*edge_corner family) and the face-B transverse slopes (dbf) ##
-  ! ##  are recomputed inline from the shared bf (face_b_tvd_slope). The    ##
-  ! ##  kernel therefore needs NO global scratch (the former per-block      ##
-  ! ##  mhd_corner_scratch/mhd_dbf_scratch arrays scaled with the level's   ##
-  ! ##  oct count -- ~174 KB/oct -- and are gone).                          ##
+  ! ##  The MHD pipeline stages that extend the hydro routines above are   ##
+  ! ##  merged INTO them as #ifdef MHD blocks (CPU umuscl.f90 style). What ##
+  ! ##  remains here are the MHD-only pieces with no hydro counterpart:    ##
+  ! ##  face_b_tvd_slope (dbf), the passive-scalar flux helpers, the 2D    ##
+  ! ##  EMF corner gather/solve (cmp_mag_flx_mhd), zero_euler_fluxes_mhd,  ##
+  ! ##  zero_fine_emf, and get_cf_cell. They re-host the adversarially-    ##
+  ! ##  verified plane-sweep physics from history (git show               ##
+  ! ##  6e6a715b:gpu/gpu_hydro.cuf) and the CPU originals in              ##
+  ! ##  hydro/umuscl.f90 + hydro/godunov_fine.f90; math/signs/floors are   ##
+  ! ##  unchanged. EVERY working buffer lives in shared memory (B1 budget):##
+  ! ##  the four corner states are stored only on the consumed oct-edge    ##
+  ! ##  lattice (the subgrid_*edge_corner family) and the face-B transverse##
+  ! ##  slopes (dbf) are recomputed inline from the shared bf              ##
+  ! ##  (face_b_tvd_slope). The kernel therefore needs NO global scratch.  ##
   ! #########################################################################
 
   ! =========================================================================
@@ -3580,7 +3579,7 @@ contains
 #endif
 
   ! ##########################################################################
-  ! ## STAGE B1: mhd_integrator_kernel SHARED-MEMORY BUDGET (all-resident)   ##
+  ! ## STAGE B1: hydro_integrator_kernel (MHD) SHARED-MEMORY BUDGET           ##
   ! ##########################################################################
   !
   ! The fused MHD Godunov+CT kernel keeps EVERY working buffer in shared memory
@@ -3624,7 +3623,6 @@ contains
   ! ##########################################################################
 
 #ifndef PAPER
-#ifndef MHD
   attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, bold, bnew, &
        & f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
@@ -3660,6 +3658,19 @@ contains
     type(subgrid_2x3x2cell_primitive), shared :: left_interfaces_y, right_interfaces_y
     type(subgrid_2x2x3cell_primitive), shared :: left_interfaces_z, right_interfaces_z
     type(subgrid_6x6x6cell_primitive), shared :: local_subgrid
+#ifdef MHD
+    ! MHD-only resident shared buffers -- see the shared-memory budget block
+    ! above: 46320 B total at nsubgrid=1, nvar=8 -> fits the 48 KB static limit.
+    real(kind=dp), shared :: scalar_subgrid(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
+    type(subgrid_face_b_t), shared :: bf
+    type(subgrid_edge_e_t), shared :: edge_e
+    type(subgrid_2x3x3edge_primitive), shared :: emfx
+    type(subgrid_3x2x3edge_primitive), shared :: emfy
+    type(subgrid_3x3x2edge_primitive), shared :: emfz
+    type(subgrid_2x3x3edge_corner), shared :: corner_x
+    type(subgrid_3x2x3edge_corner), shared :: corner_y
+    type(subgrid_3x3x2edge_corner), shared :: corner_z
+#endif
     real(kind=dp) :: dtdx
     integer :: block_idx  ! The index of this block, corresponds to the subgrid to load
     integer :: thread_idx ! The index of this thread within the block
@@ -3677,6 +3688,9 @@ contains
     ! Convert from conserved to primitive variables
     ! =======================================================================
     call subgrid_conserved_2_primitive(grid, uold, bold, f, constant_gravity, nbor, &
+#ifdef MHD
+         & scalar_subgrid, bf, &
+#endif
          & head_idx, block_idx, thread_idx, gamma, smallr, smallc, dt, local_subgrid)
 
     ! =======================================================================
@@ -3684,6 +3698,10 @@ contains
     ! =======================================================================
     ! This will compute the interface states and write them to shared memory
     call trace_3d(local_subgrid, thread_idx, &
+#ifdef MHD
+         & scalar_subgrid, bf, edge_e, corner_x, corner_y, corner_z, &
+         & smallr, smallc, slope_mag, induction, &
+#endif
          & left_interfaces_x, right_interfaces_x, left_interfaces_y, right_interfaces_y, &
          & left_interfaces_z, right_interfaces_z, gamma, dtdx, slope)
 
@@ -3698,17 +3716,37 @@ contains
          & right_interfaces_y, left_interfaces_z, right_interfaces_z, thread_idx, &
          & gamma, smallr, smallc, riemann)
 
+#ifdef MHD
+    ! Pure induction: zero the Euler fluxes so only the CT update acts
+    ! (CPU godunov_fine.f90:667). induction is block-uniform, so the
+    ! syncthreads inside the call is safe.
+    if (induction) then
+       call zero_euler_fluxes_mhd(left_interfaces_x, left_interfaces_y, left_interfaces_z, thread_idx)
+    endif
+
+    ! 2D EMF solve from the shared edge-corner buffers -> edge-EMF subgrids
+    call cmp_mag_flx_mhd(corner_x, corner_y, corner_z, emfx, emfy, emfz, thread_idx, &
+         & gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin, riemann2d)
+#endif
+
     ! =======================================================================
     ! Zero fluxes at boundaries with finer levels.
     ! =======================================================================
     if (ilevel < levelmax) then
        call zero_fine_fluxes(local_subgrid, left_interfaces_x, left_interfaces_y, left_interfaces_z, thread_idx)
+#ifdef MHD
+       call zero_fine_emf(local_subgrid, emfx, emfy, emfz, thread_idx)
+#endif
     endif
 
     ! =======================================================================
     ! Update the conserved variables at current level.
     ! =======================================================================
-    call conservative_update(unew, bnew, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, head_idx, block_idx, &
+    call conservative_update(unew, bnew, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, &
+#ifdef MHD
+         & emfx, emfy, emfz, &
+#endif
+         & head_idx, block_idx, &
          & thread_idx, dtdx)
 
     ! =======================================================================
@@ -3716,123 +3754,14 @@ contains
     ! =======================================================================
     if (ilevel > levelmin) then
        call coarse_cell_update(grid, unew, bnew, father, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, &
+#ifdef MHD
+            & emfx, emfy, emfz, &
+#endif
             & head_idx, block_idx, thread_idx, ngridmax, dtdx)
     endif
 
   end subroutine hydro_integrator_kernel
-#endif
 
-  ! =========================================================================
-  !> @brief (Stage C7) Fused cube ("rock") MHD Godunov + constrained-transport
-  !> integrator. The MHD analog of hydro_integrator_kernel, dispatched by
-  !> gpu_godunov under #ifdef MHD (this whole kernel is compiled only when MHD is
-  !> defined; the rest of the build is intact otherwise). Pipeline over the
-  !> shared 6^3 subgrid:
-  !>   B2 subgrid_conserved_2_primitive_mhd  (rho,v,P,B + scalars + face-B bf)
-  !>   C1 trace_3d_mhd                        (edge-E, predictor incl. inline
-  !>                                           face-B dbf slopes (B3), qm/qp,
-  !>                                           corners -> shared edge buffers)
-  !>   C2 riemann_driver_mhd                  (1D fluxes)
-  !>   C3 cmp_mag_flx_mhd                      (2D EMF solve, shared corners)
-  !>   C4 zero_fine_fluxes_mhd + zero_fine_emf (if ilevel<levelmax)
-  !>   C5 conservative_update_mhd             (cell update + CT, EMF *dt/dx once)
-  !>   C6 coarse_cell_update_mhd              (if ilevel>levelmin)
-  !> Every working buffer is in shared memory (B1 budget above) -- the kernel
-  !> needs NO global scratch, exactly like hydro_integrator_kernel.
-  !> slope=slope_type, slope_mag=slope_mag_type, riemann (1D), riemann2d (2D),
-  !> induction are passed by value; gravity via constant_gravity/f.
-#ifdef MHD
-  attributes(global) subroutine mhd_integrator_kernel(grid, uold, unew, bold, bnew, &
-       & f, father, nbor, &
-       & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
-       & gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
-       & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
-    type(oct), device :: grid(*)
-    integer, device :: father(*)
-    integer, device :: nbor(1:subgridsize,*)
-    real(kind=8), device :: constant_gravity(1:3)
-    real(kind=dp), device :: f(1:twotondim,1:ndim,*)
-    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
-    real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
-    real(kind=dp), device :: bold(1:twotondim,1:6,*)
-    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
-    integer(kind=4), intent(in), value :: head_idx, num_subgrids
-    integer, intent(in), value :: ngridmax, ilevel, levelmin, levelmax
-    real(kind=dp), intent(in), value :: gamma, smallr, smallc, dt, dx
-    real(kind=dp), intent(in), value :: switch_llf_dmin, switch_llf_pmin
-    integer, intent(in), value :: slope, slope_mag, riemann, riemann2d
-    logical, intent(in), value :: induction
-
-    ! Resident shared buffers -- the whole working set. See the budget block
-    ! above: 46320 B at nsubgrid=1, nvar=8 -> fits the 48 KB static limit.
-    type(subgrid_6x6x6cell_primitive), shared :: local_mhd
-    real(kind=dp), shared :: scalar_subgrid(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar_mhd)
-    type(subgrid_face_b_t), shared :: bf
-    type(subgrid_edge_e_t), shared :: edge_e
-    type(subgrid_2x3x3edge_primitive), shared :: emfx
-    type(subgrid_3x2x3edge_primitive), shared :: emfy
-    type(subgrid_3x3x2edge_primitive), shared :: emfz
-    type(subgrid_2x3x3edge_corner), shared :: corner_x
-    type(subgrid_3x2x3edge_corner), shared :: corner_y
-    type(subgrid_3x3x2edge_corner), shared :: corner_z
-    type(subgrid_3x2x2cell_primitive), shared :: left_x, right_x
-    type(subgrid_2x3x2cell_primitive), shared :: left_y, right_y
-    type(subgrid_2x2x3cell_primitive), shared :: left_z, right_z
-    real(kind=dp) :: dtdx
-    integer :: block_idx, thread_idx
-
-    dtdx = dt/dx
-    block_idx = blockIdx%x - 1
-    thread_idx = threadIdx%x - 1
-    if (block_idx >= num_subgrids) return
-
-    ! B2: conserved -> primitive (+ cell-centred B + bf face buffer + scalars)
-    call subgrid_conserved_2_primitive(grid, uold, bold, f, constant_gravity, nbor, &
-         & scalar_subgrid, bf, &
-         & head_idx, block_idx, thread_idx, gamma, smallr, smallc, dt, local_mhd)
-
-    ! C1: edge-E + MUSCL predictor (with inline face-B dbf slopes, B3) + qm/qp
-    !     + corner states into the shared edge-corner buffers
-    call trace_3d(local_mhd, thread_idx, &
-         & scalar_subgrid, bf, edge_e, corner_x, corner_y, corner_z, &
-         & smallr, smallc, slope_mag, induction, &
-         & left_x, right_x, left_y, right_y, left_z, right_z, gamma, dtdx, slope)
-
-    ! C2: 1D MHD fluxes (written back into the left_* interface arrays)
-    call riemann_driver(left_x, right_x, left_y, right_y, left_z, right_z, &
-         & thread_idx, gamma, smallr, smallc, riemann)
-
-    ! Pure induction: zero the Euler fluxes so only the CT update acts
-    ! (CPU godunov_fine.f90:667). induction is block-uniform, so the
-    ! syncthreads inside the call is safe.
-    if (induction) then
-       call zero_euler_fluxes_mhd(left_x, left_y, left_z, thread_idx)
-    endif
-
-    ! C3: 2D EMF solve from the shared edge-corner buffers -> edge-EMF subgrids
-    call cmp_mag_flx_mhd(corner_x, corner_y, corner_z, emfx, emfy, emfz, thread_idx, &
-         & gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin, riemann2d)
-
-    ! C4: zero fluxes + EMFs at refined boundaries (only if finer levels exist)
-    if (ilevel < levelmax) then
-       call zero_fine_fluxes(local_mhd, left_x, left_y, left_z, thread_idx)
-       call zero_fine_emf(local_mhd, emfx, emfy, emfz, thread_idx)
-    endif
-
-    ! C5: conservative update at current level + constrained-transport B update
-    call conservative_update(unew, bnew, nbor, left_x, left_y, left_z, &
-         & emfx, emfy, emfz, &
-         & head_idx, block_idx, thread_idx, dtdx)
-
-    ! C6: coarse/fine flux + EMF correction into the parent level
-    if (ilevel > levelmin) then
-       call coarse_cell_update(grid, unew, bnew, father, nbor, left_x, left_y, left_z, &
-            & emfx, emfy, emfz, &
-            & head_idx, block_idx, thread_idx, ngridmax, dtdx)
-    endif
-
-  end subroutine mhd_integrator_kernel
-#endif
 #endif
   ! =========================================================================
 
