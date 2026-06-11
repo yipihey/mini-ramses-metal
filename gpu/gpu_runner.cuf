@@ -419,7 +419,7 @@ contains
   !>
   subroutine gpu_star_formation(sim, ilevel, mstar_loc)
    use nvtx
-   use star_device, only: count_star_formation_kernel, star_formation_kernel
+   use star_device, only: count_site_kernel, count_star_kernel, star_formation_kernel, compute_star_swap_table
    use ramses_commons, only: ramses_t
 #ifndef WITHOUTMPI
    use mpi
@@ -428,13 +428,13 @@ contains
    integer, intent(in) :: ilevel
    real(kind=8), intent(inout) :: mstar_loc
 
-   integer(kind=4) :: head_idx, num_octs, icpu
-   integer(kind=4) :: num_threads, num_blocks
    real(kind=8) :: scale_nH, scale_T2, scale_l, scale_d, scale_t, scale_v
    real(kind=8) :: dx, vol, factG, d0, mstar
-   integer(kind=4) :: npart_old, npart_new
-   integer(i8b) :: npart_tot_old
+   integer(kind=4) :: head_idx, num_octs, head_part, npart_new
+   integer(kind=8) :: nstar_new
+   integer(kind=4) :: num_threads, num_blocks
    integer(kind=4), device :: npart_new_d
+   integer(kind=8), device :: nstar_new_d
 
    ! Conversion factor from user units to cgs units
    call units(sim%r,sim%g,scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
@@ -447,6 +447,7 @@ contains
 
    d0 = sim%r%n_star / scale_nH
    mstar = sim%r%m_star * sim%r%mass_sph
+   mstar_loc =0d0
 
    head_idx = sim%m%head(ilevel)
    num_octs = sim%m%noct(ilevel)
@@ -456,49 +457,59 @@ contains
    if (num_octs <= 0) return
 
    call nvtxStartRange("GPU Star Formation Pass 1", color=3)!blue
-   call count_star_formation_kernel<<<num_blocks, num_threads>>>(grid, uold, prefix_sum, &
+   ! Array flag1 contains the number of star quanta per AMR cell
+   ! Array prefix_sum = 1 if we have a SF site and 0 otherwise.
+   call count_site_kernel<<<num_blocks, num_threads>>>(grid, uold, flag1, prefix_sum, &
         & head_idx, num_octs, ilevel, d0, dx, vol, factG, mstar, &
         & sim%r%ivar_refine, sim%r%var_cut_refine, &
-        & sim%g%dtnew(ilevel), sim%r%seed(1), sim%g%aexp, sim%r%gamma, &
+        & sim%g%dtnew(ilevel), sim%g%texp, sim%r%gamma, &
         & sim%r%smallc, sim%r%smallr, sim%r%sf_model, sim%r%eps_star, &
         & sim%r%sgs_turb, sim%r%iturb)
    call GPU_Error_Check(__FILE__, __LINE__)
    call nvtxEndRange()
 
-   ! Prefix sum to get local count
-   call gpu_scan((head_idx - 1) * twotondim + 1, num_octs * twotondim, npart_new_d)
+   ! Get total number of true new stars
+   nstar_new_d = 0
+   call count_star_kernel<<<num_blocks, num_threads>>>(flag1, head_idx, num_octs, nstar_new_d)
+   nstar_new = nstar_new_d
+   mstar_loc = real(nstar_new, 8) * mstar
+
+   ! Prefix sum to get cumulative SF site count
+   ! Get total number of new SF sites (therefore new star particles)
+   call gpu_scan(prefix_sum, (head_idx - 1) * twotondim + 1, num_octs * twotondim, npart_new_d)
    npart_new = npart_new_d
 
    if (npart_new > 0) then
 
-      npart_old = sim%star%npart
-      npart_tot_old = sim%star%npart_tot
+      ! Array flag2 contains the parent AMR cell index of each new star
+      call compute_star_swap_table<<<num_blocks, num_threads>>>(prefix_sum, flag2, head_idx, num_octs)
 
-      if (npart_old + npart_new > sim%r%nstarmax) then
+      head_part = sim%star%npart + 1
+
+      if (head_part + npart_new - 1 > sim%r%nstarmax) then
          write(*,*)'Not enough memory for star particles on GPU'
          stop
       endif
 
+      num_threads = 256
+      num_blocks = (npart_new + num_threads - 1) / num_threads
+
       call nvtxStartRange("GPU Star Formation Pass 2", color=3)!blue
-      call star_formation_kernel<<<num_blocks, num_threads>>>(grid, uold, &
+      ! Pull new star particles from free memory and set properties
+      ! Also modifies parent cell gas properties (mass conserving)
+      call star_formation_kernel<<<num_blocks, num_threads>>>(grid, uold, flag1, flag2, &
            & star_xp, star_vp, star_mp, star_tp, star_zp, star_levelp, star_idp, &
-           & prefix_sum, d_skip, int(sim%r%nstarmax,kind=8), &
-           & head_idx, num_octs, ilevel, dx, vol, mstar, &
-           & npart_old, npart_tot_old + npart_new, &
-           & sim%g%dtnew(ilevel), sim%r%seed(1), sim%g%aexp, sim%r%gamma, &
-           & sim%r%metal, sim%r%z_ave, sim%r%ientropy, sim%r%dual_energy, sim%r%imetal, &
-           & sim%r%nstarmax, &
-           & d0, factG, sim%r%ivar_refine, sim%r%var_cut_refine, sim%r%smallc, sim%r%smallr, &
-           & sim%r%sf_model, sim%r%eps_star, sim%r%sgs_turb, sim%r%iturb)
+           & head_part, npart_new, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
+           & dx, vol, mstar, d_skip, int(sim%r%nstarmax,8), &
+           & sim%g%dtnew(ilevel), sim%g%texp, sim%g%aexp, &
+           & sim%r%metal, sim%r%imetal, sim%r%z_ave, sim%r%ientropy, sim%r%dual_energy)
       call GPU_Error_Check(__FILE__, __LINE__)
       call nvtxEndRange()
 
    endif
 
-   ! Update host bookkeeping
-   sim%star%npart = npart_old + npart_new
-   mstar_loc = real(npart_new, 8) * mstar
-   sim%star%npart_tot = sim%star%npart_tot + npart_new
+   ! Update host star particle count
+   sim%star%npart = sim%star%npart + npart_new
 
   end subroutine gpu_star_formation
 
@@ -657,7 +668,7 @@ contains
           call cub_inclusive_sum(c_loc(prefix_sum), head_idx, num_octs)
           call get_total_sum<<<1,1>>>(prefix_sum, head_idx, num_octs, new_noct_d)
 #else
-          call gpu_scan(head_idx, num_octs, new_noct_d)
+          call gpu_scan(prefix_sum, head_idx, num_octs, new_noct_d)
 #endif
           ! Compute local swap table
           ! Update global swap table
@@ -739,7 +750,7 @@ contains
                   & head_idx, num_octs, ibit)
 
              ! Compute prefix sum
-             call gpu_scan(head_idx, num_octs)
+             call gpu_scan(prefix_sum, head_idx, num_octs)
 
              ! Compute local swap table
              call compute_local_swap_table<<<num_blocks, num_threads>>>(swap_local, swap_global, prefix_sum, &
@@ -857,7 +868,7 @@ contains
 #if defined(CUB_SCAN_REFINE)
              call cub_inclusive_sum(c_loc(prefix_sum), head_idx, num_subgrids)
 #else
-             call gpu_scan(head_idx, num_subgrids, new_noct_d)
+             call gpu_scan(prefix_sum, head_idx, num_subgrids, new_noct_d)
 #endif
              ! Compute cache swap table
              ! Make new ghost octs in cache
@@ -1159,7 +1170,8 @@ contains
   !> @detail
   !> Perform a prefix scum only starting from index head_idx and over num_octs elements.
   !>
-  subroutine gpu_scan(head_idx, num_octs, total_sum)
+  subroutine gpu_scan(data, head_idx, num_octs, total_sum)
+    integer(kind=4), device :: data(*)
     integer(kind=4) :: head_idx
     integer(kind=4) :: num_octs
     integer(kind=4), device, optional :: total_sum
@@ -1178,19 +1190,19 @@ contains
 
        ! Works only for arrray size smaller or equal than 256^2=65'536
        grid_size_0 = (num_octs + block_size - 1) / block_size
-       call block_scan<<<grid_size_0, block_size>>>(prefix_sum, head_idx, num_octs, partial_sums_0, total_sum_d)
+       call block_scan<<<grid_size_0, block_size>>>(data, head_idx, num_octs, partial_sums_0, total_sum_d)
        if (grid_size_0 > 1) then
           call block_scan<<<1, grid_size_0>>>(partial_sums_0, 1, grid_size_0)
           offset = head_idx + block_size
           size = num_octs - block_size
-          call uniform_add<<<grid_size_0 - 1, block_size>>>(prefix_sum, offset, size, partial_sums_0, total_sum_d)
+          call uniform_add<<<grid_size_0 - 1, block_size>>>(data, offset, size, partial_sums_0, total_sum_d)
        end if
 
     else if(num_octs <= num_max_1)then
 
        ! Works only for arrray size smaller or equal than 256^3=16'777'216
        grid_size_0 = (num_octs + block_size - 1) / block_size
-       call block_scan<<<grid_size_0, block_size>>>(prefix_sum, head_idx, num_octs, partial_sums_0)
+       call block_scan<<<grid_size_0, block_size>>>(data, head_idx, num_octs, partial_sums_0)
        grid_size_1 = (grid_size_0 + block_size - 1) / block_size
        call block_scan<<<grid_size_1, block_size>>>(partial_sums_0, 1, grid_size_0, partial_sums_1)
        if (grid_size_1 > 1) then
@@ -1201,13 +1213,13 @@ contains
        end if
        offset = head_idx + block_size
        size = num_octs - block_size
-       call uniform_add<<<grid_size_0 - 1, block_size>>>(prefix_sum, offset, size, partial_sums_0, total_sum_d)
+       call uniform_add<<<grid_size_0 - 1, block_size>>>(data, offset, size, partial_sums_0, total_sum_d)
 
     else if(num_octs <= num_max_2)then
 
        ! Works only for arrray size smaller or equal than huge(1_4)=2'147'483'647
        grid_size_0 = (num_octs + block_size - 1) / block_size
-       call block_scan<<<grid_size_0, block_size>>>(prefix_sum, head_idx, num_octs, partial_sums_0)
+       call block_scan<<<grid_size_0, block_size>>>(data, head_idx, num_octs, partial_sums_0)
        grid_size_1 = (grid_size_0 + block_size - 1) / block_size
        call block_scan<<<grid_size_1, block_size>>>(partial_sums_0, 1, grid_size_0, partial_sums_1)
        grid_size_2 = (grid_size_1 + block_size - 1) / block_size
@@ -1223,7 +1235,7 @@ contains
        call uniform_add<<<grid_size_1 - 1, block_size>>>(partial_sums_0, offset, size, partial_sums_1)
        offset = head_idx + block_size
        size = num_octs - block_size
-       call uniform_add<<<grid_size_0 - 1, block_size>>>(prefix_sum, offset, size, partial_sums_0, total_sum_d)
+       call uniform_add<<<grid_size_0 - 1, block_size>>>(data, offset, size, partial_sums_0, total_sum_d)
 
     else
 
@@ -1800,7 +1812,7 @@ contains
 
     ! Compute prefix sums
     call nvtxStartRange("GPU build_mg", color=2)!yellow
-    call gpu_scan(head_idx, num_octs, new_noct_d)
+    call gpu_scan(prefix_sum, head_idx, num_octs, new_noct_d)
     new_noct = new_noct_d
     call nvtxEndRange()
 

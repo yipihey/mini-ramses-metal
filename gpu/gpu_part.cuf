@@ -469,7 +469,7 @@ subroutine gpu_split_part(sim, ilevel)
 
   ! Compute prefix sum
   call nvtxStartRange("gpu_split_part", color=4) ! purple
-  call gpu_scan(head_idx, num_parts, n_fine_dev)
+  call gpu_scan(prefix_sum, head_idx, num_parts, n_fine_dev)
   call nvtxEndRange()
 
   n_fine = n_fine_dev
@@ -726,7 +726,7 @@ subroutine gpu_sort_part(sim, ilevel)
           & sortp, prefix_sum, head_idx, num_parts, ibit)
 
      ! Compute prefix sum
-     call gpu_scan(head_idx, num_parts)
+     call gpu_scan(prefix_sum, head_idx, num_parts)
 
      ! Compute sorted indices
      call compute_local_swap_table<<<num_blocks, num_threads>>>(isp_swap, &
@@ -1916,7 +1916,7 @@ subroutine gpu_cic_part_small(sim, ilevel, rtype)
   call nvtxStartRange("gpu_cic_part_small:runs", color=4)
   call init_leader_marker_part_small<<<blk, nblk>>>(sortp, idp_swap, &
        & prefix_sum, head_idx, num_parts)
-  call gpu_scan(head_idx, num_parts)
+  call gpu_scan(prefix_sum, head_idx, num_parts)
   call fill_run_tail_part_small<<<blk, nblk>>>(prefix_sum, isp_swap, &
        & head_idx, num_parts)
   call nvtxEndRange()

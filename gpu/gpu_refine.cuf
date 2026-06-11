@@ -564,6 +564,7 @@ contains
 
   end subroutine gather_keys_2
   ! =========================================================================
+
   ! =========================================================================
   attributes(global) subroutine compute_local_swap_table(swap_local, swap_global, prefix_sum, head_idx, num_octs)
     integer(kind=4), device :: swap_local(*)
@@ -576,7 +577,6 @@ contains
 
   end subroutine compute_local_swap_table
   ! =========================================================================
-
 
   ! =========================================================================
   attributes(device) subroutine compute_local_swap_table_impl(swap_local, swap_global, prefix_sum, head_idx, num_octs)
