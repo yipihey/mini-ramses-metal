@@ -497,7 +497,7 @@ contains
       call nvtxStartRange("GPU Star Formation Pass 2", color=3)!blue
       ! Pull new star particles from free memory and set properties
       ! Also modifies parent cell gas properties (mass conserving)
-      call star_formation_kernel<<<num_blocks, num_threads>>>(grid, uold, flag1, flag2, &
+      call star_formation_kernel<<<num_blocks, num_threads>>>(grid, uold, f, flag1, flag2, &
            & star_xp, star_vp, star_mp, star_tp, star_zp, star_levelp, star_idp, &
            & head_part, npart_new, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
            & dx, vol, mstar, d_skip, int(sim%r%nstarmax,8), &
