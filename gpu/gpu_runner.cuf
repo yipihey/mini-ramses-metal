@@ -4,6 +4,9 @@ module gpu_runner
   use oct_commons, only: oct
   use gpu_utils
   use cudafor
+#ifdef INTEGRATOR_NVTX
+  use hydro_device, only: integrator_subgrid_ws_t
+#endif
   implicit none
   integer, dimension(1:3), parameter::n_nbor = (/1,2,2/)
 
@@ -32,6 +35,13 @@ module gpu_runner
   !> gpu_hydro.cuf. The former mhd_corner_scratch / mhd_dbf_scratch global
   !> scratch arrays, ~174 KB per oct of the integrated level, are gone.)
   real(kind=dp), device, allocatable, dimension(:,:,:) :: bold, bnew
+
+#ifdef INTEGRATOR_NVTX
+  ! Per-subgrid spill buffer for phased integrator NVTX profiling (see
+  ! gpu_hydro_integrator_nvtx.inc). Sized to num_subgrids at the active level.
+  type(integrator_subgrid_ws_t), device, allocatable :: integrator_ws(:)
+  integer :: integrator_ws_capacity = 0
+#endif
 
   !> Arrays to hold the gravity variables on the device
   real(kind=dp), device, allocatable, dimension(:,:) :: phi, rho, nref, phi_old
@@ -99,6 +109,19 @@ module gpu_runner
 contains
 
   include 'gpu_scan.cuf'
+
+#ifdef INTEGRATOR_NVTX
+  subroutine ensure_integrator_ws(num_subgrids)
+    use hydro_device, only: integrator_subgrid_ws_t
+    integer, intent(in) :: num_subgrids
+    if (num_subgrids <= 0) return
+    if (.not. allocated(integrator_ws) .or. integrator_ws_capacity < num_subgrids) then
+       if (allocated(integrator_ws)) deallocate(integrator_ws)
+       allocate(integrator_ws(num_subgrids))
+       integrator_ws_capacity = num_subgrids
+    endif
+  end subroutine ensure_integrator_ws
+#endif
 
   !> @brief
   !> Compute the new time step on a GPU
@@ -323,6 +346,14 @@ contains
     use hydro_device, only: hydro_integrator_paper_kernel
 #else
     use hydro_device, only: hydro_integrator_kernel
+#ifdef INTEGRATOR_NVTX
+    use hydro_device, only: hydro_integrator_cons2prim_kernel, hydro_integrator_trace_kernel, &
+         & hydro_integrator_riemann_kernel, hydro_integrator_zero_fine_kernel, &
+         & hydro_integrator_update_kernel, hydro_integrator_coarse_kernel
+#ifdef MHD
+    use hydro_device, only: hydro_integrator_zero_euler_kernel, hydro_integrator_emf_kernel
+#endif
+#endif
 #endif
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout)::sim
@@ -333,9 +364,7 @@ contains
     real(dp) :: dt, dx, gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
     integer :: slope, riemann, slope_mag, riemann2d
     logical :: induction
-#ifdef MHD
     character(len=32) :: nvtx_lbl
-#endif
 
     if(sim%r%verbose.and.sim%g%myid==1)write(*,'("   Entering gpu_godunov for level ",I2)')ilevel
 
@@ -356,33 +385,102 @@ contains
     num_subgrids = sim%m%noct(ilevel) / nsubgridtondim
     num_blocks = num_subgrids
 
-#ifdef MHD
-    write(nvtx_lbl, '("GPU MHD Godunov L",I0)') ilevel
+    write(nvtx_lbl, '("integrator:L",I0)') ilevel
     call nvtxStartRange(trim(nvtx_lbl), color=0)!green
-#else
-    call nvtxStartRange("GPU Godunov", color=0)!green
-#endif
 #ifdef PAPER
     threads_per_block = (2*nsubgrid + 4)**2
     threads_per_block = ((threads_per_block + 31) / 32) * 32
     call hydro_integrator_paper_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
          & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
          & gamma, dt, dx, slope, riemann, constant_gravity)
+    call GPU_Error_Check(__FILE__, __LINE__)
 #else
     if(nsubgrid == 1)threads_per_block = 64
     if(nsubgrid == 2)threads_per_block = 256
-       ! One launch for hydro and MHD: bold/bnew and the MHD runtime parameters
-       ! are passed unconditionally (unallocated/unused without MHD). Under MHD
-       ! the integrator's whole working set (corner states included) lives in
-       ! kernel shared memory -- no per-level scratch to allocate (B1 budget
-       ! block in gpu_hydro.cuf).
+#ifdef INTEGRATOR_NVTX
+    call ensure_integrator_ws(num_subgrids)
+
+    call nvtxStartRange("integrator:cons2prim", color=1)!blue
+    call hydro_integrator_cons2prim_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, bold, bnew, &
+         & f, father, nbor, integrator_ws, head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, &
+         & sim%r%nlevelmax, gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
+         & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    call nvtxEndRange()
+
+    call nvtxStartRange("integrator:trace_3d", color=1)
+    call hydro_integrator_trace_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, bold, bnew, &
+         & f, father, nbor, integrator_ws, head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, &
+         & sim%r%nlevelmax, gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
+         & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    call nvtxEndRange()
+
+    call nvtxStartRange("integrator:flux", color=1)
+    call hydro_integrator_riemann_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, bold, bnew, &
+         & f, father, nbor, integrator_ws, head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, &
+         & sim%r%nlevelmax, gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
+         & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    call nvtxEndRange()
+
+#ifdef MHD
+    if (induction) then
+       call nvtxStartRange("integrator:zero_euler", color=1)
+       call hydro_integrator_zero_euler_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, bold, bnew, &
+            & f, father, nbor, integrator_ws, head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, &
+            & sim%r%nlevelmax, gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
+            & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
+       call GPU_Error_Check(__FILE__, __LINE__)
+       call nvtxEndRange()
+    endif
+
+    call nvtxStartRange("integrator:emf", color=1)
+    call hydro_integrator_emf_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, bold, bnew, &
+         & f, father, nbor, integrator_ws, head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, &
+         & sim%r%nlevelmax, gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
+         & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    call nvtxEndRange()
+#endif
+
+    if (ilevel < sim%r%nlevelmax) then
+       call nvtxStartRange("integrator:zero_fine", color=1)
+       call hydro_integrator_zero_fine_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, bold, bnew, &
+            & f, father, nbor, integrator_ws, head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, &
+            & sim%r%nlevelmax, gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
+            & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
+       call GPU_Error_Check(__FILE__, __LINE__)
+       call nvtxEndRange()
+    endif
+
+    call nvtxStartRange("integrator:update", color=1)
+    call hydro_integrator_update_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, bold, bnew, &
+         & f, father, nbor, integrator_ws, head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, &
+         & sim%r%nlevelmax, gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
+         & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    call nvtxEndRange()
+
+    if (ilevel > sim%r%levelmin) then
+       call nvtxStartRange("integrator:coarse", color=1)
+       call hydro_integrator_coarse_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, bold, bnew, &
+            & f, father, nbor, integrator_ws, head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, &
+            & sim%r%nlevelmax, gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
+            & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
+       call GPU_Error_Check(__FILE__, __LINE__)
+       call nvtxEndRange()
+    endif
+#else
+       ! Fused kernel: one launch, all shared-memory resident (production path).
        call hydro_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, bold, bnew, &
             & f, father, nbor, &
             & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
             & gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
             & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
-#endif
     call GPU_Error_Check(__FILE__, __LINE__)
+#endif
+#endif
     call nvtxEndRange()
 
   end subroutine gpu_godunov
