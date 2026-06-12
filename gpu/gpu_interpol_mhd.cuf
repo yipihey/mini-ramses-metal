@@ -412,9 +412,7 @@ attributes(device) subroutine interpol_mhd_d(u1, u2, B1, B2, B3, refined, &
   logical :: refined(1:twondim)
   integer, value :: interpol_var, interpol_type
   real(kind=dp), value :: smallr
-#if NENER>0
   integer :: irad
-#endif
   integer :: j, ivar, idim, ind, ix, iy, iz
   real(kind=dp) :: xc(1:twotondim,1:3)
   real(kind=dp) :: a(0:twondim)
@@ -443,11 +441,9 @@ attributes(device) subroutine interpol_mhd_d(u1, u2, B1, B2, B3, refined, &
            emag = emag + 0.125_dp*(B1(j,idim)+B1(j,idim+3))**2
         end do
         erad = 0.0_dp
-#if NENER>0
         do irad = 1, nener
            erad = erad + u1(j,5+irad)
         end do
-#endif
         u1(j,5) = u1(j,5) - ekin - emag - erad
      end do
   end if
@@ -490,11 +486,9 @@ attributes(device) subroutine interpol_mhd_d(u1, u2, B1, B2, B3, refined, &
            emag = emag + 0.125_dp*(B2(ind,idim)+B2(ind,idim+3))**2
         end do
         erad = 0.0_dp
-#if NENER>0
         do irad = 1, nener
            erad = erad + u2(ind,5+irad)
         end do
-#endif
         u2(ind,5) = u2(ind,5) + ekin + emag + erad
      end do
   end if
