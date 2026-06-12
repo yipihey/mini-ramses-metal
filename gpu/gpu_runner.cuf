@@ -954,6 +954,7 @@ contains
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_threads, num_blocks
     real(kind=dp) :: gamma, err_grad_d, err_grad_p, floor_d, floor_p
+    real(kind=dp) :: smallr, smallc
     real(kind=dp) :: m_refine, jeans_refine, mass_sph, dx, factG
     integer(kind=8), device :: nflag_d
     integer(kind=8) :: nflag_h
@@ -966,6 +967,8 @@ contains
     err_grad_p = sim%r%err_grad_p
     floor_d = sim%r%floor_d
     floor_p = sim%r%floor_p
+    smallr = sim%r%smallr
+    smallc = sim%r%smallc
     mass_sph = sim%r%mass_sph
     m_refine = sim%r%m_refine(ilevel)
     jeans_refine = sim%r%jeans_refine(ilevel)
@@ -991,8 +994,8 @@ contains
        num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
        if(num_octs > 0)then
           call nvtxStartRange("GPU user_flag", color=2)!yellow
-          call hydro_flag_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(flag1, grid, nbor, uold, &
-               & head_idx, num_octs, gamma, err_grad_d, err_grad_p, floor_d, floor_p)
+          call hydro_flag_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(flag1, grid, nbor, uold, bold, &
+               & head_idx, num_octs, gamma, smallr, smallc, err_grad_d, err_grad_p, floor_d, floor_p)
           call nvtxEndRange()
        endif
     endif
