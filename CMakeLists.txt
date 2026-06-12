@@ -226,7 +226,7 @@ elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
     if(PAPER)
         list(APPEND defines -DPAPER)
     endif()
-    set(fort_flags -cpp ${defines} -gpu=${CUDA_ARCH},fastmath -cuda -cudalib=nvtx -Mfreeform)
+    set(fort_flags -cpp ${defines} -gpu=${CUDA_ARCH},fastmath -cuda -cudalib=nvtx,curand -Mfreeform)
     if(DEBUG)
         list(APPEND fort_flags
             -O0 -traceback -g
@@ -239,7 +239,7 @@ elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
         list(APPEND fort_flags -gpu=lineinfo,ptxinfo -Minstrument -traceback -gopt)
     endif()
     # Link flags mirror LIBS in the Makefile
-    set(nvhpc_link_flags -gpu=${CUDA_ARCH},fastmath -cuda -cudalib=nvtx -lstdc++)
+    set(nvhpc_link_flags -gpu=${CUDA_ARCH},fastmath -cuda -cudalib=nvtx,curand -lstdc++)
     if(CUDA_PROFILE)
         list(APPEND nvhpc_link_flags -gpu=lineinfo,ptxinfo -Minstrument -traceback -gopt)
     endif()
