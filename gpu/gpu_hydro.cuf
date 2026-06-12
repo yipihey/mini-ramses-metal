@@ -1534,8 +1534,8 @@ contains
   !> @param[in] scalar_sub (MHD) : The passive-scalar subgrid (1:nvar-5)
   !> @param[in] bf (MHD) : The face-continuous low-face B buffer
   !> @param[inout] corner_x/y/z (MHD) : The edge corner-state buffers
-  !> @param[in] smallr, smallc (MHD) : Density and sound-speed floors (the
-  !>           hydro build keeps its hardcoded parameter floors)
+  !> @param[in] smallr, smallc2 : Density and squared sound-speed floors
+  !> @param[in] smallc (MHD) : Sound-speed floor
   !> @param[in] slope_mag (MHD) : The magnetic slope limiter id
   !> @param[in] induction (MHD) : Pure-induction (kinematic dynamo) switch
   !>
@@ -1545,7 +1545,7 @@ contains
 #endif
 #ifdef MHD
        & bf, corner_x, corner_y, corner_z, &
-       & smallr, smallc, slope_mag, induction, &
+       & smallc, slope_mag, induction, &
 #endif
        & left_interfaces_x, right_interfaces_x,left_interfaces_y, right_interfaces_y, &
        & left_interfaces_z, right_interfaces_z, gamma, smallr, smallc2, dtdx, slope)
@@ -1561,11 +1561,7 @@ contains
     type(primitive_t) :: slopes_x, slopes_y, slopes_z ! The limited slopes in the x, y, and z directions
     type(primitive_t) :: source_term ! The sources terms
 
-#ifndef MHD
-    real(kind=dp), parameter :: smallr = 1d-10
-    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
-    real(kind=dp), parameter :: smallp = smallr * smallc_squared
-#endif
+    real(kind=dp) :: smallp
     integer :: work_idx   ! Loop index for unit of work
     integer :: i, j, k    ! Cell indices
     integer :: work_size
@@ -1581,13 +1577,13 @@ contains
     type(subgrid_2x3x3edge_corner), intent(inout) :: corner_x
     type(subgrid_3x2x3edge_corner), intent(inout) :: corner_y
     type(subgrid_3x3x2edge_corner), intent(inout) :: corner_z
-    real(kind=dp), value :: smallr, smallc
+    real(kind=dp), value :: smallc
     integer, value :: slope_mag
     logical, value :: induction
 
     real(kind=dp), parameter :: half = 0.5_dp
     integer, parameter :: iqLL = 1, iqRL = 2, iqLR = 3, iqRR = 4
-    real(kind=dp) :: r, u, v, w, p, A, B, C, smallp
+    real(kind=dp) :: r, u, v, w, p, A, B, C
     real(kind=dp) :: drx,dux,dvx,dwx,dpx, dry,duy,dvy,dwy,dpy, drz,duz,dvz,dwz,dpz
     real(kind=dp) :: dBx,dCx, dAy,dCy, dAz,dBz
     real(kind=dp) :: AL,AR,BL,BR,CL,CR
@@ -1596,8 +1592,6 @@ contains
     real(kind=dp) :: ELL,ELR,ERL,ERR,FLL,FLR,FRL,FRR,GLL,GLR,GRL,GRR
     real(kind=dp) :: sr0, uu,vv,ww,Aa,Bb,Cc
     logical :: okp_x, okm_x, oka_x, okp_y, okm_y, oka_y, okp_z, okm_z, oka_z
-
-    smallp = smallr*smallc*smallc
 
     ! Phase 1 (raw edge-centred E) and its barrier are gone: the resident
     ! subgrid_edge_e_t buffer was removed (P1 shmem diet). local_subgrid and bf
@@ -3840,7 +3834,7 @@ contains
 #endif
 #ifdef MHD
          & bf, corner_x, corner_y, corner_z, &
-         & smallr, smallc, slope_mag, induction, &
+         & smallc, slope_mag, induction, &
 #endif
          & left_interfaces_x, right_interfaces_x, left_interfaces_y, right_interfaces_y, &
          & left_interfaces_z, right_interfaces_z, gamma, smallr, smallc2, dtdx, slope)
