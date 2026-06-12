@@ -1,4 +1,9 @@
 module init_part_module
+#ifdef _CUDA
+  use gpu_runner
+  use part_device, only: ensure_scan_capacity_part
+  use cudafor
+#endif
 
 contains
 !#########################################################################
@@ -25,7 +30,7 @@ recursive subroutine r_init_part(pst)
         call init_part(pst%s%r,pst%s%g,pst%s%m,pst%s%p)
      endif
      if(pst%s%r%star)then
-        call init_star(pst%s%r,pst%s%g,pst%s%star)
+        call init_star(pst%s%r,pst%s%g,pst%s%m,pst%s%star)
      end if
      if(pst%s%r%sink)then
         call init_sink(pst%s%r,pst%s%g,pst%s%sink)
@@ -51,11 +56,6 @@ subroutine init_part(r,g,m,p)
   use amr_commons, only: run_t,global_t,mesh_t
   use pm_parameters, only: PART_TYPE
   use pm_commons, only: part_t
-#ifdef _CUDA
-  use gpu_runner
-  use part_device, only: ensure_scan_capacity_part
-  use cudafor
-#endif
   implicit none
   type(run_t)::r
   type(global_t)::g
@@ -108,28 +108,37 @@ subroutine init_part(r,g,m,p)
   allocate(xp_swap(1:r%npartmax))
   allocate(isp_swap(1:r%npartmax))
   allocate(idp_swap(1:r%npartmax))
-! CUB workspace
+  ! CUB workspace
 #if defined(CUB_SORT_PART)
   allocate(hkeyp(1:r%npartmax))
 #endif
   ! Prefix sum arrays
-  scan_size = max(r%npartmax, m%ngridmax + m%ncachemax)
+  scan_size = max(r%npartmax, (m%ngridmax + m%ncachemax) * twotondim)
   call ensure_scan_capacity_part(scan_size, r%part_dep_algo)
 #endif
+
 end subroutine init_part
 !#########################################################################
 !#########################################################################
 !#########################################################################
 !#########################################################################
-subroutine init_star(r,g,p)
+subroutine init_star(r,g,m,p)
   use amr_parameters, only: ndim
-  use amr_commons, only: run_t,global_t
+  use amr_commons, only: run_t,global_t,mesh_t
   use pm_parameters, only: STAR_TYPE
   use pm_commons, only: part_t
+#ifdef _CUDA
+  use gpu_runner
+  use cudafor
+#endif
   implicit none
   type(run_t)::r
   type(global_t)::g
+  type(mesh_t)::m
   type(part_t)::p
+#ifdef _CUDA
+  integer::scan_size
+#endif
   !-----------------------------------
   ! Allocate star particle variables
   !------------------------------------
@@ -160,6 +169,31 @@ subroutine init_star(r,g,p)
   ! No particle just yet
   p%headp=1
   p%tailp=0
+
+#ifdef _CUDA
+  allocate(star_xp    (1:r%nstarmax, 1:ndim))
+  allocate(star_vp    (1:r%nstarmax, 1:ndim))
+  allocate(star_mp    (1:r%nstarmax))
+  allocate(star_tp    (1:r%nstarmax))
+  allocate(star_zp    (1:r%nstarmax))
+  allocate(star_levelp(1:r%nstarmax))
+  if (r%nlevelmax > r%levelmin) allocate(star_idp(1:r%nstarmax))
+#ifdef OUTPUT_PARTICLE_POTENTIAL
+  allocate(star_phip(1:r%nstarmax))
+#endif
+  ! gpu_cic_part source map.
+  if (.not. allocated(xp_swap)) allocate(xp_swap(1:r%nstarmax))
+  if (.not. allocated(isp_swap)) allocate(isp_swap(1:r%nstarmax))
+  if (.not. allocated(idp_swap)) allocate(idp_swap(1:r%nstarmax))
+  ! CUB workspace
+#if defined(CUB_SORT_PART)
+  if (.not. allocated(hkeyp)) allocate(hkeyp(1:r%nstarmax))
+#endif
+  ! Prefix sum arrays
+  scan_size = max(r%nstarmax, (m%ngridmax + m%ncachemax) * twotondim)
+  call ensure_scan_capacity_part(scan_size, r%star_dep_algo)
+#endif
+
 end subroutine init_star
 !#########################################################################
 !#########################################################################

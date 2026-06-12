@@ -1,0 +1,339 @@
+!> Star formation CUDA kernels.
+module star_device
+  use amr_parameters, only: ndim, twotondim, dp, i8b
+  use hydro_parameters, only: nvar
+  use oct_commons, only: oct
+  use gpu_utils
+  use cudafor
+  use curand_device
+
+  implicit none
+
+contains
+
+  include 'gpu_reduce.cuf'
+  include 'gpu_rand.cuf'
+
+!> Count new stars per cell.
+! =========================================================================
+attributes(global) subroutine count_site_kernel(grid, uold, flag1, prefix_sum, &
+     & head_idx, num_octs, ilevel, d0, dx, vol, factG, mstar, ivar_refine, var_cut_refine, &
+     & dt, texp, gamma, smallr, smallc2, sf_model, eps_star, sgs_turb, iturb)
+  use curand_device
+  type(oct), device :: grid(*)
+  real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+  integer(kind=4), device :: flag1(*)
+  integer(kind=4), device :: prefix_sum(*)
+
+  integer(kind=4), intent(in), value :: head_idx, num_octs, ilevel
+  real(kind=8), intent(in), value :: d0, dx, vol, factG, mstar
+  integer(kind=4), intent(in), value :: ivar_refine
+  real(kind=8), intent(in), value :: var_cut_refine
+  real(kind=8), intent(in), value :: dt, texp
+  real(kind=dp), intent(in), value :: gamma, smallr, smallc2
+  integer(kind=4), intent(in), value :: sf_model
+  real(kind=8), intent(in), value :: eps_star
+  logical, intent(in), value :: sgs_turb
+  integer(kind=4), intent(in), value :: iturb
+
+  integer :: gid, oct_idx, cell_idx, nstar, global_cell_idx
+  integer(kind=8) :: hkey, counter
+  real(kind=dp) :: d, mask, p, cs2, sigma2, t_ff, sfr_ff, t_dyn
+  real(kind=8) :: alpha_vir, Mach2, b_turb, sigs, scrit, ekin
+  real(kind=8) :: mcell, mgas, PoissMean
+  type(curandStatePhilox4_32_10) :: localstate
+  logical :: ok
+
+  gid = (blockIdx%x - 1) * blockDim%x + threadIdx%x - 1
+  if (gid >= num_octs * twotondim) return
+
+  oct_idx = head_idx + gid / twotondim
+  cell_idx   = mod(gid, twotondim) + 1
+
+  ! Leaf cell check
+  ok = .not. grid(oct_idx)%refined(cell_idx)
+
+  ! Density threshold
+  d = uold(cell_idx, 1, oct_idx)
+  ok = ok .and. (d > d0)
+
+  ! Zoom mask
+  if (ivar_refine > 0) then
+     mask = uold(cell_idx, ivar_refine, oct_idx) / d
+     ok = ok .and. (mask > var_cut_refine)
+  endif
+
+  nstar = 0
+
+  if (ok) then
+
+     ! Kinetic energy, pressure, sound speed and turbulence
+     ekin = 0.5_dp * uold(cell_idx, 2, oct_idx)**2 / d + &
+          & 0.5_dp * uold(cell_idx, 3, oct_idx)**2 / d + &
+          & 0.5_dp * uold(cell_idx, 4, oct_idx)**2 / d
+     p = (gamma - 1_dp) * (uold(cell_idx, 5, oct_idx) - ekin)
+     cs2 = max(gamma * p / d, smallc2)
+     sigma2 = 0d0
+     if (sgs_turb) then
+        sigma2 = uold(cell_idx, iturb, oct_idx) * 2d0 / 3d0 / d
+     endif
+
+     ! SF model logic
+     select case (sf_model)
+     case(1)
+        sfr_ff = eps_star
+     case(2)
+        t_dyn = dx / (2d0 * sqrt(3d0 * (sigma2 + cs2)))
+        t_ff = 0.5427d0 / sqrt(factG * d)
+        sfr_ff = eps_star * exp(-1.6d0 * t_ff / t_dyn)
+     case(3)
+        alpha_vir = (15d0 * (sigma2 + cs2)) / (3.141592653589793d0 * factG * d * dx**2)
+        Mach2 = max(sigma2 / cs2, smallr)
+        b_turb = 1.0
+        sigs = log(1d0 + b_turb**2 * Mach2)
+        scrit = log(alpha_vir * (1d0 + (2d0 * Mach2**2 / (1d0 + Mach2))))
+        sfr_ff = (eps_star / 2d0) * exp(3d0 / 8d0 * sigs) * (2d0 - erfc_dev((sigs - scrit) / sqrt(2d0 * sigs)))
+     case default
+        sfr_ff = 0d0
+     end select
+
+     mcell = d * vol
+     t_ff = 0.5427d0 / sqrt(factG * d)
+     mgas = dt * (sfr_ff / t_ff) * mcell
+     PoissMean = mgas / mstar
+
+     ! Initialize RNG inline
+     hkey = int(twotondim,8) * grid(oct_idx)%hkey(1) + int(cell_idx-1,8)
+     counter = int(abs(texp)/dt,8)
+     call curand_init(hkey, counter, 0_8, localstate)
+     nstar = poisson_device(localstate, PoissMean)
+
+     ! Cap nstar to avoid emptying the cell
+     if (real(nstar, 8) * mstar > 0.9d0 * mcell) then
+        nstar = int(0.9d0 * mcell / mstar)
+     endif
+
+  endif
+
+  ! Store nstar in flag1 array and 0/1 in flag2 array
+  global_cell_idx = cell_idx + (oct_idx-1) * twotondim
+  flag1(global_cell_idx) = nstar
+  if (nstar > 0) then
+     prefix_sum(global_cell_idx) = 1
+  else
+     prefix_sum(global_cell_idx) = 0
+  endif
+
+end subroutine count_site_kernel
+! =========================================================================
+
+! =========================================================================
+attributes(global) subroutine count_star_kernel(flag1, head_idx, num_octs, nflag)
+  integer(kind=4), device :: flag1(1:twotondim,*)
+  integer(kind=8), device, intent(inout) :: nflag
+
+  integer(kind=4), intent(in), value :: head_idx
+  integer(kind=4), intent(in), value :: num_octs
+
+  integer :: info
+  integer :: tid, bid ! The index of the thread and the block
+  integer :: cell_idx ! The index of the cell
+  integer :: oct_idx ! The index of the oct
+  integer(kind=8) :: nflag_loc
+
+  ! Thread and block id
+  tid = threadIdx%x - 1
+  bid = blockIdx%x - 1
+
+  ! Compute oct idx
+  oct_idx = ( tid + bid * blockDim%x ) / twotondim
+
+  ! If not in block
+  if (oct_idx >= num_octs) then
+
+     nflag_loc = int(0,kind=8)
+
+  else
+
+     oct_idx = head_idx + oct_idx
+
+     ! Compute cell idx
+     cell_idx = mod(tid, twotondim) + 1
+
+     ! Load the cell
+     nflag_loc = int(flag1(cell_idx, oct_idx), kind=8)
+
+  endif
+
+  nflag_loc = block_reduce_int_sum(nflag_loc)
+
+  if(tid == 0)then
+     info = atomicadd(nflag,nflag_loc)
+  endif
+
+end subroutine count_star_kernel
+! =========================================================================
+
+!> Compute cell index spawning new stars
+! =========================================================================
+attributes(global) subroutine compute_star_swap_table(swap_local, prefix_sum, head_idx, num_octs)
+  integer(kind=4), device :: swap_local(*)
+  integer(kind=4), device :: prefix_sum(*)
+
+  integer(kind=4), intent(in), value :: head_idx
+  integer(kind=4), intent(in), value :: num_octs
+
+  integer :: oct_idx, cell_idx, thread_idx, block_idx, star_idx
+  integer :: gid, global_cell_idx
+  integer :: previous_sum, nstar
+
+  ! Compute thread and block idx
+  thread_idx = threadIdx%x - 1
+  block_idx = blockIdx%x - 1
+
+  ! Compute oct and cell idx
+  gid = block_idx * blockDim%x + thread_idx
+  oct_idx = gid / twotondim
+  if (oct_idx >= num_octs) return
+
+  oct_idx = head_idx + oct_idx
+  cell_idx = mod(gid, twotondim) + 1
+
+  ! Compute global cell idx
+  global_cell_idx = cell_idx + (oct_idx - 1) * twotondim
+
+  ! Get previous prefix sum
+  if (global_cell_idx > 1 + (head_idx - 1) * twotondim)then
+     previous_sum = prefix_sum(global_cell_idx - 1)
+  else
+     previous_sum = 0
+  endif
+
+  ! Compute original value (0 or 1)
+  nstar = prefix_sum(global_cell_idx) - previous_sum
+
+  ! Compute new star index and corresponding cell idx
+  if(nstar > 0)then
+     star_idx = 1 + previous_sum
+     swap_local(star_idx) = global_cell_idx
+  endif
+
+end subroutine compute_star_swap_table
+! =========================================================================
+
+!> Create star particles and update gas variables.
+! =========================================================================
+attributes(global) subroutine star_formation_kernel(grid, uold, f, flag1, swap_local, &
+     & star_xp, star_vp, star_mp, star_tp, star_zp, star_levelp, star_idp, &
+     & head_idx, num_star, ilevel, levelmin, levelmax, dx, vol, mstar, d_skip, leading, &
+     & dt, texp, aexp, metal, imetal, z_ave, ientropy, dual_energy)
+  use curand_device
+  type(oct), device :: grid(*)
+  real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+  real(kind=dp), device :: f(1:twotondim,1:ndim,*)
+  integer(kind=4), device :: flag1(*)
+  integer(kind=4), device :: swap_local(*)
+  real(kind=dp), device :: star_xp(*), star_vp(*)
+  real(kind=dp), device :: star_mp(*), star_tp(*), star_zp(*)
+  integer(kind=4), device :: star_levelp(*)
+  integer(i8b), device :: star_idp(*)
+  real(kind=8), device :: d_skip(1:3)
+
+  integer(kind=8), intent(in), value :: leading
+  integer(kind=4), intent(in), value :: head_idx, num_star
+  integer(kind=4), intent(in), value :: ilevel, levelmin, levelmax
+  real(kind=8), intent(in), value :: dx, vol, mstar
+  real(kind=8), intent(in), value :: dt, texp, aexp, z_ave
+  logical, intent(in), value :: metal
+  integer(kind=4), intent(in), value :: ientropy, imetal
+  real(kind=8), intent(in), value :: dual_energy
+
+  integer :: star_idx, global_cell_idx, cell_idx, oct_idx, idim, ivar, nstar
+  integer(kind=8) :: hkey, counter
+  real(kind=dp) :: d_old, d_new, d_star, xrand
+  type(curandStatePhilox4_32_10) :: localstate
+
+  star_idx = (blockIdx%x - 1) * blockDim%x + threadIdx%x - 1
+  if (star_idx >= num_star) return
+  global_cell_idx = swap_local(1+star_idx)
+  star_idx = head_idx + star_idx
+
+  oct_idx = (global_cell_idx - 1) / twotondim + 1
+  cell_idx = global_cell_idx - (oct_idx -1) * twotondim
+
+  ! Coordinates
+  do idim = 1, ndim
+     star_xp(star_idx + (idim-1)*leading) = &
+          & (2*grid(oct_idx)%ckey(idim) + mod((cell_idx-1)/2**(idim-1), 2) + 0.5d0) * dx - d_skip(idim)
+  end do
+
+  ! Old gas density
+  d_old = uold(cell_idx, 1, oct_idx)
+
+  ! Gas velocity
+#ifdef GRAV
+  do idim = 1, ndim
+     star_vp(star_idx + (idim-1)*leading) = uold(cell_idx, idim+1, oct_idx) / d_old &
+          & - f(cell_idx, idim, oct_idx) * 0.5d0 * dt
+  end do
+#else
+  do idim = 1, ndim
+     star_vp(star_idx + (idim-1)*leading) = uold(cell_idx, idim+1, oct_idx) / d_old
+  end do
+#endif
+
+  ! Number of stars
+  nstar = flag1(global_cell_idx)
+
+  ! Star mass
+  star_mp(star_idx) = real(nstar, 8) * mstar
+
+  ! Star formation time
+  hkey = int(twotondim,8) * grid(oct_idx)%hkey(1) + int(cell_idx-1,8)
+  counter = int(abs(texp)/dt,8)
+  call curand_init(hkey, counter, 0_8, localstate)
+  xrand = curand_uniform_double(localstate)
+  star_tp(star_idx) = texp + xrand * dt * aexp**2
+
+  ! Star metallicity
+  if (metal) then
+     star_zp(star_idx) = uold(cell_idx, imetal, oct_idx) / d_old
+  else
+     star_zp(star_idx) = z_ave * 0.02d0
+  endif
+
+  ! Star level and birth id
+  star_levelp(star_idx) = ilevel
+  if (levelmax > levelmin) then
+     star_idp(star_idx) = star_idx
+  endif
+
+  ! Update gas density
+  d_star = real(nstar, 8) * mstar / vol
+  d_new = d_old - d_star
+
+  ! Update conservative variables
+  uold(cell_idx, 1, oct_idx) = d_new
+  uold(cell_idx, 2, oct_idx) = uold(cell_idx, 2, oct_idx) / d_old * d_new
+  uold(cell_idx, 3, oct_idx) = uold(cell_idx, 3, oct_idx) / d_old * d_new
+  uold(cell_idx, 4, oct_idx) = uold(cell_idx, 4, oct_idx) / d_old * d_new
+  uold(cell_idx, 5, oct_idx) = uold(cell_idx, 5, oct_idx) / d_old * d_new
+
+  ! Update passive scalars
+  do ivar = 6, nvar
+     uold(cell_idx, ivar, oct_idx) = uold(cell_idx, ivar, oct_idx) / d_old * d_new
+  enddo
+
+end subroutine star_formation_kernel
+! =========================================================================
+
+!> Device implementation of erfc for sf_model=3.
+! =========================================================================
+attributes(device) function erfc_dev(x) result(res)
+  real(kind=8), intent(in) :: x
+  real(kind=8) :: res
+  res = 1.0d0 - erf(x)
+end function erfc_dev
+! =========================================================================
+
+end module star_device

@@ -205,13 +205,18 @@ contains
   !>
   !> @return
   !> The pressure
-  attributes(device) function compute_pressure(conserved, gamma) result(pressure)
+  attributes(device) function compute_pressure(conserved, gamma, smallr, smallc2) result(pressure)
     type(conserved_t), intent(in) :: conserved
-    real(kind=dp), value :: gamma
-    real(kind=dp) :: pressure, momentum_squared
+    real(kind=dp), value :: gamma, smallr, smallc2
 
+    real(kind=dp) :: pressure, momentum_squared
+    real(kind=dp) :: density, internal_energy, smallp
+
+    smallp = smallc2 / gamma
     momentum_squared = magnitude_squared(conserved%momentum_x, conserved%momentum_y, conserved%momentum_z)
-    pressure = (gamma - 1.0_dp)*(conserved%energy - 0.5_dp*momentum_squared/conserved%density)
+    density = max(conserved%density, smallr)
+    internal_energy = conserved%energy - 0.5_dp*momentum_squared/density
+    pressure = max((gamma - 1.0_dp)*internal_energy, density*smallp)
     return
   end function compute_pressure
   ! ==========================================================================
@@ -455,14 +460,16 @@ contains
   !> A primitive_t object with the primitive variables in a cell
 #ifdef MHD
   attributes(device) function conserved_2_primitive(conserved, gamma, bxl, bxr, byl, byr, &
-       & bzl, bzr, smallr, smallc) result(primitive)
+       & bzl, bzr, smallr, smallc2) result(primitive)
 #else
-  attributes(device) function conserved_2_primitive(conserved, gamma) result(primitive)
+  attributes(device) function conserved_2_primitive(conserved, gamma, smallr, smallc2) result(primitive)
 #endif
     type(conserved_t), intent(in) :: conserved
     real(kind=dp), value :: gamma
 #ifdef MHD
-    real(kind=dp), value :: bxl, bxr, byl, byr, bzl, bzr, smallr, smallc
+    real(kind=dp), value :: bxl, bxr, byl, byr, bzl, bzr, smallr, smallc2
+#else
+    real(kind=dp), value :: smallr, smallc2
 #endif
     type(primitive_t) :: primitive
 #ifdef MHD
@@ -479,15 +486,15 @@ contains
 
     momentum_squared = magnitude_squared(conserved%momentum_x, conserved%momentum_y, conserved%momentum_z)
     emag = compute_emag(primitive%Bx, primitive%By, primitive%Bz)
-    smalle = smallc**2/gamma/(gamma - 1.0_dp)
+    smalle = smallc2/gamma/(gamma - 1.0_dp)
     eint = max(conserved%energy - 0.5_dp*momentum_squared/primitive%density - emag, smalle*primitive%density)
     primitive%pressure = (gamma - 1.0_dp) * eint
 #else
-    primitive%density    = conserved%density
-    primitive%velocity_x = conserved%momentum_x / conserved%density
-    primitive%velocity_y = conserved%momentum_y / conserved%density
-    primitive%velocity_z = conserved%momentum_z / conserved%density
-    primitive%pressure   = compute_pressure(conserved, gamma)
+    primitive%density    = max(conserved%density, smallr)
+    primitive%velocity_x = conserved%momentum_x / primitive%density
+    primitive%velocity_y = conserved%momentum_y / primitive%density
+    primitive%velocity_z = conserved%momentum_z / primitive%density
+    primitive%pressure   = compute_pressure(conserved, gamma, smallr, smallc2)
 #endif
     return
   end function conserved_2_primitive
@@ -1248,7 +1255,7 @@ contains
 #ifdef MHD
        & bf, &
 #endif
-       & head_idx, block_idx, thread_idx, gamma, smallr, smallc, dt, local_subgrid)
+       & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
@@ -1258,7 +1265,7 @@ contains
     integer(kind=4), value :: head_idx
     integer(kind=4), value :: block_idx, thread_idx
     real(kind=dp), value :: gamma
-    real(kind=dp), value :: smallr, smallc ! Unused without MHD
+    real(kind=dp), value :: smallr, smallc2
     real(kind=dp), value :: dt
     type(subgrid_6x6x6cell_primitive), intent(inout) :: local_subgrid
 #if NVAR>5+NENER
@@ -1384,7 +1391,7 @@ contains
             &          uold(cell_idx,3,source_idx)*primitive%velocity_y + &
             &          uold(cell_idx,4,source_idx)*primitive%velocity_z )
        emag = 0.5_dp*( Bxc*Bxc + (Byc*Byc + Bzc*Bzc) )
-       smalle = smallc**2/gamma/(gamma - 1.0_dp)
+       smalle = smallc2/gamma/(gamma - 1.0_dp)
        eint = max(uold(cell_idx,5,source_idx) - Ekin - emag, smalle*rho)
        primitive%pressure = (gamma - 1.0_dp)*eint
 #else
@@ -1396,7 +1403,7 @@ contains
        conserved%energy     = uold(cell_idx, 5, source_idx)
 
        ! Convert to primitive variables
-       primitive = conserved_2_primitive(conserved, gamma)
+       primitive = conserved_2_primitive(conserved, gamma, smallr, smallc2)
        invD = 1.0_dp / primitive%density
 #endif
 
@@ -1541,10 +1548,10 @@ contains
        & smallr, smallc, slope_mag, induction, &
 #endif
        & left_interfaces_x, right_interfaces_x,left_interfaces_y, right_interfaces_y, &
-       & left_interfaces_z, right_interfaces_z, gamma, dtdx, slope)
+       & left_interfaces_z, right_interfaces_z, gamma, smallr, smallc2, dtdx, slope)
     type(subgrid_6x6x6cell_primitive), intent(inout) :: local_subgrid ! The subgrid that this block is working on in shared memory
     integer, value :: thread_idx
-    real(kind=dp), value :: gamma, dtdx
+    real(kind=dp), value :: gamma, smallr, smallc2, dtdx
     integer, value :: slope
 
     type(subgrid_3x2x2cell_primitive) :: left_interfaces_x, right_interfaces_x
@@ -1601,6 +1608,8 @@ contains
 
     ! Compute the size of the section of the subgrid to operate on
     work_size = 2*nsubgrid+2
+
+    smallp = smallr * smallc2
 
     ! Note that we're now excluding the outermost shell of cells since this
     ! stencil operation requires 1 ghost cell. This also requires the
@@ -2098,17 +2107,20 @@ contains
   !>
   !> @return
   !> flux : The conserved_t of the HLL fluxes 
-  attributes(device) function hll_fluxes(left_state_p, right_state_p, gamma, llf) result(flux)
+  attributes(device) function hll_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2, llf) result(flux)
     type(primitive_t), intent(inout) :: left_state_p, right_state_p
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc2
     logical, value :: llf
     type(conserved_t) :: flux
-    ! Both `smallr` and `smallc`/`smallp` are usually defined in amr_commons. I'm redefining them here so that they will be evaluated at compile time
-    real(kind=dp), parameter :: smallr = 1d-10
-    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
     type(conserved_t) :: left_state_c, right_state_c, left_fluxes, right_fluxes
-    real(kind=dp) :: smallp
-    real(kind=dp) :: sound_speed_l, sound_speed_r, speed_l, speed_r, speed_max
+    real(kind=dp) :: sound_speed_l, sound_speed_r, speed_l, speed_r, speed_max, smallp
+
+    ! Verify that the density and pressure are reasonable and positive
+    smallp = smallc2 / gamma
+    left_state_p%density   = max(left_state_p%density,   smallr)
+    right_state_p%density  = max(right_state_p%density,  smallr)
+    left_state_p%pressure  = max(left_state_p%pressure,  smallp * left_state_p%density)
+    right_state_p%pressure = max(right_state_p%pressure, smallp * right_state_p%density)
 
     ! Compute the sound speeds
     sound_speed_l = sound_speed(left_state_p, gamma)
@@ -2161,14 +2173,11 @@ contains
   !>
   !> @return
   !> flux : The conserved_t of the HLLC fluxes
-  attributes(device) function hllc_fluxes(left_state_p, right_state_p, gamma) result(flux)
+  attributes(device) function hllc_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2) result(flux)
     type(primitive_t), intent(inout) :: left_state_p, right_state_p
-    real(kind=dp), value :: gamma
+    real(kind=dp), value :: gamma, smallr, smallc2
     type(conserved_t) :: flux
-    ! Both `smallr` and `smallc`/`smallp` are usually defined in amr_commons. 
-    ! Redefining them here so that they will be evaluated at compile time
-    real(kind=dp), parameter :: smallr = 1d-10
-    real(kind=dp), parameter :: smallc_squared = (1d-10)**2
+
     real(kind=dp) :: smallp, entho
     real(kind=dp) :: rl, rr, pl, pr, ul, ur, vl, vr, wl, wr
     real(kind=dp) :: el, er, ekinl, ekinr, etotl, etotr
@@ -2178,7 +2187,7 @@ contains
     real(kind=dp) :: ro, uo, vo, wo, po, etoto
 
     ! Verify that the density and pressure are reasonable and positive
-    smallp = smallc_squared / gamma
+    smallp = smallc2 / gamma
     left_state_p%density   = max(left_state_p%density,   smallr)
     right_state_p%density  = max(right_state_p%density,  smallr)
     left_state_p%pressure  = max(left_state_p%pressure,  smallp * left_state_p%density)
@@ -2270,7 +2279,8 @@ contains
   !> @param[in] left_state_p : The state on the left side of the interface in primitive variables
   !> @param[in] right_state_p : The state on the right side of the interface in primitive variables
   !> @param[in] gamma : The adiabatic index
-  !> @param[in] smallr, smallc : Density and sound-speed floors (MHD only)
+  !> @param[in] smallr, smallc : Density floor + floor value used by the active solver
+  !>           (MHD passes smallc; hydro passes smallc2 through this slot).
   !> @param[in] riemann : Solver id
   !>
   !> @return
@@ -2292,14 +2302,14 @@ contains
     endif
 #else
     if(riemann .eq. solver_llf)then
-       flux = hll_fluxes(left_state_p, right_state_p, gamma, .true.)
+       flux = hll_fluxes(left_state_p, right_state_p, gamma, smallr, smallc, .true.)
     else if (riemann .eq. solver_hll) then
-       flux = hll_fluxes(left_state_p, right_state_p, gamma, .false.)
+       flux = hll_fluxes(left_state_p, right_state_p, gamma, smallr, smallc, .false.)
     else if (riemann .eq. solver_hllc) then
-       flux = hllc_fluxes(left_state_p, right_state_p, gamma)
+       flux = hllc_fluxes(left_state_p, right_state_p, gamma, smallr, smallc)
     else
        ! Unsupported: LLF
-       flux = hll_fluxes(left_state_p, right_state_p, gamma, .true.)
+       flux = hll_fluxes(left_state_p, right_state_p, gamma, smallr, smallc, .true.)
     endif
 #endif
 
@@ -2325,7 +2335,8 @@ contains
   !> @param[in,out] left_interfaces_z : The left interfaces at the k+1/2 interfaces. The fluxes along the Z interfaces are returned in this array
   !> @param[in] right_interfaces_z : The right interfaces at the k-1/2 interfaces.
   !> @param[in] gamma : The adiabatic index
-  !> @param[in] smallr, smallc : Density and sound-speed floors (MHD solvers only; unused without MHD)
+  !> @param[in] smallr, smallc : Density floor + floor value used by the active solver
+  !>           (MHD passes smallc; hydro passes smallc2 through this slot).
   !> @param[in] thread_idx : The index of this thread
   !>
   attributes(device) subroutine riemann_driver(left_interfaces_x, right_interfaces_x, left_interfaces_y, &
@@ -2335,7 +2346,7 @@ contains
     type(subgrid_2x3x2cell_primitive), intent(inout) :: left_interfaces_y, right_interfaces_y
     type(subgrid_2x2x3cell_primitive), intent(inout) :: left_interfaces_z, right_interfaces_z
     real(kind=dp), value :: gamma
-    real(kind=dp), value :: smallr, smallc ! Unused without MHD
+    real(kind=dp), value :: smallr, smallc
     integer, value :: riemann
     integer, value :: thread_idx
     integer :: work_idx, interface_array_size, i, j, k
@@ -3740,7 +3751,7 @@ contains
   attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, bold, bnew, &
        & f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
-       & gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
+       & gamma, smallr, smallc2, dt, dx, slope, slope_mag, riemann, riemann2d, &
        & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
     type(oct), device :: grid(*)
     integer, device :: father(*)
@@ -3758,7 +3769,7 @@ contains
     integer, intent(in), value :: ngridmax
     integer, intent(in), value :: ilevel, levelmin, levelmax
     real(kind=dp), intent(in), value :: gamma
-    real(kind=dp), intent(in), value :: smallr, smallc
+    real(kind=dp), intent(in), value :: smallr, smallc2
     real(kind=dp), intent(in), value :: dt
     real(kind=dp), intent(in), value :: dx
     integer, intent(in), value :: slope
@@ -3792,8 +3803,13 @@ contains
     real(kind=dp) :: dtdx
     integer :: block_idx  ! The index of this block, corresponds to the subgrid to load
     integer :: thread_idx ! The index of this thread within the block
+    real(kind=dp) :: smallc
 
     dtdx = dt/dx
+    smallc = smallc2
+#ifdef MHD
+    smallc = sqrt(smallc2)
+#endif
 
     ! compute the various indices. Note the conversion to zero based indexing
     block_idx = blockIdx%x - 1
@@ -3812,7 +3828,7 @@ contains
 #ifdef MHD
          & bf, &
 #endif
-         & head_idx, block_idx, thread_idx, gamma, smallr, smallc, dt, local_subgrid)
+         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
 
     ! =======================================================================
     ! Perform tracing step and compute the interface states
@@ -3827,7 +3843,7 @@ contains
          & smallr, smallc, slope_mag, induction, &
 #endif
          & left_interfaces_x, right_interfaces_x, left_interfaces_y, right_interfaces_y, &
-         & left_interfaces_z, right_interfaces_z, gamma, dtdx, slope)
+         & left_interfaces_z, right_interfaces_z, gamma, smallr, smallc2, dtdx, slope)
 
     ! =======================================================================
     ! Compute the fluxes.
@@ -3909,8 +3925,8 @@ contains
     endif
 
     if (err_grad_p > 0.0_dp) then
-       err_lft = abs((prim_mid%pressure - prim_lft%pressure) / (prim_mid%pressure + prim_lft%pressure + floor_d))
-       err_rgt = abs((prim_rgt%pressure - prim_mid%pressure) / (prim_rgt%pressure + prim_mid%pressure + floor_d))
+       err_lft = abs((prim_mid%pressure - prim_lft%pressure) / (prim_mid%pressure + prim_lft%pressure + floor_p))
+       err_rgt = abs((prim_rgt%pressure - prim_mid%pressure) / (prim_rgt%pressure + prim_mid%pressure + floor_p))
        error = 2.0_dp*max(err_lft, err_rgt)
        if (error > err_grad_p) ok = .true.
     endif
@@ -3993,7 +4009,7 @@ contains
 
   ! =========================================================================
   attributes(global) subroutine hydro_flag_kernel(flag1, grid, nbor, uold, bold, head_idx, num_octs, &
-       & gamma, smallr, smallc, err_grad_d, err_grad_p, floor_d, floor_p, &
+       & gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p, &
        & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C)
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -4005,7 +4021,7 @@ contains
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
     real(kind=dp), intent(in), value :: gamma
-    real(kind=dp), intent(in), value :: smallr, smallc ! Unused without MHD
+    real(kind=dp), intent(in), value :: smallr, smallc2
     real(kind=dp), intent(in), value :: err_grad_d, floor_d
     real(kind=dp), intent(in), value :: err_grad_p, floor_p
     ! MHD refinement thresholds (Stage D2). Passed unconditionally; unused
@@ -4062,12 +4078,12 @@ contains
     prim_mid = conserved_2_primitive(cons_mid, gamma, &
          & bold(cell_idx,1,oct_idx), bold(cell_idx,4,oct_idx), &
          & bold(cell_idx,2,oct_idx), bold(cell_idx,5,oct_idx), &
-         & bold(cell_idx,3,oct_idx), bold(cell_idx,6,oct_idx), smallr, smallc)
+         & bold(cell_idx,3,oct_idx), bold(cell_idx,6,oct_idx), smallr, smallc2)
     bc_mid(1) = 0.5_dp*(bold(cell_idx,1,oct_idx)+bold(cell_idx,4,oct_idx))
     bc_mid(2) = 0.5_dp*(bold(cell_idx,2,oct_idx)+bold(cell_idx,5,oct_idx))
     bc_mid(3) = 0.5_dp*(bold(cell_idx,3,oct_idx)+bold(cell_idx,6,oct_idx))
 #else
-    prim_mid = conserved_2_primitive(cons_mid, gamma)
+    prim_mid = conserved_2_primitive(cons_mid, gamma, smallr, smallc2)
 #endif
 
     ! Loop over dimensions
@@ -4099,12 +4115,12 @@ contains
        prim_lft = conserved_2_primitive(cons_lft, gamma, &
             & bold(icell,1,source_idx), bold(icell,4,source_idx), &
             & bold(icell,2,source_idx), bold(icell,5,source_idx), &
-            & bold(icell,3,source_idx), bold(icell,6,source_idx), smallr, smallc)
+            & bold(icell,3,source_idx), bold(icell,6,source_idx), smallr, smallc2)
        bc_lft(1) = 0.5_dp*(bold(icell,1,source_idx)+bold(icell,4,source_idx))
        bc_lft(2) = 0.5_dp*(bold(icell,2,source_idx)+bold(icell,5,source_idx))
        bc_lft(3) = 0.5_dp*(bold(icell,3,source_idx)+bold(icell,6,source_idx))
 #else
-       prim_lft = conserved_2_primitive(cons_lft, gamma)
+       prim_lft = conserved_2_primitive(cons_lft, gamma, smallr, smallc2)
 #endif
 
        ! Right cell
@@ -4120,12 +4136,12 @@ contains
        prim_rgt = conserved_2_primitive(cons_rgt, gamma, &
             & bold(icell,1,source_idx), bold(icell,4,source_idx), &
             & bold(icell,2,source_idx), bold(icell,5,source_idx), &
-            & bold(icell,3,source_idx), bold(icell,6,source_idx), smallr, smallc)
+            & bold(icell,3,source_idx), bold(icell,6,source_idx), smallr, smallc2)
        bc_rgt(1) = 0.5_dp*(bold(icell,1,source_idx)+bold(icell,4,source_idx))
        bc_rgt(2) = 0.5_dp*(bold(icell,2,source_idx)+bold(icell,5,source_idx))
        bc_rgt(3) = 0.5_dp*(bold(icell,3,source_idx)+bold(icell,6,source_idx))
 #else
-       prim_rgt = conserved_2_primitive(cons_rgt, gamma)
+       prim_rgt = conserved_2_primitive(cons_rgt, gamma, smallr, smallc2)
 #endif
 
        ! Check refinement criteria
@@ -4148,21 +4164,25 @@ contains
   ! =========================================================================~
 
   ! =========================================================================
-  attributes(global) subroutine upload_kernel(grid, father, uold, bold, head_idx, num_octs, interpol_var, smallr)
+  attributes(global) subroutine upload_kernel(grid, father, uold, bold, head_idx, num_octs, &
+       & internal_energy, gamma, smallr, smallc2)
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: father(*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
-    integer(kind=4), intent(in), value :: interpol_var
-    real(kind=dp), intent(in), value :: smallr
+    logical, intent(in), value :: internal_energy
+    real(kind=dp), intent(in), value :: gamma, smallr, smallc2
 
     integer :: tid, bid, cell_idx, oct_idx
     integer :: ind, father_idx, i, j, k
     integer :: ivar ! Conserved-variable slot (1:nvar, CPU upload_fine parity)
     integer :: idim ! Spatial dimension (face-B restriction / energy split)
-    real(kind=dp) :: eint_sum, ekin, erad, emag ! interpol_var==1 internal-energy restriction
+    real(kind=dp) :: eint_sum, ekin, erad, emag ! internal-energy restriction
+#ifndef MHD
+    real(kind=dp) :: density, smalle
+#endif
 #ifdef MHD
     integer, dimension(1:6,1:4) :: hh ! Child cells lying on each parent face (MHD)
 #endif
@@ -4229,13 +4249,16 @@ contains
     end do
 #endif
 
-    ! Average INTERNAL energy instead of total energy (interpol_var==1), mirroring CPU
+    ! Average INTERNAL energy instead of total energy (internal_energy), mirroring CPU
     ! upload_fine (upload.f90:222-262). The slot-5 average above is TOTAL energy; when
     ! interpol_var==1 we OVERWRITE it: per child eint = E - ekin - erad - emag, average
     ! those, then add back the parent's ekin (+erad)(+emag) from the already-restricted
     ! parent cell. Per the PI, the GPU kernel's MISSING interpol_var==1 guard (it always
     ! averaged total energy) is the likely cause of the earlier hydro regression.
-    if (interpol_var == 1) then
+    if (internal_energy) then
+#ifndef MHD
+       smalle = smallc2/gamma/(gamma - 1.0_dp)
+#endif
        eint_sum = 0.0_dp
        do ind = 1, twotondim
           ekin = 0.0_dp
@@ -4257,7 +4280,12 @@ contains
              erad = erad + uold(ind,5+idim,oct_idx)
           end do
 #endif
+#ifndef MHD
+          density = max(uold(ind,1,oct_idx), smallr)
+          eint_sum = eint_sum + max(uold(ind,5,oct_idx) - ekin - erad - emag, smalle*density)
+#else
           eint_sum = eint_sum + uold(ind,5,oct_idx) - ekin - erad - emag
+#endif
        end do
        ! Add back the parent-cell ekin (+erad)(+emag), recomputed from the restricted parent
        ekin = 0.0_dp
@@ -4385,13 +4413,13 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine sync_hydro(uold, f, constant_gravity, head_idx, num_octs, gamma, smallr, dt)
+  attributes(global) subroutine sync_hydro(uold, f, constant_gravity, head_idx, num_octs, gamma, smallr, smallc2, dt)
     real(kind=8), device :: constant_gravity(1:3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
-    real(kind=dp), intent(in), value :: gamma, smallr
+    real(kind=dp), intent(in), value :: gamma, smallr, smallc2
     real(kind=8), intent(in), value :: dt
 
     integer :: block_idx, cell_idx, oct_idx
@@ -4440,7 +4468,7 @@ contains
        cons%momentum_y = uold(cell_idx, 3, oct_idx)
        cons%momentum_z = uold(cell_idx, 4, oct_idx)
        cons%energy     = uold(cell_idx, 5, oct_idx)
-       prim = conserved_2_primitive(cons, gamma)
+       prim = conserved_2_primitive(cons, gamma, smallr, smallc2)
 #ifdef GRAV
        prim%velocity_x = prim%velocity_x + f(cell_idx, 1, oct_idx) * dt
        prim%velocity_y = prim%velocity_y + f(cell_idx, 2, oct_idx) * dt
@@ -4462,14 +4490,14 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine grav_hydro(uold, unew, f, constant_gravity, head_idx, num_octs, gamma, smallr, dt)
+  attributes(global) subroutine grav_hydro(uold, unew, f, constant_gravity, head_idx, num_octs, gamma, smallr, smallc2, dt)
     real(kind=8), device :: constant_gravity(1:3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
-    real(kind=dp), intent(in), value :: gamma, smallr
+    real(kind=dp), intent(in), value :: gamma, smallr, smallc2
     real(kind=8), intent(in), value :: dt
 
     integer :: block_idx, cell_idx, oct_idx
@@ -4519,7 +4547,7 @@ contains
        cons%momentum_y = unew(cell_idx, 3, oct_idx)
        cons%momentum_z = unew(cell_idx, 4, oct_idx)
        cons%energy     = unew(cell_idx, 5, oct_idx)
-       prim = conserved_2_primitive(cons, gamma)
+       prim = conserved_2_primitive(cons, gamma, smallr, smallc2)
        rho_old_new_ratio_dt = dt * uold(cell_idx, 1, oct_idx) / unew(cell_idx, 1, oct_idx)
 #ifdef GRAV
        prim%velocity_x = prim%velocity_x + f(cell_idx, 1, oct_idx) * rho_old_new_ratio_dt
@@ -4547,7 +4575,7 @@ contains
   ! requires changing other files in the code. This should be done if OK for numerical accuracy.
   ! In this case, all the 'd0' should be changed to '_dp'
   attributes(global) subroutine cmpdt_kernel(grid, uold, bold, f, constant_gravity, &
-      & head_idx, num_octs, data_out, dx, gamma, smallr, smallc, courant_factor, induction)
+      & head_idx, num_octs, data_out, dx, gamma, smallr, smallc2, courant_factor, induction)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -4556,7 +4584,7 @@ contains
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
     real(kind=8), device :: data_out(*) !mass, ekin, eint, emag, dt
-    real(kind=dp), value :: dx, gamma, smallr, smallc, courant_factor
+    real(kind=dp), value :: dx, gamma, smallr, smallc2, courant_factor
     logical, value :: induction
 
     type(primitive_t) :: primitive
@@ -4568,6 +4596,13 @@ contains
     real(kind=8) :: vol_loc, mass_loc, ekin_loc, eint_loc, emag_loc, dt_loc
     real(kind=8) :: sound_speed, grav, ctot
     real(kind=8) :: a2, b2sq, c2v, pp, rinv
+#ifdef MHD
+    real(kind=dp) :: smallc
+#endif
+
+#ifdef MHD
+    smallc = sqrt(smallc2)
+#endif
 
     ! Thread and block id
     tid = threadIdx%x - 1
@@ -4621,8 +4656,8 @@ contains
              primitive = conserved_2_primitive(conserved, gamma, &
                   & bold(cell_idx,1,oct_idx), bold(cell_idx,4,oct_idx), &
                   & bold(cell_idx,2,oct_idx), bold(cell_idx,5,oct_idx), &
-                  & bold(cell_idx,3,oct_idx), bold(cell_idx,6,oct_idx), smallr, smallc)
-             pp = max(primitive%pressure, primitive%density*smallc*smallc/gamma)
+                  & bold(cell_idx,3,oct_idx), bold(cell_idx,6,oct_idx), smallr, smallc2)
+             pp = max(primitive%pressure, primitive%density*smallc2/gamma)
              b2sq = compute_bsquared(primitive%Bx, primitive%By, primitive%Bz)
              emag_loc = 0.5d0*b2sq*vol_loc
              eint_loc = pp/(gamma-1d0)*vol_loc
@@ -4638,7 +4673,7 @@ contains
              endif
 #else
              ! Convert to primitive variables (hydro)
-             primitive = conserved_2_primitive(conserved, gamma)
+             primitive = conserved_2_primitive(conserved, gamma, smallr, smallc2)
              mass_loc = primitive%density*vol_loc
              eint_loc = primitive%pressure/(gamma-1d0)*vol_loc
              emag_loc = 0_dp

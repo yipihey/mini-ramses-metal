@@ -38,6 +38,7 @@ PATCH =
 CUDA_PROFILE = 0
 PAPER = 0
 CUB_SORT_PART = 1
+CUB_SORT_REFINE = 1
 # Warp-cooperative fine-force gather in the GPU particle kick (default OFF).
 KICK_COOP_GATHER = 0
 CUB_SCAN_REFINE = 1
@@ -185,6 +186,9 @@ ifeq ($(COMPILER),NVHPC)
    ifneq ($(CUB_SORT_PART),0)
       DEFINES += -DCUB_SORT_PART
    endif
+   ifneq ($(CUB_SORT_REFINE),0)
+      DEFINES += -DCUB_SORT_REFINE
+   endif
    ifneq ($(CUB_SCAN_REFINE),0)
       DEFINES += -DCUB_SCAN_REFINE
    endif
@@ -196,8 +200,8 @@ ifeq ($(FASTMATH),1)
 else
    GPU_ARCH_OPTS = $(CUDA_ARCH)
 endif
-   FFLAGS = -cpp -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx $(DEFINES)
-   LIBS = -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx -lstdc++
+   FFLAGS = -cpp -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx,curand $(DEFINES)
+   LIBS = -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx,curand -lstdc++
    GPU_PATH = ../gpu
    ifeq ($(CUDA_PROFILE),1)
       FFLAGS += -gpu=lineinfo,ptxinfo -Minstrument -traceback -gopt
@@ -264,7 +268,7 @@ MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 ifeq ($(COMPILER),NVHPC)
    MODOBJ += cub_module_radix_sort_c.o cub_module_radix_sort_f.o \
       cub_inclusive_scan_c.o cub_inclusive_scan_f.o gpu_utils.o gpu_hydro.o \
-      gpu_cooling.o gpu_rho.o gpu_mg.o gpu_refine.o gpu_flag.o gpu_runner.o \
+      gpu_cooling.o gpu_star.o gpu_rho.o gpu_mg.o gpu_refine.o gpu_flag.o gpu_runner.o \
       gpu_part.o gpu_manager.o
 endif
 MODOBJ +=  multigrid_fine_coarse.o rho_fine.o upload.o init_xion.o \
