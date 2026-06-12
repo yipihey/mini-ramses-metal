@@ -40,6 +40,7 @@ PAPER = 0
 CUB_SORT_PART = 1
 # Warp-cooperative fine-force gather in the GPU particle kick (default OFF).
 KICK_COOP_GATHER = 0
+INTEGRATOR_NVTX = 0
 CUB_SCAN_REFINE = 1
 FASTMATH = 0
 DEBUG = 0
@@ -190,6 +191,9 @@ ifeq ($(COMPILER),NVHPC)
    endif
    ifeq ($(KICK_COOP_GATHER),1)
       DEFINES += -DKICK_COOP_GATHER
+   endif
+   ifeq ($(INTEGRATOR_NVTX),1)
+      DEFINES += -DINTEGRATOR_NVTX
    endif
 ifeq ($(FASTMATH),1)
    GPU_ARCH_OPTS = $(CUDA_ARCH),fastmath
