@@ -3918,9 +3918,83 @@ contains
   end subroutine hydro_crit
   ! =========================================================================
 
+#ifdef MHD
+  ! =========================================================================
+  ! Stage D2: MHD refinement criteria (CPU hydro_refine MHD branches,
+  ! godunov_utils.f90:157-208).  Takes the cell-centred B (0.5*(b_lo+b_hi) per
+  ! axis) of the left / mid / right cells; derives emag = sum 0.5*Bd^2 exactly as
+  ! the host (note pg/pm/pd are emag here, not thermal pressure), then applies the
+  ! magnetic-energy gradient (err_grad_b2) and the per-component B gradients
+  ! (err_grad_A/B/C).  Disabled criteria (namelist value < 0) are skipped, so the
+  ! defaults (-1.0) make this a no-op.
+  attributes(device) subroutine hydro_crit_mhd(bc_lft, bc_mid, bc_rgt, ok, &
+       & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C)
+    real(kind=dp) :: bc_lft(1:3), bc_mid(1:3), bc_rgt(1:3)
+    real(kind=dp), value :: err_grad_b2, floor_b2
+    real(kind=dp), value :: err_grad_A, floor_A
+    real(kind=dp), value :: err_grad_B, floor_B
+    real(kind=dp), value :: err_grad_C, floor_C
+    logical :: ok
+
+    real(kind=8) :: emagg, emagm, emagd
+    real(kind=8) :: pg, pm, pd, vg, vm, vd, cg, cm, cd, error
+    integer :: idim
+
+    ok = .false.
+
+    ! Cell-centred magnetic energy (CPU emagg/emagm/emagd)
+    emagg = 0.0_dp; emagm = 0.0_dp; emagd = 0.0_dp
+    do idim = 1, 3
+       emagg = emagg + 0.5_dp*bc_lft(idim)**2
+       emagm = emagm + 0.5_dp*bc_mid(idim)**2
+       emagd = emagd + 0.5_dp*bc_rgt(idim)**2
+    end do
+
+    ! Magnetic-energy gradient (pg/pm/pd = emag, not thermal pressure)
+    if (err_grad_b2 >= 0.0_dp) then
+       pg = emagg; pm = emagm; pd = emagd
+       error = 2.0_dp*max( &
+            & abs((pd-pm)/(pd+pm+floor_b2)), &
+            & abs((pm-pg)/(pm+pg+floor_b2)) )
+       if (error > err_grad_b2) ok = .true.
+    endif
+
+    ! Per-component cell-centred B gradients (Bx/By/Bz), scaled by sqrt(emag)
+    if (err_grad_A >= 0.0_dp) then
+       vg = bc_lft(1); vm = bc_mid(1); vd = bc_rgt(1)
+       cg = sqrt(emagg); cm = sqrt(emagm); cd = sqrt(emagd)
+       error = 2.0_dp*max( &
+            & abs((vd-vm)/(cd+cm+floor_A)), &
+            & abs((vm-vg)/(cm+cg+floor_A)) )
+       if (error > err_grad_A) ok = .true.
+    endif
+
+    if (err_grad_B >= 0.0_dp) then
+       vg = bc_lft(2); vm = bc_mid(2); vd = bc_rgt(2)
+       cg = sqrt(emagg); cm = sqrt(emagm); cd = sqrt(emagd)
+       error = 2.0_dp*max( &
+            & abs((vd-vm)/(cd+cm+floor_B)), &
+            & abs((vm-vg)/(cm+cg+floor_B)) )
+       if (error > err_grad_B) ok = .true.
+    endif
+
+    if (err_grad_C >= 0.0_dp) then
+       vg = bc_lft(3); vm = bc_mid(3); vd = bc_rgt(3)
+       cg = sqrt(emagg); cm = sqrt(emagm); cd = sqrt(emagd)
+       error = 2.0_dp*max( &
+            & abs((vd-vm)/(cd+cm+floor_C)), &
+            & abs((vm-vg)/(cm+cg+floor_C)) )
+       if (error > err_grad_C) ok = .true.
+    endif
+
+  end subroutine hydro_crit_mhd
+  ! =========================================================================
+#endif
+
   ! =========================================================================
   attributes(global) subroutine hydro_flag_kernel(flag1, grid, nbor, uold, bold, head_idx, num_octs, &
-       & gamma, smallr, smallc, err_grad_d, err_grad_p, floor_d, floor_p)
+       & gamma, smallr, smallc, err_grad_d, err_grad_p, floor_d, floor_p, &
+       & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C)
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     ! Face-centred B. Unallocated and unused without MHD; passed unconditionally
@@ -3934,6 +4008,12 @@ contains
     real(kind=dp), intent(in), value :: smallr, smallc ! Unused without MHD
     real(kind=dp), intent(in), value :: err_grad_d, floor_d
     real(kind=dp), intent(in), value :: err_grad_p, floor_p
+    ! MHD refinement thresholds (Stage D2). Passed unconditionally; unused
+    ! without MHD.
+    real(kind=dp), intent(in), value :: err_grad_b2, floor_b2
+    real(kind=dp), intent(in), value :: err_grad_A, floor_A
+    real(kind=dp), intent(in), value :: err_grad_B, floor_B
+    real(kind=dp), intent(in), value :: err_grad_C, floor_C
 
     integer :: cell_idx, oct_idx, block_idx, source_idx, subgrid_idx
     integer :: i, j, k, il, jl, kl, ir, jr, kr
@@ -3941,6 +4021,12 @@ contains
     type(primitive_t) :: prim_lft, prim_mid, prim_rgt
     type(conserved_t) :: cons_lft, cons_mid, cons_rgt
     logical :: ok
+#ifdef MHD
+    ! Cell-centred B (0.5*(b_lo+b_hi) per axis) of the left/mid/right cells, for
+    ! the D2 MHD refinement criteria.
+    real(kind=dp) :: bc_lft(1:3), bc_mid(1:3), bc_rgt(1:3)
+    logical :: ok_mhd
+#endif
 
     block_idx = blockIdx%x - 1
 
@@ -3977,6 +4063,9 @@ contains
          & bold(cell_idx,1,oct_idx), bold(cell_idx,4,oct_idx), &
          & bold(cell_idx,2,oct_idx), bold(cell_idx,5,oct_idx), &
          & bold(cell_idx,3,oct_idx), bold(cell_idx,6,oct_idx), smallr, smallc)
+    bc_mid(1) = 0.5_dp*(bold(cell_idx,1,oct_idx)+bold(cell_idx,4,oct_idx))
+    bc_mid(2) = 0.5_dp*(bold(cell_idx,2,oct_idx)+bold(cell_idx,5,oct_idx))
+    bc_mid(3) = 0.5_dp*(bold(cell_idx,3,oct_idx)+bold(cell_idx,6,oct_idx))
 #else
     prim_mid = conserved_2_primitive(cons_mid, gamma)
 #endif
@@ -4011,6 +4100,9 @@ contains
             & bold(icell,1,source_idx), bold(icell,4,source_idx), &
             & bold(icell,2,source_idx), bold(icell,5,source_idx), &
             & bold(icell,3,source_idx), bold(icell,6,source_idx), smallr, smallc)
+       bc_lft(1) = 0.5_dp*(bold(icell,1,source_idx)+bold(icell,4,source_idx))
+       bc_lft(2) = 0.5_dp*(bold(icell,2,source_idx)+bold(icell,5,source_idx))
+       bc_lft(3) = 0.5_dp*(bold(icell,3,source_idx)+bold(icell,6,source_idx))
 #else
        prim_lft = conserved_2_primitive(cons_lft, gamma)
 #endif
@@ -4029,6 +4121,9 @@ contains
             & bold(icell,1,source_idx), bold(icell,4,source_idx), &
             & bold(icell,2,source_idx), bold(icell,5,source_idx), &
             & bold(icell,3,source_idx), bold(icell,6,source_idx), smallr, smallc)
+       bc_rgt(1) = 0.5_dp*(bold(icell,1,source_idx)+bold(icell,4,source_idx))
+       bc_rgt(2) = 0.5_dp*(bold(icell,2,source_idx)+bold(icell,5,source_idx))
+       bc_rgt(3) = 0.5_dp*(bold(icell,3,source_idx)+bold(icell,6,source_idx))
 #else
        prim_rgt = conserved_2_primitive(cons_rgt, gamma)
 #endif
@@ -4038,6 +4133,14 @@ contains
 
        ! If satisfied set flag1 to 1
        if (ok) flag1(cell_idx, oct_idx) = 1
+
+#ifdef MHD
+       ! MHD refinement criteria (Stage D2): magnetic-energy / B-component
+       ! gradients on the cell-centred B (CPU hydro_refine MHD branches).
+       call hydro_crit_mhd(bc_lft, bc_mid, bc_rgt, ok_mhd, &
+            & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C)
+       if (ok_mhd) flag1(cell_idx, oct_idx) = 1
+#endif
 
     end do
 

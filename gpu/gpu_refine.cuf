@@ -1,6 +1,6 @@
 module refine_device
-  use amr_parameters, only: dp, ndim, twotondim, nhilbert
-  use hydro_parameters, only: nvar
+  use amr_parameters, only: dp, ndim, twotondim, twondim, nhilbert
+  use hydro_parameters, only: nvar, nener
   use oct_commons, only: oct
   use gpu_utils
   use cudafor
@@ -11,8 +11,14 @@ contains
   include 'gpu_hash.cuf'
   include 'gpu_hilbert.cuf'
 
+#ifdef MHD
+  include 'gpu_interpol_mhd.cuf'
+#endif
+
   ! =========================================================================
-  attributes(device) subroutine make_new_oct(grid, flag1, uold, bold, f, phi, phi_old, ifree, oct_idx, cell_idx)
+  attributes(device) subroutine make_new_oct(grid, flag1, uold, bold, f, phi, phi_old, ifree, oct_idx, cell_idx, &
+       & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
+       & interpol_var, interpol_type, smallr)
     use amr_parameters, only: ndim
     type(oct), device :: grid(*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
@@ -23,10 +29,29 @@ contains
     integer(kind=4), device :: flag1(1:twotondim,*)
     integer, device :: ifree
     integer, value :: oct_idx, cell_idx
+    ! Hash-table + periodic-box navigation for the D4 parent-stencil gather.
+    ! Passed unconditionally (mirrors make_cache_octs); only read under #ifdef MHD.
+    integer(kind=8), device :: hash_key(*)
+    integer(kind=4), device :: hash_val(*)
+    integer(kind=4), value :: hash_size
+    integer(kind=4), device :: ckey_max(*)
+    integer(kind=8), device :: key_off(*)
+    integer(kind=4), device :: box_ckey_min(1:ndim,*)
+    integer(kind=4), device :: box_ckey_max(1:ndim,*)
+    logical, device :: periodic(1:3)
+    integer(kind=4), value :: interpol_var, interpol_type
+    real(kind=dp), value :: smallr
 
     integer(kind=4) :: i, j, k, ind, child_idx, ilevel
 #ifdef MHD
-    integer(kind=4) :: ib
+    integer(kind=4) :: ib, ivar
+    ! D4 prolongation work arrays (CPU make_new_oct locals u1/u2/b1/b2/b3).
+    real(kind=dp) :: u1(0:twondim,1:nvar)
+    real(kind=dp) :: u2(1:twotondim,1:nvar)
+    real(kind=dp) :: b1(0:twondim,1:6)
+    real(kind=dp) :: b2(1:twotondim,1:6)
+    real(kind=dp) :: b3(1:twondim,1:twotondim,1:6)
+    logical :: refined(1:twondim)
 #endif
     integer(kind=4), dimension(1:ndim) :: ckey
     integer(kind=8) :: hkey
@@ -57,8 +82,27 @@ contains
     hkey = hilbert_key(ckey, ilevel - 1)
     grid(child_idx)%hkey(1) = hkey
 
+#ifdef MHD
+    ! Stage D4: divB-preserving constrained prolongation (CPU interpol_mhd).
+    ! Gather the 7-point coarse stencil + refined-sibling face-B, interpolate
+    ! hydro + face-B together (Balsara 2001), and scatter all nvar + 6 child
+    ! slots -- replaces the Stage A2 straight injection of both hydro and B.
+    call gather_twondim_parent_stencil(grid, uold, bold, hash_key, hash_val, hash_size, &
+         & ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, ilevel, ckey, u1, b1, b3, refined)
+    call interpol_mhd_d(u1, u2, b1, b2, b3, refined, interpol_var, interpol_type, smallr)
+    do ivar = 1, nvar
+       do ind = 1, twotondim
+          uold(ind,ivar,child_idx) = u2(ind,ivar)
+       end do
+    end do
+    do ib = 1, 6
+       do ind = 1, twotondim
+          bold(ind,ib,child_idx) = b2(ind,ib)
+       end do
+    end do
+#else
 #ifdef HYDRO
-    ! Straight injection for hydro variables
+    ! Straight injection for hydro variables (non-MHD build)
     do ind = 1, twotondim
        uold(ind,1,child_idx) = uold(cell_idx,1,oct_idx)
        uold(ind,2,child_idx) = uold(cell_idx,2,oct_idx)
@@ -67,15 +111,6 @@ contains
        uold(ind,5,child_idx) = uold(cell_idx,5,oct_idx)
     end do
 #endif
-
-#ifdef MHD
-    ! Straight injection of the parent's 6 face-B onto all 8 children.
-    ! TODO: replace with interpol_mhd-equivalent (Stage D4, divB-preserving)
-    do ind = 1, twotondim
-       do ib = 1, 6
-          bold(ind,ib,child_idx) = bold(cell_idx,ib,oct_idx)
-       end do
-    end do
 #endif
 
 #ifdef GRAV
@@ -93,7 +128,9 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine refine_kernel(grid, flag1, uold, bold, f, phi, phi_old, ifree, head_idx, num_octs)
+  attributes(global) subroutine refine_kernel(grid, flag1, uold, bold, f, phi, phi_old, ifree, head_idx, num_octs, &
+       & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
+       & interpol_var, interpol_type, smallr)
     type(oct), device :: grid(*)
     integer, device :: flag1(1:twotondim,*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
@@ -104,6 +141,17 @@ contains
     integer, device :: ifree
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
+    ! D4 parent-stencil gather plumbing (used under #ifdef MHD in make_new_oct).
+    integer(kind=8), device :: hash_key(*)
+    integer(kind=4), device :: hash_val(*)
+    integer(kind=4), intent(in), value :: hash_size
+    integer(kind=4), device :: ckey_max(*)
+    integer(kind=8), device :: key_off(*)
+    integer(kind=4), device :: box_ckey_min(1:ndim,*)
+    integer(kind=4), device :: box_ckey_max(1:ndim,*)
+    logical, device :: periodic(1:3)
+    integer(kind=4), intent(in), value :: interpol_var, interpol_type
+    real(kind=dp), intent(in), value :: smallr
 
     integer :: block_idx, oct_idx, cell_idx
     logical :: flagged, refined
@@ -124,7 +172,9 @@ contains
 
     ! Create new oct
     if (flagged .and. .not. refined) then
-       call make_new_oct(grid, flag1, uold, bold, f, phi, phi_old, ifree, oct_idx, cell_idx)
+       call make_new_oct(grid, flag1, uold, bold, f, phi, phi_old, ifree, oct_idx, cell_idx, &
+            & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
+            & interpol_var, interpol_type, smallr)
        grid(oct_idx)%refined(cell_idx) = .true.
     endif
 
@@ -1348,7 +1398,7 @@ contains
        & uold, bold, f, phi, phi_old, swap_local, prefix_sum, father, nbor, hash_key, &
        & hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, &
        & periodic, ngridmax, ifree_cache, input_ind, head_idx, &
-       & num_subgrids)
+       & num_subgrids, interpol_var, interpol_type, smallr)
 
     use cooperative_groups
 
@@ -1377,6 +1427,8 @@ contains
     integer(kind=4), intent(in), value :: input_ind
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_subgrids
+    integer(kind=4), intent(in), value :: interpol_var, interpol_type
+    real(kind=dp), intent(in), value :: smallr
     integer(kind=4) :: num_octs
 
     type(grid_group) :: gg
@@ -1392,7 +1444,7 @@ contains
     ! Make new ghost octs in cache
     call make_cache_octs_impl(grid, flag1, uold, bold, f, phi, phi_old, swap_local, father, nbor, &
         & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-        & ngridmax, ifree_cache, num_octs, input_ind)
+        & ngridmax, ifree_cache, num_octs, input_ind, interpol_var, interpol_type, smallr)
     call syncthreads(gg)
 
     ! Insert new octs in hash table
@@ -1411,7 +1463,7 @@ contains
   ! =========================================================================
   attributes(global) subroutine make_cache_octs(grid, flag1, uold, bold, f, phi, phi_old, swap_local, father, nbor, &
        & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-       & ngridmax, ifree_cache, num_octs, input_ind)
+       & ngridmax, ifree_cache, num_octs, input_ind, interpol_var, interpol_type, smallr)
     type(oct), device :: grid(*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: phi(1:twotondim,*)
@@ -1433,17 +1485,19 @@ contains
     integer(kind=4), intent(in), value :: hash_size
     integer(kind=4), intent(in), value :: ngridmax
     integer(kind=4), intent(in), value :: input_ind
+    integer(kind=4), intent(in), value :: interpol_var, interpol_type
+    real(kind=dp), intent(in), value :: smallr
 
     call make_cache_octs_impl(grid, flag1, uold, bold, f, phi, phi_old, swap_local, father, nbor, &
         & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-        & ngridmax, ifree_cache, num_octs, input_ind)
+        & ngridmax, ifree_cache, num_octs, input_ind, interpol_var, interpol_type, smallr)
 
   end subroutine make_cache_octs
 
   ! =========================================================================
   attributes(device) subroutine make_cache_octs_impl(grid, flag1, uold, bold, f, phi, phi_old, swap_local, father, nbor, &
        & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-       & ngridmax, ifree_cache, num_octs, input_ind)
+       & ngridmax, ifree_cache, num_octs, input_ind, interpol_var, interpol_type, smallr)
     type(oct), device :: grid(*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: phi(1:twotondim,*)
@@ -1465,11 +1519,23 @@ contains
     integer(kind=4), intent(in), value :: hash_size
     integer(kind=4), intent(in), value :: ngridmax
     integer(kind=4), intent(in), value :: input_ind
+    integer(kind=4), intent(in), value :: interpol_var, interpol_type
+    real(kind=dp), intent(in), value :: smallr
 
     integer(kind=8) :: hkey, parent_key, offset, ix, iy, iz, nx
     integer :: oct_idx, subgrid_idx, thread_idx, block_idx, cache_idx, parent_idx, cell_idx
     integer :: ind, i, j, k, ilevel, idim, ib
     integer, dimension(1:ndim) :: ckey
+#ifdef MHD
+    integer :: ivar
+    ! D4 prolongation work arrays (CPU make_new_oct locals u1/u2/b1/b2/b3).
+    real(kind=dp) :: u1(0:twondim,1:nvar)
+    real(kind=dp) :: u2(1:twotondim,1:nvar)
+    real(kind=dp) :: b1(0:twondim,1:6)
+    real(kind=dp) :: b2(1:twotondim,1:6)
+    real(kind=dp) :: b3(1:twondim,1:twotondim,1:6)
+    logical :: refined(1:twondim)
+#endif
 
     ! Compute thread and block idx
     thread_idx = threadIdx%x - 1
@@ -1543,8 +1609,26 @@ contains
     k = ckey(3) - 2*iz
     cell_idx = 1 + i + 2*j + 4*k
 
+#ifdef MHD
+    ! Stage D4: divB-preserving constrained prolongation (CPU interpol_mhd) for
+    ! cache (ghost) octs.  ilevel is now the parent level, so the cache oct's own
+    ! (child) level is ilevel+1 and its Cartesian key is ckey.
+    call gather_twondim_parent_stencil(grid, uold, bold, hash_key, hash_val, hash_size, &
+         & ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, ilevel+1, ckey, u1, b1, b3, refined)
+    call interpol_mhd_d(u1, u2, b1, b2, b3, refined, interpol_var, interpol_type, smallr)
+    do ivar = 1, nvar
+       do ind = 1, twotondim
+          uold(ind,ivar,cache_idx) = u2(ind,ivar)
+       end do
+    end do
+    do ib = 1, 6
+       do ind = 1, twotondim
+          bold(ind,ib,cache_idx) = b2(ind,ib)
+       end do
+    end do
+#else
 #ifdef HYDRO
-    ! Straight injection for hydro variables
+    ! Straight injection for hydro variables (non-MHD build)
     do ind = 1, twotondim
        uold(ind,1,cache_idx) = uold(cell_idx,1,parent_idx)
        uold(ind,2,cache_idx) = uold(cell_idx,2,parent_idx)
@@ -1553,15 +1637,6 @@ contains
        uold(ind,5,cache_idx) = uold(cell_idx,5,parent_idx)
     end do
 #endif
-
-#ifdef MHD
-    ! Straight injection of the parent's 6 face-B onto all 8 cache children.
-    ! TODO: replace with interpol_mhd-equivalent (Stage D4, divB-preserving)
-    do ind = 1, twotondim
-       do ib = 1, 6
-          bold(ind,ib,cache_idx) = bold(cell_idx,ib,parent_idx)
-       end do
-    end do
 #endif
 
 #ifdef GRAV

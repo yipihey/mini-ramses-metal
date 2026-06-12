@@ -499,9 +499,18 @@ contains
     integer(kind=4) :: threadsX_per_block, threadsY_per_block
     integer(kind=4) :: new_ifree, old_ifree, new_head, new_tail, new_noct
     integer(kind=4) :: ilev, ind, ibit, ibucket, skip_bit, noct_level
+    ! D4 constrained-interpolation parameters (mirror CPU r%interpol_*/r%smallr).
+    ! smallr is copied into a kind=dp local before the launch (sim%r%smallr is
+    ! hardcoded real(kind=8); avoids the S-0450 kind mismatch under NPRE=4).
+    integer(kind=4) :: interpol_var, interpol_type
+    real(kind=dp) :: smallr_d
 
     integer(kind=4), device :: ifree_d, ifree_cache_d, new_noct_d
     character(len=64) :: descr
+
+    interpol_var  = sim%r%interpol_var
+    interpol_type = sim%r%interpol_type
+    smallr_d      = sim%r%smallr
 
     ! Wipe clean cache memory for all higher levels
     head_cache = sim%m%head_cache(ilevel+1)
@@ -528,7 +537,9 @@ contains
     if (num_octs > 0) then
        call refine_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(grid, flag1, &
             & uold, bold, f, phi, phi_old, &
-            & ifree_d, head_idx, num_octs)
+            & ifree_d, head_idx, num_octs, &
+            & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
+            & interpol_var, interpol_type, smallr_d)
     endif
 
     ! Copy back to host new free memory pointer ifree
@@ -807,7 +818,8 @@ contains
              call make_cache_insert_ghost_octs<<<num_blocks, num_threads>>>(grid, flag1, &
                   & uold, bold, f, phi, phi_old, swap_local, prefix_sum, father, nbor, hash_key, &
                   & hash_val, sim%m%hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, &
-                  & periodic, sim%m%ngridmax, ifree_cache_d, ind, head_idx, num_subgrids)
+                  & periodic, sim%m%ngridmax, ifree_cache_d, ind, head_idx, num_subgrids, &
+                  & interpol_var, interpol_type, smallr_d)
 #else
 #if defined(CUB_SCAN_REFINE)
              call get_total_sum<<<1,1>>>(prefix_sum, head_idx, num_subgrids, new_noct_d)
@@ -818,7 +830,7 @@ contains
              call make_cache_octs<<<num_blocks, num_threads>>>(grid, flag1, &
                   & uold, bold, f, phi, phi_old, swap_local, father, nbor, &
                   & hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-                  & sim%m%ngridmax, ifree_cache_d, new_noct_d, ind)
+                  & sim%m%ngridmax, ifree_cache_d, new_noct_d, ind, interpol_var, interpol_type, smallr_d)
 
              call insert_hash_cache<<<num_blocks, num_threads>>>(grid, hash_key, hash_val, sim%m%hash_size, &
                   & ckey_max, key_off, sim%m%ngridmax, ifree_cache_d, new_noct_d)
@@ -951,6 +963,8 @@ contains
     integer :: threadsX_per_block, threadsY_per_block, num_threads, num_blocks
     real(kind=dp) :: gamma, err_grad_d, err_grad_p, floor_d, floor_p
     real(kind=dp) :: smallr, smallc
+    real(kind=dp) :: err_grad_b2, floor_b2, err_grad_A, floor_A
+    real(kind=dp) :: err_grad_B, floor_B, err_grad_C, floor_C
     real(kind=dp) :: m_refine, jeans_refine, mass_sph, dx, factG
     integer(kind=8), device :: nflag_d
     integer(kind=8) :: nflag_h
@@ -965,6 +979,14 @@ contains
     floor_p = sim%r%floor_p
     smallr = sim%r%smallr
     smallc = sim%r%smallc
+    err_grad_b2 = sim%r%err_grad_b2
+    floor_b2 = sim%r%floor_b2
+    err_grad_A = sim%r%err_grad_A
+    floor_A = sim%r%floor_A
+    err_grad_B = sim%r%err_grad_B
+    floor_B = sim%r%floor_B
+    err_grad_C = sim%r%err_grad_C
+    floor_C = sim%r%floor_C
     mass_sph = sim%r%mass_sph
     m_refine = sim%r%m_refine(ilevel)
     jeans_refine = sim%r%jeans_refine(ilevel)
@@ -991,7 +1013,8 @@ contains
        if(num_octs > 0)then
           call nvtxStartRange("GPU user_flag", color=2)!yellow
           call hydro_flag_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(flag1, grid, nbor, uold, bold, &
-               & head_idx, num_octs, gamma, smallr, smallc, err_grad_d, err_grad_p, floor_d, floor_p)
+               & head_idx, num_octs, gamma, smallr, smallc, err_grad_d, err_grad_p, floor_d, floor_p, &
+               & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C)
           call nvtxEndRange()
        endif
     endif
