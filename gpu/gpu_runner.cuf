@@ -447,6 +447,7 @@ contains
 
    real(kind=8) :: scale_nH, scale_T2, scale_l, scale_d, scale_t, scale_v
    real(kind=8) :: dx, vol, factG, d0, mstar
+   real(kind=dp) :: gamma, smallr, smallc2
    integer(kind=4) :: head_idx, num_octs, head_part, npart_new
    integer(kind=8) :: nstar_new
    integer(kind=4) :: num_threads, num_blocks
@@ -457,6 +458,9 @@ contains
    call units(sim%r,sim%g,scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
 
    ! Set some constants
+   gamma = sim%r%gamma
+   smallr = sim%r%smallr
+   smallc2 = sim%r%smallc**2
    dx = sim%r%boxlen/2**ilevel
    vol = dx**ndim
    factG = 1.0d0
@@ -473,15 +477,13 @@ contains
 
    if (num_octs <= 0) return
 
-   call nvtxStartRange("GPU Star Formation Pass 1", color=3)!blue
+   call nvtxStartRange("Count Star Formation Sites", color=3)!blue
    ! Array flag1 contains the number of star quanta per AMR cell
    ! Array prefix_sum = 1 if we have a SF site and 0 otherwise.
    call count_site_kernel<<<num_blocks, num_threads>>>(grid, uold, flag1, prefix_sum, &
         & head_idx, num_octs, ilevel, d0, dx, vol, factG, mstar, &
-        & sim%r%ivar_refine, sim%r%var_cut_refine, &
-        & sim%g%dtnew(ilevel), sim%g%texp, sim%r%gamma, &
-        & sim%r%smallc, sim%r%smallr, sim%r%sf_model, sim%r%eps_star, &
-        & sim%r%sgs_turb, sim%r%iturb)
+        & sim%r%ivar_refine, sim%r%var_cut_refine, sim%g%dtnew(ilevel), sim%g%texp, &
+        & gamma, smallr, smallc2, sim%r%sf_model, sim%r%eps_star, sim%r%sgs_turb, sim%r%iturb)
    call GPU_Error_Check(__FILE__, __LINE__)
    call nvtxEndRange()
 
@@ -511,14 +513,14 @@ contains
       num_threads = 256
       num_blocks = (npart_new + num_threads - 1) / num_threads
 
-      call nvtxStartRange("GPU Star Formation Pass 2", color=3)!blue
+      call nvtxStartRange("Create New Star Particles", color=3)!blue
       ! Pull new star particles from free memory and set properties
       ! Also modifies parent cell gas properties (mass conserving)
       call star_formation_kernel<<<num_blocks, num_threads>>>(grid, uold, f, flag1, flag2, &
            & star_xp, star_vp, star_mp, star_tp, star_zp, star_levelp, star_idp, &
            & head_part, npart_new, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
            & dx, vol, mstar, d_skip, int(sim%r%nstarmax,8), &
-           & sim%g%dtnew(ilevel), sim%g%texp, sim%g%aexp, sim%r%gamma, &
+           & sim%g%dtnew(ilevel), sim%g%texp, sim%g%aexp, &
            & sim%r%metal, sim%r%imetal, sim%r%z_ave, sim%r%ientropy, sim%r%dual_energy)
       call GPU_Error_Check(__FILE__, __LINE__)
       call nvtxEndRange()

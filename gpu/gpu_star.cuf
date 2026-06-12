@@ -16,22 +16,21 @@ contains
 
 !> Count new stars per cell.
 ! =========================================================================
-attributes(global) subroutine count_site_kernel( &
-     & grid, uold, flag1, prefix_sum, &
-     & head_idx, num_octs, ilevel, d0, dx, vol, factG, &
-     & mstar, ivar_refine, var_cut_refine, &
-     & dt, texp, gamma, smallc, smallr, &
-     & sf_model, eps_star, sgs_turb, iturb)
+attributes(global) subroutine count_site_kernel(grid, uold, flag1, prefix_sum, &
+     & head_idx, num_octs, ilevel, d0, dx, vol, factG, mstar, ivar_refine, var_cut_refine, &
+     & dt, texp, gamma, smallr, smallc2, sf_model, eps_star, sgs_turb, iturb)
   use curand_device
   type(oct), device :: grid(*)
   real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
   integer(kind=4), device :: flag1(*)
   integer(kind=4), device :: prefix_sum(*)
+
   integer(kind=4), intent(in), value :: head_idx, num_octs, ilevel
   real(kind=8), intent(in), value :: d0, dx, vol, factG, mstar
   integer(kind=4), intent(in), value :: ivar_refine
   real(kind=8), intent(in), value :: var_cut_refine
-  real(kind=8), intent(in), value :: dt, texp, gamma, smallc, smallr
+  real(kind=8), intent(in), value :: dt, texp
+  real(kind=dp), intent(in), value :: gamma, smallr, smallc2
   integer(kind=4), intent(in), value :: sf_model
   real(kind=8), intent(in), value :: eps_star
   logical, intent(in), value :: sgs_turb
@@ -39,7 +38,8 @@ attributes(global) subroutine count_site_kernel( &
 
   integer :: gid, oct_idx, cell_idx, nstar, global_cell_idx
   integer(kind=8) :: hkey, counter
-  real(kind=8) :: d, mask, p, cs2, sigma2, t_ff, sfr_ff, t_dyn, alpha_vir, Mach2, b_turb, sigs, scrit, ekin
+  real(kind=8) :: d, mask, p, cs2, sigma2, t_ff, sfr_ff, t_dyn
+  real(kind=8) :: alpha_vir, Mach2, b_turb, sigs, scrit, ekin
   real(kind=8) :: mcell, mgas, PoissMean
   type(curandStatePhilox4_32_10) :: localstate
   logical :: ok
@@ -72,7 +72,7 @@ attributes(global) subroutine count_site_kernel( &
           & 0.5_dp * uold(cell_idx, 3, oct_idx)**2 / d + &
           & 0.5_dp * uold(cell_idx, 4, oct_idx)**2 / d
      p = (gamma - 1_dp) * (uold(cell_idx, 5, oct_idx) - ekin)
-     cs2 = max(gamma * p / d, smallc**2)
+     cs2 = max(gamma * p / d, smallc2)
      sigma2 = 0d0
      if (sgs_turb) then
         sigma2 = uold(cell_idx, iturb, oct_idx) * 2d0 / 3d0 / d
@@ -130,9 +130,10 @@ end subroutine count_site_kernel
 ! =========================================================================
 attributes(global) subroutine count_star_kernel(flag1, head_idx, num_octs, nflag)
   integer(kind=4), device :: flag1(1:twotondim,*)
+  integer(kind=8), device, intent(inout) :: nflag
+
   integer(kind=4), intent(in), value :: head_idx
   integer(kind=4), intent(in), value :: num_octs
-  integer(kind=8), device, intent(inout) :: nflag
 
   integer :: info
   integer :: tid, bid ! The index of the thread and the block
@@ -178,6 +179,7 @@ end subroutine count_star_kernel
 attributes(global) subroutine compute_star_swap_table(swap_local, prefix_sum, head_idx, num_octs)
   integer(kind=4), device :: swap_local(*)
   integer(kind=4), device :: prefix_sum(*)
+
   integer(kind=4), intent(in), value :: head_idx
   integer(kind=4), intent(in), value :: num_octs
 
@@ -224,7 +226,7 @@ end subroutine compute_star_swap_table
 attributes(global) subroutine star_formation_kernel(grid, uold, f, flag1, swap_local, &
      & star_xp, star_vp, star_mp, star_tp, star_zp, star_levelp, star_idp, &
      & head_idx, num_star, ilevel, levelmin, levelmax, dx, vol, mstar, d_skip, leading, &
-     & dt, texp, aexp, gamma, metal, imetal, z_ave, ientropy, dual_energy)
+     & dt, texp, aexp, metal, imetal, z_ave, ientropy, dual_energy)
   use curand_device
   type(oct), device :: grid(*)
   real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -241,7 +243,7 @@ attributes(global) subroutine star_formation_kernel(grid, uold, f, flag1, swap_l
   integer(kind=4), intent(in), value :: head_idx, num_star
   integer(kind=4), intent(in), value :: ilevel, levelmin, levelmax
   real(kind=8), intent(in), value :: dx, vol, mstar
-  real(kind=8), intent(in), value :: dt, texp, aexp, gamma, z_ave
+  real(kind=8), intent(in), value :: dt, texp, aexp, z_ave
   logical, intent(in), value :: metal
   integer(kind=4), intent(in), value :: ientropy, imetal
   real(kind=8), intent(in), value :: dual_energy
