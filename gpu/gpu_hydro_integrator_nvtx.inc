@@ -3,15 +3,6 @@
   ! gpu_godunov follow the gpu_cic_part_large:multipole naming pattern; shared
   ! state spills to integrator_ws between launches.
 
-  integer, parameter :: hydro_int_cons2prim = 1
-  integer, parameter :: hydro_int_trace_3d = 2
-  integer, parameter :: hydro_int_flux = 3
-  integer, parameter :: hydro_int_zero_euler = 4
-  integer, parameter :: hydro_int_emf = 5
-  integer, parameter :: hydro_int_zero_fine = 6
-  integer, parameter :: hydro_int_update = 7
-  integer, parameter :: hydro_int_coarse = 8
-
   attributes(device) subroutine integrator_ws_save(sgid, ws, &
        & local_subgrid, &
 #if NVAR>5+NENER

@@ -195,6 +195,14 @@ module hydro_device
      type(subgrid_3x3x2edge_corner) :: corner_z
 #endif
   end type integrator_subgrid_ws_t
+  integer, parameter, public :: hydro_int_cons2prim = 1
+  integer, parameter, public :: hydro_int_trace_3d = 2
+  integer, parameter, public :: hydro_int_flux = 3
+  integer, parameter, public :: hydro_int_zero_euler = 4
+  integer, parameter, public :: hydro_int_emf = 5
+  integer, parameter, public :: hydro_int_zero_fine = 6
+  integer, parameter, public :: hydro_int_update = 7
+  integer, parameter, public :: hydro_int_coarse = 8
 #endif
 
 contains
