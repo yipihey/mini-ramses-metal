@@ -396,11 +396,11 @@ contains
        momentum_z = uold(cell_idx, 4, oct_idx)
        energy     = uold(cell_idx, 5, oct_idx)
        pressure   = energy - 0.5d0*(momentum_x**2 + momentum_y**2 + momentum_z**2) / density
-       pressure   = max((gamma - 1d0) * pressure, smallc2 * density)
+       pressure   = max((gamma - 1.0_dp) * pressure, smallc2 * density)
 
        ! Compute Jeans length
        c_iso = sqrt(pressure / density)
-       t_ff = sqrt(ACOS(-1d0) /density / factG)
+       t_ff = sqrt(ACOS(-1.0_dp) /density / factG)
        jeans_length = c_iso * t_ff
 
        ! Refine if Jeans length is not resolved enough

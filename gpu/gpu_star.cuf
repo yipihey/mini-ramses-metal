@@ -38,7 +38,7 @@ attributes(global) subroutine count_site_kernel(grid, uold, flag1, prefix_sum, &
 
   integer :: gid, oct_idx, cell_idx, nstar, global_cell_idx
   integer(kind=8) :: hkey, counter
-  real(kind=8) :: d, mask, p, cs2, sigma2, t_ff, sfr_ff, t_dyn
+  real(kind=dp) :: d, mask, p, cs2, sigma2, t_ff, sfr_ff, t_dyn
   real(kind=8) :: alpha_vir, Mach2, b_turb, sigs, scrit, ekin
   real(kind=8) :: mcell, mgas, PoissMean
   type(curandStatePhilox4_32_10) :: localstate
@@ -250,7 +250,7 @@ attributes(global) subroutine star_formation_kernel(grid, uold, f, flag1, swap_l
 
   integer :: star_idx, global_cell_idx, cell_idx, oct_idx, idim, ivar, nstar
   integer(kind=8) :: hkey, counter
-  real(kind=8) :: d_old, d_new, d_star, xrand
+  real(kind=dp) :: d_old, d_new, d_star, xrand
   type(curandStatePhilox4_32_10) :: localstate
 
   star_idx = (blockIdx%x - 1) * blockDim%x + threadIdx%x - 1
