@@ -1241,10 +1241,7 @@ contains
   !> cell-centred B, applies the density/internal-energy floors and the magnetic
   !> energy correction (CPU ctoprim), and loads the passive scalars.
   !>
-  !> @param[in] refined_bytes : Byte-packed per-oct refinement map (8, noct),
-  !> re-derived from grid%refined by pack_refined_kernel before every launch.
-  !> Replaces the 4-byte AoS gather grid(source_idx)%refined(cell_idx), which
-  !> NCU billed as the single largest source of excessive global sectors.
+  !> @param[in] grid : The oct array (main + cache); used for grid%refined only
   !> @param[in] head_idx : The head index of the octs at the current AMR level
   !> @param[in] block_idx : The CUDA block index of the calling thread
   !> @param[in] thread_idx : The index of calling thread within its block
@@ -1254,7 +1251,7 @@ contains
   !> @param[out] scalar_sub (MHD) : The passive-scalar subgrid (1:nvar-5)
   !> @param[out] bf (MHD) : The face-continuous low-face B buffer
   !>
-  attributes(device) subroutine subgrid_conserved_2_primitive(refined_bytes, uold, bold, f, constant_gravity, nbor, &
+  attributes(device) subroutine subgrid_conserved_2_primitive(grid, uold, bold, f, constant_gravity, nbor, &
 #if NVAR>5+NENER
        & scalar_sub, &
 #endif
@@ -1262,7 +1259,7 @@ contains
        & bf, &
 #endif
        & head_idx, block_idx, thread_idx, gamma, smallr, smallc, dt, local_subgrid)
-    logical(kind=1), device :: refined_bytes(1:twotondim,*)
+    type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -1433,18 +1430,14 @@ contains
        ! the two stored copies of each face are bitwise identical (the face-B
        ! redundancy invariant the CT update preserves).
 
-       ! Store refinement map (MHD stores only the consumed lattice).
-       ! Read from the byte-packed refined_bytes (SoA, 8 B/oct) instead of the
-       ! 4-byte logicals buried in the ~64 B type(oct) AoS -- the old gather
-       ! straddled two 32 B sectors per oct and was NCU's largest single
-       ! source of excessive global sectors (29%).
+       ! Store refinement map (MHD stores only the consumed lattice)
        if (i >= 1 .and. i <= 2*nsubgrid+2 .and. j >= 1 .and. j <= 2*nsubgrid+2 &
             & .and. k >= 1 .and. k <= 2*nsubgrid+2) then
-          local_subgrid%refined(i, j, k) = refined_bytes(cell_idx, source_idx)
+          local_subgrid%refined(i, j, k) = grid(source_idx)%refined(cell_idx)
        endif
 #else
-       ! Store refinement map (byte-packed gather; see the MHD branch note)
-       local_subgrid%refined   (i, j, k) = refined_bytes(cell_idx, source_idx)
+       ! Store refinement map
+       local_subgrid%refined   (i, j, k) = grid(source_idx)%refined(cell_idx)
 #endif
 
     end do
@@ -3742,46 +3735,15 @@ contains
   ! this budget before touching nsubgrid.
   ! ##########################################################################
 
-  ! =========================================================================
-  !> @brief
-  !> Byte-pack grid%refined into the SoA refined_bytes(1:8, 1:num_octs) map.
-  !> Launched by gpu_godunov before every hydro_integrator_kernel launch (the
-  !> map is re-derived each time, so it can never go stale against the many
-  !> grid%refined writers: refine, derefine, multigrid, load-balance
-  !> unmarshal). Covers the FULL grid array (main + cache regions) because
-  !> the integrator's nbor stencil may reference remote cached octs. One
-  !> thread per (cell, oct): reads are the unavoidable AoS gather, done ONCE
-  !> per oct per launch instead of once per referencing subgrid inside the
-  !> integrator; writes are fully coalesced bytes.
-  !>
-  !> @param[in] grid : The oct array (main + cache)
-  !> @param[out] refined_bytes : Byte-packed refinement map (8, num_octs)
-  !> @param[in] num_octs : Size of the grid array (NOT just the level range)
-  ! =========================================================================
-  attributes(global) subroutine pack_refined_kernel(grid, refined_bytes, num_octs)
-    type(oct), device :: grid(*)
-    logical(kind=1), device :: refined_bytes(1:twotondim,*)
-    integer(kind=4), intent(in), value :: num_octs
-    integer :: idx, oct_idx, cell_idx
-
-    idx = (blockIdx%x - 1)*blockDim%x + threadIdx%x
-    if (idx > twotondim*num_octs) return
-    oct_idx  = (idx - 1)/twotondim + 1
-    cell_idx = idx - (oct_idx - 1)*twotondim
-    refined_bytes(cell_idx, oct_idx) = grid(oct_idx)%refined(cell_idx)
-  end subroutine pack_refined_kernel
-  ! =========================================================================
-
 #ifndef PAPER
   attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, bold, bnew, &
-       & f, father, nbor, refined_bytes, &
+       & f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
        & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
     type(oct), device :: grid(*)
     integer, device :: father(*)
     integer, device :: nbor(1:subgridsize,*)
-    logical(kind=1), device :: refined_bytes(1:twotondim,*)
     real(kind=8), device :: constant_gravity(1:3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -3842,7 +3804,7 @@ contains
     ! =======================================================================
     ! Convert from conserved to primitive variables
     ! =======================================================================
-    call subgrid_conserved_2_primitive(refined_bytes, uold, bold, f, constant_gravity, nbor, &
+    call subgrid_conserved_2_primitive(grid, uold, bold, f, constant_gravity, nbor, &
 #if NVAR>5+NENER
          & scalar_subgrid, &
 #endif

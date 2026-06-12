@@ -22,13 +22,6 @@ module gpu_runner
   integer(kind=4), device, allocatable, dimension(:) :: father
   integer(kind=4), device, allocatable, dimension(:,:) :: nbor
   integer(kind=4), device, allocatable, dimension(:,:) :: flag1, flag2
-  !> Byte-packed SoA mirror of grid%refined (8 B/oct, <1% of the per-oct
-  !> device footprint), consumed by the hydro/MHD integrator instead of the
-  !> 4-byte logicals inside the type(oct) AoS (NCU: that gather was the
-  !> largest single source of excessive global sectors). Allocated lazily and
-  !> RE-PACKED by pack_refined_kernel at every gpu_godunov call, so it never
-  !> goes stale against the grid%refined writers (refine/mg/load balance).
-  logical(kind=1), device, allocatable, dimension(:,:) :: refined_bytes
 
   !> Arrays to hold the hydro variables on the device
   real(kind=dp), device, allocatable, dimension(:,:,:) :: uold, unew
@@ -329,7 +322,7 @@ contains
 #ifdef PAPER
     use hydro_device, only: hydro_integrator_paper_kernel
 #else
-    use hydro_device, only: hydro_integrator_kernel, pack_refined_kernel
+    use hydro_device, only: hydro_integrator_kernel
 #endif
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout)::sim
@@ -337,7 +330,6 @@ contains
     !
     integer(kind=4) :: head_idx, num_subgrids
     integer :: threads_per_block, num_blocks
-    integer :: size_grid, num_pack_threads, num_pack_blocks
     real(dp) :: dt, dx, gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
     integer :: slope, riemann, slope_mag, riemann2d
     logical :: induction
@@ -379,27 +371,13 @@ contains
 #else
     if(nsubgrid == 1)threads_per_block = 64
     if(nsubgrid == 2)threads_per_block = 256
-       ! Re-derive the byte-packed refinement map consumed by the integrator
-       ! (see refined_bytes at module scope). Full grid array (main + cache
-       ! regions) every call: nbor may reference remote cached octs, and
-       ! re-packing is what keeps the map trivially in sync. The sweep is
-       ! bandwidth-trivial next to the integrator itself.
-       size_grid = size(grid)
-       if (allocated(refined_bytes)) then
-          if (size(refined_bytes, 2) /= size_grid) deallocate(refined_bytes)
-       endif
-       if (.not. allocated(refined_bytes)) allocate(refined_bytes(twotondim, size_grid))
-       num_pack_threads = 256
-       num_pack_blocks = (twotondim*size_grid + num_pack_threads - 1) / num_pack_threads
-       call pack_refined_kernel<<<num_pack_blocks, num_pack_threads>>>(grid, refined_bytes, size_grid)
-       call GPU_Error_Check(__FILE__, __LINE__)
        ! One launch for hydro and MHD: bold/bnew and the MHD runtime parameters
        ! are passed unconditionally (unallocated/unused without MHD). Under MHD
        ! the integrator's whole working set (corner states included) lives in
        ! kernel shared memory -- no per-level scratch to allocate (B1 budget
        ! block in gpu_hydro.cuf).
        call hydro_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, bold, bnew, &
-            & f, father, nbor, refined_bytes, &
+            & f, father, nbor, &
             & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
             & gamma, smallr, smallc, dt, dx, slope, slope_mag, riemann, riemann2d, &
             & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
