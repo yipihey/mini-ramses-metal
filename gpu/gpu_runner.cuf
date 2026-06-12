@@ -400,6 +400,11 @@ contains
     integer(kind=4) :: head_idx, num_octs
     integer(kind=4) :: threadsX_per_block, threadsY_per_block, num_blocks
     real(kind=8) :: scale_nH, scale_T2, scale_l, scale_d, scale_t, scale_v
+    real(kind=dp) :: gamma, smallr, smallc2
+
+    gamma = sim%r%gamma
+    smallr = sim%r%smallr
+    smallc2 = sim%r%smallc**2
 
     ! Conversion factor from user units to cgs units
     call units(sim%r,sim%g,scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
@@ -413,8 +418,8 @@ contains
     if (num_octs > 0) then
        call nvtxStartRange("GPU cooling", color=0)!green
        call cooling_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, grid, &
-            & head_idx, num_octs, &
-            & sim%r%gamma, sim%g%dtnew(ilevel), sim%r%eos_type, sim%r%eos_T2, sim%r%eos_nH, sim%r%eos_index, &
+            & head_idx, num_octs, gamma, smallr, smallc2, &
+            & sim%g%dtnew(ilevel), sim%r%eos_type, sim%r%eos_T2, sim%r%eos_nH, sim%r%eos_index, &
             & scale_T2, scale_nH)
        call nvtxEndRange()
     end if
