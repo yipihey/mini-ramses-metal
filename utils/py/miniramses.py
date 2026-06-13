@@ -8,6 +8,10 @@ import re
 
 import time
 
+def _advance_file_offset(offset, nbytes):
+    """Advance unformatted Fortran binary read offset (safe past 2GiB)."""
+    return int(offset) + int(nbytes)
+
 class Cool:
     """
     This is the class for RAMSES cooling table.
@@ -860,11 +864,12 @@ def rd_amr(nout,**kwargs):
         else:
             filename = path+"/output_"+car1+"/amr."+car2
 
-        offset = 12 + 4*(nlevelmax+1-levelmin)
+        offset = int(12 + 4 * (int(nlevelmax) + 1 - int(levelmin)))
         for ilevel in range(levelmin-1,nlevelmax):
-            ncache = numbl[ilevel,icpu-1]
+            ncache = int(numbl[ilevel,icpu-1])
+            nvar_i = int(nvar)
 
-            transfer = np.fromfile(filename,dtype=np.int32,count=nvar*ncache,offset=offset)
+            transfer = np.fromfile(filename,dtype=np.int32,count=nvar_i*ncache,offset=offset)
             transfer = np.reshape(transfer,(ncache,nvar))
             transfer = np.transpose(transfer)
 
@@ -877,7 +882,7 @@ def rd_amr(nout,**kwargs):
             for ind in range(0,2**ndim):
                 amr[ilevel].refined[ind,iskip[ilevel]:iskip[ilevel]+ncache] = (refined_int >> ind) & 1
 
-            offset = offset + ncache*nvar*4
+            offset = _advance_file_offset(offset, ncache * nvar_i * 4)
             iskip[ilevel] = iskip[ilevel] + ncache
 
     return amr
@@ -920,7 +925,7 @@ def rd_hydro(nout,**kwargs):
     else:
         filename = path+"/output_"+car1+"/"+prefix+".00001"
 
-    nvar = np.fromfile(filename,dtype=np.int32,count=1,offset=4)[0]
+    nvar = int(np.fromfile(filename,dtype=np.int32,count=1,offset=4)[0])
 
     txt = "Found nvar="+str(nvar)
     print(txt)
@@ -954,7 +959,7 @@ def rd_hydro(nout,**kwargs):
         hydro[ilevel].nvar = nvar
 
     iskip = np.zeros(nlevelmax, dtype=int)
-    nvartot = nvar*2**ndim
+    nvartot = nvar * (2 ** ndim)
 
     # Reading and storing data
     for icpu in cpulist:
@@ -965,10 +970,10 @@ def rd_hydro(nout,**kwargs):
         else:
             filename = path+"/output_"+car1+"/"+prefix+"."+car2
 
-        offset = 16 + 4*(nlevelmax+1-levelmin)
+        offset = int(16 + 4 * (int(nlevelmax) + 1 - int(levelmin)))
 
         for ilevel in range(levelmin-1,nlevelmax):
-            ncache = numbl[ilevel,icpu-1]
+            ncache = int(numbl[ilevel,icpu-1])
 
             if(backup):
                 transfer = np.fromfile(filename,dtype=np.float64,count=nvartot*ncache,offset=offset)
@@ -984,9 +989,9 @@ def rd_hydro(nout,**kwargs):
                     hydro[ilevel].u[ivar,ind,iskip[ilevel]:iskip[ilevel]+ncache] = transfer[ivar,ind]
 
             if(backup):
-                offset = offset + ncache*nvartot*8
+                offset = _advance_file_offset(offset, ncache * nvartot * 8)
             else:
-                offset = offset + ncache*nvartot*4
+                offset = _advance_file_offset(offset, ncache * nvartot * 4)
 
             iskip[ilevel] = iskip[ilevel] + ncache
 
