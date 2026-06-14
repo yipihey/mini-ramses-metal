@@ -523,7 +523,7 @@ end subroutine interpol_mhd_d
 ! pass (the divB-load-bearing case), best-effort otherwise.
 attributes(device) subroutine gather_twondim_parent_stencil( &
      & grid, uold, bold, hash_key, hash_val, hash_size, ckey_max, key_off, &
-     & box_ckey_min, box_ckey_max, periodic, ilev_child, chkey, u1, B1, B3, refined)
+     & box_ckey_min, box_ckey_max, periodic, ilev_child, chkey, central_idx, central_cell, u1, B1, B3, refined)
   implicit none
   type(oct), device :: grid(*)
   real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -537,6 +537,7 @@ attributes(device) subroutine gather_twondim_parent_stencil( &
   integer(kind=4), device :: box_ckey_max(1:ndim,*)
   logical, device :: periodic(1:3)
   integer(kind=4), value :: ilev_child
+  integer(kind=4), value :: central_idx, central_cell  ! resident father oct/cell (no hash lookup)
   integer(kind=4) :: chkey(1:ndim)
   real(kind=dp) :: u1(0:twondim,1:nvar)
   real(kind=dp) :: B1(0:twondim,1:6)
@@ -550,15 +551,10 @@ attributes(device) subroutine gather_twondim_parent_stencil( &
   ilev_par = ilev_child - 1
 
   ! --- Central parent cell (inbor=0): the father cell being refined ---
-  do idim = 1, ndim
-     fkey(idim) = chkey(idim)/2
-     bit(idim)  = chkey(idim) - 2*fkey(idim)
-  end do
-  pcell = 1 + bit(1) + 2*bit(2) + 4*bit(3)
-  ix = int(fkey(1),kind=8); iy = int(fkey(2),kind=8); iz = int(fkey(3),kind=8)
-  nx = int(ckey_max(ilev_par),kind=8); offset = key_off(ilev_par)
-  key = offset + ix + iy*nx + iz*nx*nx
-  pidx = hash_get(hash_key, hash_val, hash_size, key)
+  ! Use the caller's resident father directly; re-deriving it via hash_get can
+  ! miss and read element 0 (uninitialised) on a coarse-fine ghost edge.
+  pcell = central_cell
+  pidx  = central_idx
   do ivar = 1, nvar
      u1(0,ivar) = uold(pcell,ivar,pidx)
   end do
@@ -705,7 +701,7 @@ end subroutine gather_twondim_parent_stencil
     ! hydro + face-B together (Balsara 2001), and scatter all nvar + 6 child
     ! slots -- replaces the Stage A2 straight injection of both hydro and B.
     call gather_twondim_parent_stencil(grid, uold, bold, hash_key, hash_val, hash_size, &
-         & ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, ilevel, ckey, u1, b1, b3, refined)
+         & ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, ilevel, ckey, oct_idx, cell_idx, u1, b1, b3, refined)
     call interpol_mhd_d(u1, u2, b1, b2, b3, refined, interpol_var, interpol_type, smallr)
     do ivar = 1, nvar
        do ind = 1, twotondim
@@ -2307,7 +2303,7 @@ end subroutine gather_twondim_parent_stencil
     ! cache (ghost) octs.  ilevel is now the parent level, so the cache oct's own
     ! (child) level is ilevel+1 and its Cartesian key is ckey.
     call gather_twondim_parent_stencil(grid, uold, bold, hash_key, hash_val, hash_size, &
-         & ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, ilevel+1, ckey, u1, b1, b3, refined)
+         & ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, ilevel+1, ckey, parent_idx, cell_idx, u1, b1, b3, refined)
     call interpol_mhd_d(u1, u2, b1, b2, b3, refined, interpol_var, interpol_type, smallr)
     do ivar = 1, nvar
        do ind = 1, twotondim
