@@ -3,8 +3,7 @@
 #############################################################################
 # Compilation time parameters
 COMPILER = GNU
-CUDA_ARCH = sm_80,sm_90
-CUDA_PROFILE = 0
+CUDA_ARCH = sm_80
 NDIM = 3
 MPI = 0
 HYDRO = 1
@@ -36,6 +35,11 @@ NHILBERT = 1
 NVECTOR = 32
 NPRE = 8
 PATCH =
+CUDA_PROFILE = 0
+PAPER = 0
+CUB_SORT_PART = 1
+CUB_SORT_REFINE = 1
+CUB_SCAN_REFINE = 1
 DEBUG = 0
 HDF5 = 0
 MPIF90 = mpif90
@@ -50,13 +54,16 @@ NION := $(NION)+$(N_SULFUR_IONS)+$(N_IRON_IONS)
 NION := $(NION)+$(N_HYDROGEN_IONS)+$(N_H2)+$(N_HELIUM_IONS)
 endif
 NVAR := $(NHYDRO)+$(NENER)+$(NPSCAL)+$(NMETAL)+$(NION)
+DEFINES = -DNDIM=$(NDIM) -DNVAR=$(NVAR)
 #############################################################################
+# Collect git version and Makefile options
 GITBRANCH = $(shell git rev-parse --abbrev-ref HEAD)
 GITHASH = $(shell git log --pretty=format:'%H' -n 1)
 GITREPO = $(shell git config --get remote.origin.url)
 BUILDDATE = $(shell date +"%D-%T")
 BUILDCOMMAND = ${MAKE} ${MAKEFLAGS}
-DEFINES = -DNDIM=$(NDIM) -DNVAR=$(NVAR)
+#############################################################################
+# RTZ options
 ifeq ($(RTZ),1)
 DEFINES += -DN_HYDROGEN_IONS=$(N_HYDROGEN_IONS)
 DEFINES += -DN_HELIUM_IONS=$(N_HELIUM_IONS)
@@ -70,6 +77,8 @@ DEFINES += -DN_SULFUR_IONS=$(N_SULFUR_IONS)
 DEFINES += -DN_IRON_IONS=$(N_IRON_IONS)
 DEFINES += -DN_H2=$(N_H2)
 endif
+#############################################################################
+# Main compilation options
 ifneq ($(NION),0)
    DEFINES += -DNION=$(NION)
 endif
@@ -158,10 +167,22 @@ ifeq ($(COMPILER),INTEL)
    endif
 endif
 #############################################################################
-# NVHPC compiler
+# NVHPC compiler (optional -gpu=$(CUDA_ARCH),fastmath in FFLAGS and LIBS)
 ifeq ($(COMPILER),NVHPC)
-   FFLAGS = -cpp -gpu=$(CUDA_ARCH),nordc -cuda -cudalib=nvtx $(DEFINES)
-   LIBS = -gpu=$(CUDA_ARCH),nordc -cuda -cudalib=nvtx
+   ifeq ($(PAPER),1)
+      DEFINES += -DPAPER
+   endif
+   ifneq ($(CUB_SORT_PART),0)
+      DEFINES += -DCUB_SORT_PART
+   endif
+   ifneq ($(CUB_SORT_REFINE),0)
+      DEFINES += -DCUB_SORT_REFINE
+   endif
+   ifneq ($(CUB_SCAN_REFINE),0)
+      DEFINES += -DCUB_SCAN_REFINE
+   endif
+   FFLAGS = -cpp -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx,curand $(DEFINES)
+   LIBS = -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx,curand -lstdc++
    GPU_PATH = ../gpu
    ifeq ($(CUDA_PROFILE),1)
       FFLAGS += -gpu=lineinfo,ptxinfo -Minstrument -traceback -gopt
@@ -240,9 +261,9 @@ MODOBJ = amr_parameters.o hydro_parameters.o rt_parameters.o oct_commons.o \
 	 cosmic_ray_ionization_module.o photoionization_UVB_module.o dust_recombination_module.o \
 	 molecules_module.o charge_exchange_module.o rtz_module.o
 ifeq ($(RTZ),1)
-MODOBJ += rtz_coolrates_module.o rtz_cooling_module.o
+   MODOBJ += rtz_coolrates_module.o rtz_cooling_module.o
 else
-MODOBJ += neq_cooling_module.o 
+   MODOBJ += neq_cooling_module.o
 endif
 MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 	 cross_sections_module.o rt_spectra.o  \
@@ -250,7 +271,10 @@ MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 	 boundaries.o output_hydro.o output_poisson.o output_part.o output_rt.o output_amr.o movie.o \
 	 sort.o nbors_utils.o hydro_flag.o marshal.o
 ifeq ($(COMPILER),NVHPC)
-MODOBJ += gpu_utils.o gpu_hydro.o gpu_cooling.o gpu_rho.o gpu_mg.o gpu_refine.o gpu_flag.o gpu_runner.o gpu_part.o gpu_manager.o
+   MODOBJ += cub_module_radix_sort_c.o cub_module_radix_sort_f.o \
+      cub_inclusive_scan_c.o cub_inclusive_scan_f.o gpu_utils.o gpu_hydro.o \
+      gpu_cooling.o gpu_star.o gpu_rho.o gpu_mg.o gpu_refine.o gpu_flag.o gpu_runner.o \
+      gpu_part.o gpu_manager.o
 endif
 ifeq ($(COMPILER),METAL)
 MODOBJ += metal_bridge_iface.o metal_bridge.o metal_gravity.o
@@ -307,13 +331,28 @@ test_cooling:	$(MODOBJ) test_cooling.o
 write_gitinfo.o: FORCE
 	$(FC) -O0 -cpp -DPATCH=\'"$(PATCH)"\' -DGITBRANCH=\'"$(GITBRANCH)"\' -DGITHASH=\'"$(GITHASH)"\' \
                 -DGITREPO=\'"$(GITREPO)"\' -DBUILDDATE=\'"$(BUILDDATE)"\' -DBUILDCOMMAND=\'"$(BUILDCOMMAND)"\' -c ../amr/write_gitinfo.f90 -o $@
+#############################################################################
+cub_inclusive_scan_c.o: cub_inclusive_scan.h cub_inclusive_scan.cu
+	nvcc -arch=$(CUDA_ARCH) -O3 -lineinfo -c $(GPU_PATH)/cub_inclusive_scan.cu -o cub_inclusive_scan_c.o
+#############################################################################
+cub_inclusive_scan_f.o: cub_inclusive_scan.cuf cub_inclusive_scan_c.o
+	nvfortran $(FFLAGS) -c cub_inclusive_scan_c.o $(GPU_PATH)/cub_inclusive_scan.cuf -o cub_inclusive_scan_f.o
+#############################################################################
+cub_module_radix_sort_c.o: cub_module_radix_sort.h cub_module_radix_sort.cu
+	nvcc -arch=$(CUDA_ARCH) -O3 -lineinfo -c $(GPU_PATH)/cub_module_radix_sort.cu -o cub_module_radix_sort_c.o
+#############################################################################
+cub_module_radix_sort_f.o: cub_module_radix_sort.cuf cub_module_radix_sort_c.o
+	nvfortran $(FFLAGS) -c cub_module_radix_sort_c.o $(GPU_PATH)/cub_module_radix_sort.cuf -o cub_module_radix_sort_f.o
+
 %.o:%.cuf
-	$(F90) $(FFLAGS) -c $^ -o $@ $(LIBS)
+	$(F90) $(FFLAGS) -c $< -o $@ $(LIBS)
 %.o:%.f90
-	$(F90) $(FFLAGS) -c $^ -o $@ $(LIBS)
+	$(F90) $(FFLAGS) -c $< -o $@ $(LIBS)
 %.o:%.c
-	$(C) $(CFLAGS) -c $^ -o $@
+	$(C) $(CFLAGS) -c $< -o $@
 FORCE:
+#############################################################################
+-include deps.mk
 #############################################################################
 clean :
 	rm -f *.o *.$(MOD)

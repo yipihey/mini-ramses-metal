@@ -193,13 +193,13 @@ subroutine multigrid(pst,ilevel,icount)
      err = sqrt(res_norm2/(i_res_norm2+1d-20*pst%s%g%rho_tot**2))
 
      ! Verbosity
-     if(pst%s%r%verbose) print '(A,I5,A,1pE10.3)','   ==> Step=',iter,' Error=',err
+     if(pst%s%r%verbose) print '(A,I0,A,1pE10.3)','   ==> Step ',iter,' Error=',err
 
-     ! Converged?  Periodic base (levelmin) uses epsilon_base = the fp32-achievable
-     ! floor; refined (Dirichlet) levels use epsilon.  The Metal GPU m_metal_multigrid
-     ! applies the IDENTICAL criterion, so both paths converge in the same few cycles
-     ! rather than the GPU grinding to MAXITER chasing a tolerance below its fp32 floor.
-     if(err < merge(pst%s%r%epsilon_base, pst%s%r%epsilon, ilevel==pst%s%r%levelmin) .or. iter>=MAXITER) exit
+     ! Converged?  Periodic base (levelmin) uses epsilon_base = fp32-achievable floor
+     ! so Metal GPU and CPU converge in the same cycles (not MAXITER).  nvcycle pins
+     ! the iteration count when set (upstream feature; -1 = disabled).
+     if(err < merge(pst%s%r%epsilon_base, pst%s%r%epsilon, ilevel==pst%s%r%levelmin) &
+          & .or. iter == pst%s%r%nvcycle .or. iter>=MAXITER) exit
 
      ! Not converged, check error and possibly enable safe mode for the level
      if(err > last_err*SAFE_FACTOR .and. (.not. pst%s%g%safe_mode(ilevel))) then
@@ -209,7 +209,7 @@ subroutine multigrid(pst,ilevel,icount)
 
   end do main_iteration_loop
 
-  print '(A,I5,A,I5,A,1pE10.3)','   ==> Level=',ilevel,' Step=',iter,' Error=',err
+  print '(A,I0,A,I0,A,1pE10.3)','   ==> Level ',ilevel,' Step ',iter,' Error=',err
   if(iter==MAXITER) print *,'WARN: Fine multigrid Poisson failed to converge...'
 
   ! ---------------------------------------------------------------------

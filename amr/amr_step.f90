@@ -298,7 +298,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   !----------------------
   ! Compute new time step
   !----------------------
-  call m_timer('time step','start')
+  call m_timer('compute dt','start')
   call m_newdt_fine(pst,ilevel)
   if(capi_time_cap_active.and.capi_time_cap_target>g%t)then
      g%dtnew(ilevel)=min(g%dtnew(ilevel),capi_time_cap_target-g%t)

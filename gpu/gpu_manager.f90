@@ -28,14 +28,14 @@ recursive subroutine r_set_grid_device(pst)
      ! Copy grid from host to device
      call nvtxStartRange("Copy entire mesh from host to device", color=5)!red
      grid = pst%s%m%grid
-     flag1 = pst%s%m%flag1
+     ! flag1 is only allocated/used for adaptive mesh refinement
+     if(pst%s%r%nlevelmax > pst%s%r%levelmin) flag1 = pst%s%m%flag1
 #ifdef HYDRO
      uold = pst%s%m%uold
 #endif
      call GPU_Error_Check(__FILE__, __LINE__)
      call nvtxEndRange()
 
-#ifdef _CUDA
      ! Particle H→D (allocated in init_part).
      if (pst%s%r%part .and. allocated(pst%s%p%xp) .and. allocated(xp)) then
         call nvtxStartRange("Copy particles from host to device", color=5)!red
@@ -44,19 +44,24 @@ recursive subroutine r_set_grid_device(pst)
         mp     = pst%s%p%mp
         levelp = pst%s%p%levelp
         sortp  = pst%s%p%sortp
-        idp    = pst%s%p%idp
-!!$        if (allocated(pst%s%p%jp)     .and. allocated(jp))     jp     = pst%s%p%jp
-!!$        if (allocated(pst%s%p%zp)     .and. allocated(zp))     zp     = pst%s%p%zp
-!!$        if (allocated(pst%s%p%tp)     .and. allocated(tp))     tp     = pst%s%p%tp
-!!$        if (allocated(pst%s%p%tm)     .and. allocated(tm))     tm     = pst%s%p%tm
-!!$        if (allocated(pst%s%p%size)   .and. allocated(size_p)) size_p = pst%s%p%size
-!!$        if (allocated(pst%s%p%charge) .and. allocated(charge)) charge = pst%s%p%charge
-!!$        if (allocated(pst%s%p%idm)    .and. allocated(idm))    idm    = pst%s%p%idm
-!!$        if (allocated(pst%s%p%idt)    .and. allocated(idt))    idt    = pst%s%p%idt
+        if (allocated(idp)) idp = pst%s%p%idp
         call GPU_Error_Check(__FILE__, __LINE__)
         call nvtxEndRange()
      endif
-#endif
+
+     ! Star particle H→D
+     if (pst%s%r%star .and. allocated(pst%s%star%xp) .and. allocated(star_xp)) then
+        call nvtxStartRange("Copy stars from host to device", color=5)!red
+        star_xp     = pst%s%star%xp
+        star_vp     = pst%s%star%vp
+        star_mp     = pst%s%star%mp
+        star_tp     = pst%s%star%tp
+        star_zp     = pst%s%star%zp
+        star_levelp = pst%s%star%levelp
+        star_idp    = pst%s%star%idp
+        call GPU_Error_Check(__FILE__, __LINE__)
+        call nvtxEndRange()
+     endif
 
      ! Insert entire grid in the device hash table
      head_idx = 1
@@ -110,7 +115,8 @@ recursive subroutine r_transfer_grid_host(pst)
      ! Copy grid from device to host
      call nvtxStartRange("Copy entire mesh from device to host", color=5)!red
      pst%s%m%grid = grid
-     pst%s%m%flag1 = flag1
+     ! flag1 is only allocated/used for adaptive mesh refinement
+     if(pst%s%r%nlevelmax > pst%s%r%levelmin) pst%s%m%flag1 = flag1
 #ifdef HYDRO
      pst%s%m%uold = uold
 #endif
@@ -147,15 +153,20 @@ subroutine gpu_to_host_part(pst)
   pst%s%p%mp     = mp
   pst%s%p%levelp = levelp
   pst%s%p%sortp  = sortp
-  pst%s%p%idp    = idp
-!!$  if (allocated(jp)     .and. allocated(pst%s%p%jp))     pst%s%p%jp     = jp
-!!$  if (allocated(zp)     .and. allocated(pst%s%p%zp))     pst%s%p%zp     = zp
-!!$  if (allocated(tp)     .and. allocated(pst%s%p%tp))     pst%s%p%tp     = tp
-!!$  if (allocated(tm)     .and. allocated(pst%s%p%tm))     pst%s%p%tm     = tm
-!!$  if (allocated(size_p) .and. allocated(pst%s%p%size))   pst%s%p%size   = size_p
-!!$  if (allocated(charge) .and. allocated(pst%s%p%charge)) pst%s%p%charge = charge
-!!$  if (allocated(idm)    .and. allocated(pst%s%p%idm))    pst%s%p%idm    = idm
-!!$  if (allocated(idt)    .and. allocated(pst%s%p%idt))    pst%s%p%idt    = idt
+  if (allocated(idp)) pst%s%p%idp = idp
+  call GPU_Error_Check(__FILE__, __LINE__)
+  call nvtxEndRange()
+
+  if (.not. allocated(star_xp)) return
+
+  call nvtxStartRange("Copy stars from device to host", color=5)!red
+  pst%s%star%xp     = star_xp
+  pst%s%star%vp     = star_vp
+  pst%s%star%mp     = star_mp
+  pst%s%star%tp     = star_tp
+  pst%s%star%zp     = star_zp
+  pst%s%star%levelp = star_levelp
+  pst%s%star%idp    = star_idp
   call GPU_Error_Check(__FILE__, __LINE__)
   call nvtxEndRange()
 

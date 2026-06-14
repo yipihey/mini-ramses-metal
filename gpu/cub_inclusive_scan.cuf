@@ -1,0 +1,25 @@
+module cub_inclusive_scan_mod
+  interface
+    !> compute the inclusive prefix sum.
+    !> @param[in] prefix_sum array of values to compute prefix sum on
+    !> @param[in] head_idx offset to begin scan at
+    !> @param[in] num_octs number of array elements to scan
+    subroutine cub_inclusive_sum(prefix_sum, head_idx, num_octs) bind(c, name="cub_inclusive_sum")
+      use cudafor
+      use iso_c_binding
+      implicit none
+      type(c_ptr), value :: prefix_sum
+      !integer(c_int), allocatable, device :: prefix_sum(:)
+      integer(c_int), value :: head_idx, num_octs
+    end subroutine
+
+    !> pre-allocate work space for scan. note that the scan itself will always
+    !> check and allocate if needed so calling this is optional.
+    subroutine cub_allocate_workspace(num_octs) bind(c, name="cub_allocate_workspace")
+      use cudafor
+      use iso_c_binding
+      implicit none
+      integer(c_int), value :: num_octs
+    end subroutine
+  end interface
+end module

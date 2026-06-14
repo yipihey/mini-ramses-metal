@@ -90,7 +90,7 @@ subroutine m_clump_finder(pst,create_output,keep_alive)
   endif
 
   ttend = mdl_wtime(mdl)
-  print '(A,F14.7)',' Time elapsed in finding clumps:',ttend-ttstart
+  print '(A,F0.7)',' Time elapsed in finding clumps: ',ttend-ttstart
 
   end associate
 
