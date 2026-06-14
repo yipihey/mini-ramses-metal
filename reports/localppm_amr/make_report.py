@@ -19,6 +19,8 @@ def api(path):
     x.ramses_newdt_fine.argtypes=[C.c_int,C.c_int]
     x.ramses_set_dt.argtypes=[C.c_int,C.c_int,C.c_double,C.c_double]
     x.ramses_get_dt.argtypes=[C.c_int,C.c_int,C.POINTER(C.c_double),C.POINTER(C.c_double),C.POINTER(C.c_double)]
+    x.ramses_set_time_cap.argtypes=[C.c_int,C.c_int,C.c_double]
+    x.ramses_get_time.argtypes=[C.c_int,C.POINTER(C.c_double),C.POINTER(C.c_double),C.POINTER(C.c_double),C.POINTER(C.c_int)]
     return x
 
 def level_data(lib,h,ndim,lev,nmax=200000):
@@ -40,25 +42,29 @@ def level_data(lib,h,ndim,lev,nmax=200000):
 def snap(lib,h,ndim,levels):
     return {l:d for l in levels if (d:=level_data(lib,h,ndim,l)) is not None}
 
-def evolve(lib,nml,ndim,levels,nstep,fixed_dt):
+def get_time(lib,h):
+    t,texp,aexp=C.c_double(),C.c_double(),C.c_double();nstep=C.c_int()
+    lib.ramses_get_time(h,C.byref(t),C.byref(texp),C.byref(aexp),C.byref(nstep))
+    return t.value,nstep.value
+
+def evolve(lib,nml,ndim,levels,target_time,max_steps):
     h=lib.ramses_init(str(nml).encode(),-1)
     if h<=0:raise RuntimeError(f"init failed: {nml}")
-    initial=snap(lib,h,ndim,levels); elapsed=0.
-    for s in range(1,nstep+1):
-        if fixed_dt>0:
-            base=levels[0]
-            for lev in levels:
-                level_dt=fixed_dt/(2**(lev-base))
-                lib.ramses_set_dt(h,lev,level_dt,level_dt)
-            elapsed+=fixed_dt
-        else:
-            lib.ramses_newdt_fine(h,levels[0]); a,b,c=C.c_double(),C.c_double(),C.c_double()
-            lib.ramses_get_dt(h,levels[0],C.byref(a),C.byref(b),C.byref(c)); elapsed+=max(a.value,0)
-        lib.ramses_amr_step(h,levels[0],s)
-    return initial,snap(lib,h,ndim,levels),elapsed
+    initial=snap(lib,h,ndim,levels)
+    lib.ramses_set_time_cap(h,1,target_time)
+    step=0
+    while True:
+        t,_=get_time(lib,h)
+        if t>=target_time-1e-12:break
+        step+=1
+        lib.ramses_amr_step(h,levels[0],step)
+        if step>max_steps:raise RuntimeError(f"{nml}: exceeded {max_steps} steps before t={target_time}")
+    lib.ramses_set_time_cap(h,0,0.0)
+    elapsed,nstep=get_time(lib,h)
+    return initial,snap(lib,h,ndim,levels),elapsed,nstep,step
 
-def store(path,usual,local,tu,tl,ndim,levels,nstep):
-    z={"ndim":ndim,"levels":levels,"nstep":nstep,"t_usual":tu,"t_local":tl}
+def store(path,usual,local,tu,tl,ndim,levels,nstep_usual,nstep_local):
+    z={"ndim":ndim,"levels":levels,"nstep_usual":nstep_usual,"nstep_local":nstep_local,"t_usual":tu,"t_local":tl}
     for name,s in (("usual",usual),("local",local)):
         for lev,d in s.items():
             for k,v in d.items():z[f"{name}_L{lev}_{k}"]=v
@@ -67,10 +73,10 @@ def store(path,usual,local,tu,tl,ndim,levels,nstep):
 def run(a):
     os.environ.update(RAMSES_GPU_HYDRO="1",RAMSES_METAL_CACHE="1",RAMSES_METALLIB=str(Path(a.metallib).resolve()))
     lib=api(a.library); prefix="advect" if a.ndim==1 else "sedov"; levels=[5,6] if a.ndim==1 else [4,5,6]
-    i1,u,tu=evolve(lib,HERE/f"{prefix}_usual.nml",a.ndim,levels,a.steps,a.fixed_dt)
-    i2,l,tl=evolve(lib,HERE/f"{prefix}_localppm.nml",a.ndim,levels,a.steps,a.fixed_dt)
-    store(a.output,u,l,tu,tl,a.ndim,levels,a.steps)
-    store(Path(a.output).with_name(Path(a.output).stem+"_initial.npz"),i1,i2,0,0,a.ndim,levels,0)
+    i1,u,tu,nu,su=evolve(lib,HERE/f"{prefix}_usual.nml",a.ndim,levels,a.target_time,a.max_steps)
+    i2,l,tl,nl,sl=evolve(lib,HERE/f"{prefix}_localppm.nml",a.ndim,levels,a.target_time,a.max_steps)
+    store(a.output,u,l,tu,tl,a.ndim,levels,nu,nl)
+    store(Path(a.output).with_name(Path(a.output).stem+"_initial.npz"),i1,i2,0,0,a.ndim,levels,0,0)
     print("wrote",a.output)
 
 def get(z,name,lev):
@@ -158,8 +164,8 @@ def html(a):
     iamr="data:image/png;base64,"+base64.b64encode(Path(a.acoustic_amr).with_suffix(".png").read_bytes()).decode()
     ma=json.loads(str(za["metadata"]))
     mamr=json.loads(str(zamr["metadata"]))
-    adv_steps=int(z1["nstep"]);adv_time=float(z1["t_usual"])
-    sedov_steps=int(z2["nstep"]);sedov_time=float(z2["t_usual"])
+    adv_steps_u=int(z1["nstep_usual"]);adv_steps_l=int(z1["nstep_local"]);adv_time=float(z1["t_usual"])
+    sedov_steps_u=int(z2["nstep_usual"]);sedov_steps_l=int(z2["nstep_local"]);sedov_time=float(z2["t_usual"])
     git=subprocess.check_output(["git","rev-parse","--short","HEAD"],cwd=ROOT,text=True).strip()
     payload=json.dumps({"advection":m1,"sedov":m2})
     text=f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>mini-RAMSES AMR hydro comparison</title>
@@ -167,15 +173,15 @@ def html(a):
 <body><main><div class="muted">mini-RAMSES / Metal hydro / git {git}</div><h1>AMR comparison:<br><span class="blue">usual solver</span> vs <span class="orange">Local PPM</span></h1>
 <p class="lede">Matched production AMR runs compare RAMSES's usual monotonized-central reconstruction with HLLC against the new compact one-ghost Local PPM characteristic trace with the two-shock Riemann solver.</p>
 <div class="finding"><strong>Current conclusion:</strong> the smooth-wave implementation works on both uniform and fixed AMR meshes. After ten box crossings at exactly t=5, Local PPM retains {ma["localppm"]["amplitude_retention"]:.3f} of the amplitude on the uniform L7 mesh and {mamr["localppm"]["amplitude_retention"]:.3f} through a central L7 patch embedded in L6, with AMR phase error {mamr["localppm"]["phase_error_wavelengths"]:+.4f} wavelengths. The wave remains continuous at both coarse-fine interfaces without obvious reflection or ringing. The Sedov path now uses a strong-pressure-jump fallback to PLM/HLLC states and no longer stalls in the refined center; its AMR radius is consistent with the uniform Local PPM run. The Metal MC+HLLC reference in this point-blast setup still over-propagates toward the periodic domain edge, so that comparison should be read as a stress test rather than a calibrated Sedov benchmark.</div>
-<h2>Uniform-grid acoustic reference test</h2><p class="muted">The exact EnzoNG setup: 128 cells, four wavelengths, amplitude 10<sup>-3</sup>, background u<sub>0</sub>=c<sub>s</sub>=1, and 4,269 equal steps to exactly t=5. The right-going wave travels at 2c<sub>s</sub> and completes ten box crossings.</p><div class="fig"><img src="{ia}"></div>
+<h2>Uniform-grid acoustic reference test</h2><p class="muted">The exact EnzoNG setup: 128 cells, four wavelengths, amplitude 10<sup>-3</sup>, background u<sub>0</sub>=c<sub>s</sub>=1. Ramses owns the CFL timestep and the C API caps only the final step so both runs finish at t={ma["configuration"]["tfinal"]:.6g}; step counts are usual {ma["configuration"]["usual_steps"]}, Local PPM {ma["configuration"]["localppm_steps"]}. The right-going wave travels at 2c<sub>s</sub> and completes ten box crossings.</p><div class="fig"><img src="{ia}"></div>
 <table><tr><th>Metric</th><th>Usual</th><th>Local PPM</th></tr><tr><td>Amplitude retention</td><td>{ma["usual"]["amplitude_retention"]:.6f}</td><td>{ma["localppm"]["amplitude_retention"]:.6f}</td></tr><tr><td>Phase error, wavelengths</td><td>{ma["usual"]["phase_error_wavelengths"]:+.6f}</td><td>{ma["localppm"]["phase_error_wavelengths"]:+.6f}</td></tr><tr><td>Harmonic distortion</td><td>{ma["usual"]["harmonic_distortion"]:.6f}</td><td>{ma["localppm"]["harmonic_distortion"]:.6f}</td></tr><tr><td>L1 density error</td><td>{ma["usual"]["l1_density_error"]:.3e}</td><td>{ma["localppm"]["l1_density_error"]:.3e}</td></tr></table>
-<h2>Acoustic wave through a fixed fine patch</h2><p class="muted">Static L6 base mesh with one continuous L7 patch from x=0.296875 to 0.71875. The coarse level takes 2,135 steps with dt={mamr["configuration"]["coarse_dt"]:.8f}; each coarse step contains two fine steps with dt={mamr["configuration"]["fine_dt"]:.8f}. Both levels therefore finish at exactly t=5.</p><div class="fig"><img src="{iamr}"></div>
+<h2>Acoustic wave through a fixed fine patch</h2><p class="muted">Static L6 base mesh with one continuous L7 patch from x=0.296875 to 0.71875. Ramses owns the CFL timestep and the C API caps only the final step so both runs finish at t={mamr["configuration"]["tfinal"]:.6g}. Step counts: usual {mamr["configuration"]["usual_steps"]}, Local PPM {mamr["configuration"]["localppm_steps"]}.</p><div class="fig"><img src="{iamr}"></div>
 <table><tr><th>Metric</th><th>Usual</th><th>Local PPM</th></tr><tr><td>Amplitude retention</td><td>{mamr["usual"]["amplitude_retention"]:.6f}</td><td>{mamr["localppm"]["amplitude_retention"]:.6f}</td></tr><tr><td>Phase error, wavelengths</td><td>{mamr["usual"]["phase_error_wavelengths"]:+.6f}</td><td>{mamr["localppm"]["phase_error_wavelengths"]:+.6f}</td></tr><tr><td>Harmonic distortion</td><td>{mamr["usual"]["harmonic_distortion"]:.6f}</td><td>{mamr["localppm"]["harmonic_distortion"]:.6f}</td></tr><tr><td>Mass change</td><td>{mamr["usual"]["mass_change"]:.3e}</td><td>{mamr["localppm"]["mass_change"]:.3e}</td></tr></table>
-<h2>Nonlinear AMR stress tests</h2><p class="muted">These reruns use corrected AMR subcycling: each finer level takes half the parent timestep while the base level controls the reported physical time.</p>
+<h2>Nonlinear AMR stress tests</h2><p class="muted">These reruns let Ramses compute the CFL timestep. The C API only caps the final step so usual and Local PPM are sampled at the same physical target time.</p>
 <div class="grid"><div class="card">Advection peak, usual<div class="metric blue">{m1["usual_peak"]:.4f}</div></div><div class="card">Advection peak, Local PPM<div class="metric orange">{m1["local_peak"]:.4f}</div></div><div class="card">Sedov peak, usual<div class="metric blue">{m2["usual_peak"]:.4f}</div></div><div class="card">Sedov peak, Local PPM<div class="metric orange">{m2["local_peak"]:.4f}</div></div></div>
-<h2>1D feature crossing an AMR boundary</h2><p class="muted">Two-level periodic AMR, L5-L6. Both solvers run {adv_steps} base-level steps with dt<sub>L5</sub>=0.004 and dt<sub>L6</sub>=0.002 to t={adv_time:.2f}. The shaded band marks the initially refined region.</p><div class="fig"><img src="{i1}"></div>
+<h2>1D feature crossing an AMR boundary</h2><p class="muted">Two-level periodic AMR, L5-L6. Ramses-owned timesteps to t={adv_time:.6g}; step counts are usual {adv_steps_u}, Local PPM {adv_steps_l}. The shaded band marks the initially refined region.</p><div class="fig"><img src="{i1}"></div>
 <table><tr><th>Metric</th><th>Usual</th><th>Local PPM</th></tr><tr><td>Peak density</td><td>{m1["usual_peak"]:.6f}</td><td>{m1["local_peak"]:.6f}</td></tr><tr><td>Total variation</td><td>{m1["usual_tv"]:.6f}</td><td>{m1["local_tv"]:.6f}</td></tr><tr><td>Mean absolute difference</td><td colspan="2">{m1["l1"]:.3e}</td></tr></table>
-<h2>2D Sedov blast on three AMR levels</h2><p class="muted">Static L4-L6 hierarchy around the pressure impulse. Both solvers run {sedov_steps} base-level steps with dt<sub>L4</sub>=2.5e-4, dt<sub>L5</sub>=1.25e-4, and dt<sub>L6</sub>=6.25e-5 to t={sedov_time:.2f}. Coarse cells are drawn first and fine cells overlay them.</p><div class="fig"><img src="{i2}"></div><div class="fig"><img src="{i3}"></div>
+<h2>2D Sedov blast on three AMR levels</h2><p class="muted">Static L4-L6 hierarchy around the pressure impulse. Ramses-owned timesteps to t={sedov_time:.6g}; step counts are usual {sedov_steps_u}, Local PPM {sedov_steps_l}. Coarse cells are drawn first and fine cells overlay them.</p><div class="fig"><img src="{i2}"></div><div class="fig"><img src="{i3}"></div>
 <table><tr><th>Metric</th><th>Usual</th><th>Local PPM</th></tr><tr><td>Peak density</td><td>{m2["usual_peak"]:.6f}</td><td>{m2["local_peak"]:.6f}</td></tr><tr><td>Normalized radial scatter</td><td>{m2["usual_scatter"]:.3e}</td><td>{m2["local_scatter"]:.3e}</td></tr><tr><td>Mean absolute difference</td><td colspan="2">{m2["mad"]:.3e}</td></tr></table>
 <h2>Reproducibility</h2><details open><summary>Configuration</summary><p>Usual: <code>slope_type=2</code>, <code>riemann='hllc'</code>. Local PPM: <code>slope_type=10</code>, <code>riemann='twoshock'</code>. Both use <code>RAMSES_GPU_HYDRO=1</code> and <code>RAMSES_METAL_CACHE=1</code>, including coarse-fine ghost fill and reflux.</p><p>This is a robustness and visual-quality comparison, not a performance benchmark. Raw metrics: <code>{payload}</code></p></details>
 </main></body></html>"""
@@ -183,7 +189,7 @@ def html(a):
 
 def main():
     p=argparse.ArgumentParser();s=p.add_subparsers(dest="cmd",required=True)
-    r=s.add_parser("run");r.add_argument("--ndim",type=int,required=True);r.add_argument("--library",required=True);r.add_argument("--metallib",required=True);r.add_argument("--steps",type=int,required=True);r.add_argument("--fixed-dt",type=float,default=0.0);r.add_argument("--output",required=True)
+    r=s.add_parser("run");r.add_argument("--ndim",type=int,required=True);r.add_argument("--library",required=True);r.add_argument("--metallib",required=True);r.add_argument("--target-time",type=float,required=True);r.add_argument("--max-steps",type=int,default=200000);r.add_argument("--output",required=True)
     h=s.add_parser("html");h.add_argument("--one",required=True);h.add_argument("--two",required=True);h.add_argument("--acoustic",required=True);h.add_argument("--acoustic-amr",required=True);h.add_argument("--output",required=True)
     a=p.parse_args();run(a) if a.cmd=="run" else html(a)
 if __name__=="__main__":main()

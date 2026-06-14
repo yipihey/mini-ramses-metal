@@ -37,3 +37,4 @@ runs/
 # local agent/session files + python env lock
 .claude/
 uv.lock
+bin2*/

@@ -135,7 +135,7 @@ def composite(lib, handle):
     return x, raster, bounds
 
 
-def run_solver(lib, nml, coarse_dt, nsteps):
+def run_solver(lib, nml, target_time):
     handle = lib.ramses_init(str(nml).encode(), -1)
     if handle <= 0:
         raise RuntimeError(f"RAMSES initialization failed: {nml}")
@@ -144,16 +144,23 @@ def run_solver(lib, nml, coarse_dt, nsteps):
         set_level_state(lib, handle, level)
     x, initial, bounds = composite(lib, handle)
     print(f"{nml.stem}: fine leaf patches {bounds}", flush=True)
-    for step in range(1, nsteps+1):
-        lib.ramses_set_dt(handle, LEVELS[0], coarse_dt, coarse_dt)
-        lib.ramses_set_dt(handle, LEVELS[1], coarse_dt/2, coarse_dt/2)
+    lib.ramses_set_time_cap(handle, 1, target_time)
+    step = 0
+    while True:
+        t, nstep = uniform.get_time(lib, handle)
+        if t >= target_time - 1.0e-12:
+            break
+        step += 1
         lib.ramses_amr_step(handle, LEVELS[0], step)
         if step % 250 == 0:
-            print(f"{nml.stem}: {step}/{nsteps}", flush=True)
+            print(f"{nml.stem}: step={step} t={uniform.get_time(lib, handle)[0]:.8g}", flush=True)
+        if step > 200000:
+            raise RuntimeError(f"{nml.stem}: exceeded step limit before t={target_time}")
+    lib.ramses_set_time_cap(handle, 0, 0.0)
     xf, final, final_bounds = composite(lib, handle)
     if not np.allclose(x, xf) or bounds != final_bounds:
         raise RuntimeError("static AMR mesh changed")
-    return x, initial, final, bounds
+    return x, initial, final, bounds, uniform.get_time(lib, handle)[0], step
 
 
 def plot(path, x, initial, usual, local, bounds):
@@ -199,15 +206,12 @@ def main():
         RAMSES_METAL_CACHE="1",
         RAMSES_METALLIB=str(Path(args.metallib).resolve()),
     )
-    max_speed = uniform.U0 + uniform.CS0 + uniform.CS0*uniform.AMP
-    nsteps = math.ceil(TFINAL / (0.3 / 2**LEVELS[0] / max_speed))
-    coarse_dt = TFINAL / nsteps
     lib = add_api(uniform.api(args.library))
-    x, initial, usual, bounds = run_solver(
-        lib, HERE/"acoustic_amr_usual.nml", coarse_dt, nsteps
+    x, initial, usual, bounds, t_usual, steps_usual = run_solver(
+        lib, HERE/"acoustic_amr_usual.nml", TFINAL
     )
-    x2, initial2, local, bounds2 = run_solver(
-        lib, HERE/"acoustic_amr_localppm.nml", coarse_dt, nsteps
+    x2, initial2, local, bounds2, t_local, steps_local = run_solver(
+        lib, HERE/"acoustic_amr_localppm.nml", TFINAL
     )
     if not np.allclose(x, x2) or not np.allclose(initial, initial2) or bounds != bounds2:
         raise RuntimeError("solver initial meshes or profiles differ")
@@ -215,9 +219,9 @@ def main():
         "configuration": {
             "base_level": LEVELS[0], "fine_level": LEVELS[1],
             "wavenumber": uniform.KW, "amplitude": uniform.AMP,
-            "tfinal": TFINAL, "coarse_steps": nsteps,
-            "coarse_dt": coarse_dt, "fine_dt": coarse_dt/2,
-            "coarse_cfl": coarse_dt*max_speed*2**LEVELS[0],
+            "tfinal": TFINAL,
+            "usual_steps": steps_usual, "localppm_steps": steps_local,
+            "usual_time": t_usual, "localppm_time": t_local,
             "fine_patch_bounds": bounds,
         },
         "usual": uniform.metrics(usual, initial),

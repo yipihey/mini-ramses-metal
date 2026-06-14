@@ -507,7 +507,8 @@ contains
     integer(c_int), value :: handle, ilevel
     real(c_double) :: epot
     type(pst_t) :: pst; logical :: ok
-    real(dp) :: ep, ep_save
+    real(c_double) :: ep            ! compute_epot's epot arg is hardcoded real(8)
+    real(dp) :: ep_save             ! keep ep 8-byte so NPRE=4 (dp=real4) still links
     epot = 0.0_c_double
     call capi_pst(handle, pst, ok); if (.not. ok) return
 #ifdef _METAL
@@ -753,6 +754,26 @@ contains
     aexp  = real(s%g%aexp, c_double)
   end subroutine ramses_get_dt
 
+  ! Code-unit conversion factors to cgs (calls amr/units.f90::units for the current
+  ! aexp/cosmology) — so an external chemistry/cooling service (Grackle) gets the
+  ! exact density/length/time units.  scale_v=scale_l/scale_t; scale_nH, scale_T2
+  ! are the number-density and T/mu conversions.
+  subroutine ramses_get_units(handle, sd, sl, st, sv, snh, st2) bind(C, name="ramses_get_units")
+    integer(c_int), value :: handle
+    real(c_double), intent(out) :: sd, sl, st, sv, snh, st2
+    type(ramses_t), pointer :: s
+    real(kind=8) :: scale_l, scale_t, scale_d, scale_v, scale_nH, scale_T2
+    external :: units
+    sd = 0.0_c_double; sl = 0.0_c_double; st = 0.0_c_double
+    sv = 0.0_c_double; snh = 0.0_c_double; st2 = 0.0_c_double
+    if (handle < 1 .or. handle > CAPI_MAXSTATE) return
+    s => capi_reg(handle)%p
+    if (.not. associated(s)) return
+    call units(s%r, s%g, scale_l, scale_t, scale_d, scale_v, scale_nH, scale_T2)
+    sd = real(scale_d, c_double); sl = real(scale_l, c_double); st = real(scale_t, c_double)
+    sv = real(scale_v, c_double); snh = real(scale_nH, c_double); st2 = real(scale_T2, c_double)
+  end subroutine ramses_get_units
+
   subroutine ramses_get_time(handle, t, texp, aexp, nstep) bind(C, name="ramses_get_time")
     integer(c_int), value :: handle
     real(c_double), intent(out) :: t, texp, aexp
@@ -824,7 +845,7 @@ contains
   !--------------------------------------------------------------------------
   subroutine build_ccc_bbb(ccc, bbb)
     integer, intent(out) :: ccc(1:8,1:8)
-    real(dp), intent(out) :: bbb(1:8)
+    real(c_double), intent(out) :: bbb(1:8)
     real(dp) :: aa, bb, cc, dd
     aa = 1.0_dp/4.0_dp**ndim
     bb = 3.0_dp*aa; cc = 9.0_dp*aa; dd = 27.0_dp*aa
@@ -858,7 +879,8 @@ contains
     real(c_double), intent(out) :: phi_int(twotondim)
     type(mesh_t) :: m
     integer  :: ccc(1:8,1:8)
-    real(dp) :: bbb(1:8), phint(twotondim)
+    real(c_double) :: bbb(1:8)            ! interpol_phi's bbb/tfrac/phi are real(8)
+    real(c_double) :: phint(twotondim)
     integer  :: igrid_nbor(threetondim), ind_nbor(threetondim), k
     call build_ccc_bbb(ccc, bbb)
     allocate(m%phi(twotondim, threetondim), m%phi_old(twotondim, threetondim))
@@ -869,7 +891,7 @@ contains
        igrid_nbor(k)   = k          ! cube cell k lives in oct k ...
        ind_nbor(k)     = 1          ! ... at cell 1
     end do
-    call interpol_phi(m, igrid_nbor, ind_nbor, ccc, bbb, real(tfrac, dp), phint)
+    call interpol_phi(m, igrid_nbor, ind_nbor, ccc, bbb, real(tfrac, c_double), phint)
     phi_int(1:twotondim) = real(phint(1:twotondim), c_double)
     deallocate(m%phi, m%phi_old)
   end subroutine ramses_interpol_phi_kernel

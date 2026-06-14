@@ -285,15 +285,28 @@ typedef struct {
 #ifndef NHVAR
 #define NHVAR 5
 #endif
-// The device godunov advects ONE passive scalar (the entropy, ivar=NHVAR=6) for
-// the dual-energy formalism: at cold flows E-ekin catastrophically cancels in
+// The device godunov advects ONE entropy scalar (ivar=NHVAR=6, the NHVAR>5 path)
+// for the dual-energy formalism: at cold flows E-ekin catastrophically cancels in
 // fp32 (no fp64 on Metal), so the entropy s=P/rho^gamma is advected and the host
-// (source_hydro_fine) recovers eint from it.  >1 passive scalar is not yet ported.
+// (source_hydro_fine) recovers eint from it.
 #if NHVAR > 6
-#error "Metal device godunov supports at most one passive scalar (NHVAR<=6)"
+#error "Metal device godunov supports at most one entropy scalar (NHVAR<=6)"
 #endif
+// PURE passive scalars (chemistry species: rho*x_HII, rho*x_H2I, rho*x_HDI, ...)
+// are a SEPARATE advection path from the dual-energy entropy `scalar` above.  The
+// Fortran build sets NVAR = NHYDRO(5) + NENER + NPSCAL + ... ; the device hydro
+// state therefore strides NHVAR + NPSCAL vars per oct (NVAR_DEV), with the passive
+// scalars occupying ivar = NHVAR+1 .. NHVAR+NPSCAL.  Each is advected with the
+// mass flux exactly like a conserved scalar density (NO entropy rho^(gamma-1)
+// logic).  The host (metal_gravity.f90 g_nhvar=NVAR) must match NVAR_DEV.
+#ifndef NPSCAL
+#define NPSCAL 0
+#endif
+#define NVAR_DEV (NHVAR + NPSCAL)
 // uold/unew(1:twotondim, 1:nvar, oct) -> element (cell, ivar, oct), 0-based out.
-#define UH(cell, ivar, oct)  ((((oct)-1)*NHVAR + ((ivar)-1))*TWOTONDIM + ((cell)-1))
+// Oct stride is NVAR_DEV (the full device var count), NOT NHVAR -- otherwise an
+// NPSCAL>0 build misaligns the array and reads garbage (density NaN).
+#define UH(cell, ivar, oct)  ((((oct)-1)*NVAR_DEV + ((ivar)-1))*TWOTONDIM + ((cell)-1))
 
 // Riemann solver ids (must match hydro_parameters.f90 solver_*).
 #define SOLVER_LLF  1

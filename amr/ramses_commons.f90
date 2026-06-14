@@ -8,6 +8,11 @@ module ramses_commons
   use coolrates_module, only: neq_cooling_t
   use SED_module, only: sed_table_t
 
+  ! C-API timestep control. Disabled by default, so the regular executable path
+  ! is unchanged. When enabled, amr_step caps the CFL timestep after newdt.
+  logical,      save :: capi_time_cap_active = .false.
+  real(kind=8), save :: capi_time_cap_target = 0.0d0
+
   type ramses_t
 
      type(run_t)::r

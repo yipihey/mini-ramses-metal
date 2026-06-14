@@ -10,7 +10,7 @@ contains
 !################################################################
 subroutine m_update_time(pst,ilevel,done)
   use amr_parameters, only: n_frw
-  use ramses_commons, only: pst_t
+  use ramses_commons, only: pst_t, capi_time_cap_active, capi_time_cap_target
   use mdl_module
   use update_rt_c_module, only: r_rt_neq_updates
   use turb_update_module, only: r_update_turb
@@ -185,6 +185,11 @@ subroutine m_update_time(pst,ilevel,done)
   in_broadcast_aexp%aexp_old = g%aexp_old
   in_broadcast_aexp%hexp=g%hexp
   call r_broadcast_aexp(pst,in_broadcast_aexp,storage_size(in_broadcast_aexp)/32)
+
+  if(capi_time_cap_active.and.g%t>=capi_time_cap_target-1.0d-14)then
+     done=.true.
+     return
+  endif
 
   ! Update turbulent driving field
   if(r%turb)call r_update_turb(pst)

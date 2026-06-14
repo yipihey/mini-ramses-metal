@@ -38,8 +38,13 @@ def api(path):
         C.c_int, C.c_int, C.c_int, C.c_int, C.c_int,
         C.POINTER(C.c_int), C.POINTER(C.c_double),
     ]
-    lib.ramses_set_dt.argtypes = [C.c_int, C.c_int, C.c_double, C.c_double]
     lib.ramses_amr_step.argtypes = [C.c_int, C.c_int, C.c_int]
+    lib.ramses_set_time_cap.argtypes = [C.c_int, C.c_int, C.c_double]
+    lib.ramses_get_time.argtypes = [
+        C.c_int,
+        C.POINTER(C.c_double), C.POINTER(C.c_double), C.POINTER(C.c_double),
+        C.POINTER(C.c_int),
+    ]
     return lib
 
 
@@ -113,7 +118,14 @@ def metrics(final, initial):
     }
 
 
-def run_solver(lib, nml, dt, nsteps):
+def get_time(lib, handle):
+    t, texp, aexp = C.c_double(), C.c_double(), C.c_double()
+    nstep = C.c_int()
+    lib.ramses_get_time(handle, C.byref(t), C.byref(texp), C.byref(aexp), C.byref(nstep))
+    return t.value, nstep.value
+
+
+def run_solver(lib, nml, target_time):
     handle = lib.ramses_init(str(nml).encode(), -1)
     if handle <= 0:
         raise RuntimeError(f"RAMSES initialization failed: {nml}")
@@ -122,15 +134,23 @@ def run_solver(lib, nml, dt, nsteps):
     state = initial_state(x)
     set_state(lib, handle, keys, state)
     xi, initial = profile(lib, handle)
-    for step in range(1, nsteps + 1):
-        lib.ramses_set_dt(handle, LEVEL, dt, dt)
+    lib.ramses_set_time_cap(handle, 1, target_time)
+    step = 0
+    while True:
+        t, nstep = get_time(lib, handle)
+        if t >= target_time - 1.0e-12:
+            break
+        step += 1
         lib.ramses_amr_step(handle, LEVEL, step)
         if step % 500 == 0:
-            print(f"{nml.stem}: {step}/{nsteps}", flush=True)
+            print(f"{nml.stem}: step={step} t={get_time(lib, handle)[0]:.8g}", flush=True)
+        if step > 200000:
+            raise RuntimeError(f"{nml.stem}: exceeded step limit before t={target_time}")
+    lib.ramses_set_time_cap(handle, 0, 0.0)
     xf, final = profile(lib, handle)
     if not np.allclose(xi, xf):
         raise RuntimeError("cell ordering changed on the static mesh")
-    return xi, initial, final
+    return xi, initial, final, get_time(lib, handle)[0], step
 
 
 def make_plot(path, x, initial, usual, local, results):
@@ -174,19 +194,17 @@ def main():
         RAMSES_METAL_CACHE="1",
         RAMSES_METALLIB=str(Path(args.metallib).resolve()),
     )
-    max_speed = U0 + CS0 + CS0 * AMP
-    nsteps = math.ceil(TFINAL / (0.3 / NX / max_speed))
-    dt = TFINAL / nsteps
     lib = api(args.library)
-    x, initial, usual = run_solver(lib, HERE / "acoustic_usual.nml", dt, nsteps)
-    x2, initial2, local = run_solver(lib, HERE / "acoustic_localppm.nml", dt, nsteps)
+    x, initial, usual, t_usual, steps_usual = run_solver(lib, HERE / "acoustic_usual.nml", TFINAL)
+    x2, initial2, local, t_local, steps_local = run_solver(lib, HERE / "acoustic_localppm.nml", TFINAL)
     if not np.allclose(x, x2) or not np.allclose(initial, initial2):
         raise RuntimeError("solver initial conditions differ")
     results = {
         "configuration": {
             "nx": NX, "wavenumber": KW, "amplitude": AMP, "u0": U0,
-            "cs0": CS0, "tfinal": TFINAL, "nsteps": nsteps, "dt": dt,
-            "cfl": dt * max_speed * NX,
+            "cs0": CS0, "tfinal": TFINAL,
+            "usual_steps": steps_usual, "localppm_steps": steps_local,
+            "usual_time": t_usual, "localppm_time": t_local,
         },
         "usual": metrics(usual, initial),
         "localppm": metrics(local, initial),

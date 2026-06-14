@@ -20,8 +20,19 @@ using namespace metal;
 
 // `scalar` carries the dual-energy entropy (ivar=NHVAR=6) when NHVAR>5; it is an
 // unused register field for NHVAR==5 (pure hydro) so the output is byte-identical.
-struct HConserved { float density, momentum_x, momentum_y, momentum_z, energy, scalar; };
-struct HPrimitive { float density, velocity_x, velocity_y, velocity_z, pressure, scalar; };
+// `pscal[NPSCAL]` carries the PURE passive scalars (chemistry species rho*x_i,
+// ivar=NHVAR+1..NHVAR+NPSCAL) when NPSCAL>0; they advect with the mass flux and
+// have NO entropy logic (conserved = rho*x, primitive = x).
+struct HConserved { float density, momentum_x, momentum_y, momentum_z, energy, scalar;
+#if NPSCAL > 0
+    float pscal[NPSCAL];
+#endif
+};
+struct HPrimitive { float density, velocity_x, velocity_y, velocity_z, pressure, scalar;
+#if NPSCAL > 0
+    float pscal[NPSCAL];
+#endif
+};
 
 // x^2 + (y^2 + z^2) — parenthesised for associativity (gpu_hydro.cuf:84).
 inline float magnitude_squared(float x, float y, float z) {
@@ -75,6 +86,9 @@ inline HPrimitive conserved_2_primitive(HConserved c, float gamma) {   // (:222)
 #if NHVAR > 5
     p.scalar     = c.scalar / c.density;   // entropy density -> specific entropy (umuscl ctoprim)
 #endif
+#if NPSCAL > 0
+    for (int i = 0; i < NPSCAL; ++i) p.pscal[i] = c.pscal[i] / c.density;   // rho*x -> x
+#endif
     return p;
 }
 
@@ -123,6 +137,9 @@ inline HConserved primitive_2_conserved(HPrimitive p, float gamma) {   // (:245)
     c.energy     = compute_energy(p, gamma);
 #if NHVAR > 5
     c.scalar     = p.scalar * p.density;
+#endif
+#if NPSCAL > 0
+    for (int i = 0; i < NPSCAL; ++i) c.pscal[i] = p.pscal[i] * p.density;   // x -> rho*x
 #endif
     return c;
 }
@@ -175,6 +192,10 @@ inline HConserved hll_fluxes(thread HPrimitive& L, thread HPrimitive& R,
     lf.scalar     = L.velocity_x * Lc.scalar;   // advective flux of the scalar density
     rf.scalar     = R.velocity_x * Rc.scalar;
 #endif
+#if NPSCAL > 0
+    for (int i = 0; i < NPSCAL; ++i) { lf.pscal[i] = L.velocity_x * Lc.pscal[i];
+                                       rf.pscal[i] = R.velocity_x * Rc.pscal[i]; }
+#endif
 
     HConserved flux;
     flux.density    = hll_flux(speed_l, speed_r, lf.density,    rf.density,    Lc.density,    Rc.density);
@@ -184,6 +205,10 @@ inline HConserved hll_fluxes(thread HPrimitive& L, thread HPrimitive& R,
     flux.energy     = hll_flux(speed_l, speed_r, lf.energy,     rf.energy,     Lc.energy,     Rc.energy);
 #if NHVAR > 5
     flux.scalar     = hll_flux(speed_l, speed_r, lf.scalar,     rf.scalar,     Lc.scalar,     Rc.scalar);
+#endif
+#if NPSCAL > 0
+    for (int i = 0; i < NPSCAL; ++i)
+        flux.pscal[i] = hll_flux(speed_l, speed_r, lf.pscal[i], rf.pscal[i], Lc.pscal[i], Rc.pscal[i]);
 #endif
     return flux;
 }
@@ -247,6 +272,10 @@ inline HConserved hllc_fluxes(thread HPrimitive& L, thread HPrimitive& R, float 
     // (riemann_hllc: fgdnv = ro*uo*qleft/qright by sign of ustar).
     flux.scalar     = flux.density * (ustar > 0.0f ? L.scalar : R.scalar);
 #endif
+#if NPSCAL > 0
+    for (int i = 0; i < NPSCAL; ++i)
+        flux.pscal[i] = flux.density * (ustar > 0.0f ? L.pscal[i] : R.pscal[i]);
+#endif
     return flux;
 }
 
@@ -301,6 +330,9 @@ inline HConserved twoshock_fluxes(thread HPrimitive& L, thread HPrimitive& R, fl
     flux.energy=(etot+pbv)*ubv;
 #if NHVAR > 5
     flux.scalar=flux.density*up.scalar;
+#endif
+#if NPSCAL > 0
+    for (int i = 0; i < NPSCAL; ++i) flux.pscal[i] = flux.density * up.pscal[i];
 #endif
     return flux;
 }
@@ -396,6 +428,13 @@ inline void local_ppm_trace(HPrimitive l,HPrimitive m,HPrimitive r,float gamma,f
         if(active){float sig=min(abs(lam)*dtdx,1.0f);q.scalar=local_ppm_avg(sl,m.scalar,sr,right?1.0f-sig:0.0f,right?1.0f:sig);}
         else q.scalar=geom;
 #endif
+#if NPSCAL > 0
+        { float lamp=m.velocity_x; bool actp=right?(lamp>0.0f):(lamp<0.0f);
+          float sigp=min(abs(lamp)*dtdx,1.0f);
+          for(int i=0;i<NPSCAL;i++){ float psl,psr; local_ppm_edges(l.pscal[i],m.pscal[i],r.pscal[i],psl,psr);
+              if(actp) q.pscal[i]=local_ppm_avg(psl,m.pscal[i],psr,right?1.0f-sigp:0.0f,right?1.0f:sigp);
+              else     q.pscal[i]=right?psr:psl; } }
+#endif
         if(right) qplus=q; else qminus=q;
     }
 }
@@ -435,6 +474,9 @@ inline void trace_cell_1d(HPrimitive l, HPrimitive m, HPrimitive r,
 #if NHVAR > 5
     s.scalar     = 0.5f * slope_moncen(l.scalar,     m.scalar,     r.scalar,     slope);
 #endif
+#if NPSCAL > 0
+    for (int i=0;i<NPSCAL;i++) s.pscal[i] = 0.5f * slope_moncen(l.pscal[i], m.pscal[i], r.pscal[i], slope);
+#endif
 
     HPrimitive src;   // x-direction source terms (trace_3d:460-479, y,z dropped)
     src.density    = -m.velocity_x * s.density    - s.velocity_x * m.density;
@@ -444,6 +486,9 @@ inline void trace_cell_1d(HPrimitive l, HPrimitive m, HPrimitive r,
     src.pressure   = -m.velocity_x * s.pressure   - s.velocity_x * gamma * m.pressure;
 #if NHVAR > 5
     src.scalar     = -m.velocity_x * s.scalar;   // passive advection (umuscl trace1d:461 sr0=-u*drx)
+#endif
+#if NPSCAL > 0
+    for (int i=0;i<NPSCAL;i++) src.pscal[i] = -m.velocity_x * s.pscal[i];   // pure passive advection
 #endif
 
     HPrimitive p;   // half-step predicted cell-centered state
@@ -455,6 +500,9 @@ inline void trace_cell_1d(HPrimitive l, HPrimitive m, HPrimitive r,
 #if NHVAR > 5
     p.scalar     = m.scalar     + dtdx * src.scalar;
 #endif
+#if NPSCAL > 0
+    for (int i=0;i<NPSCAL;i++) p.pscal[i] = m.pscal[i] + dtdx * src.pscal[i];
+#endif
 
     qL.density    = p.density    + s.density;
     qL.velocity_x = p.velocity_x + s.velocity_x;
@@ -463,6 +511,9 @@ inline void trace_cell_1d(HPrimitive l, HPrimitive m, HPrimitive r,
     qL.pressure   = p.pressure   + s.pressure;
 #if NHVAR > 5
     qL.scalar     = p.scalar     + s.scalar;
+#endif
+#if NPSCAL > 0
+    for (int i=0;i<NPSCAL;i++) qL.pscal[i] = p.pscal[i] + s.pscal[i];
 #endif
     if (qL.density  < smallr) qL.density  = m.density;    // 1st-order fallback (orig value)
     if (qL.pressure < smallp) qL.pressure = m.pressure;
@@ -474,6 +525,9 @@ inline void trace_cell_1d(HPrimitive l, HPrimitive m, HPrimitive r,
     qR.pressure   = p.pressure   - s.pressure;
 #if NHVAR > 5
     qR.scalar     = p.scalar     - s.scalar;
+#endif
+#if NPSCAL > 0
+    for (int i=0;i<NPSCAL;i++) qR.pscal[i] = p.pscal[i] - s.pscal[i];
 #endif
     if (qR.density  < smallr) qR.density  = m.density;
     if (qR.pressure < smallp) qR.pressure = m.pressure;
@@ -526,6 +580,9 @@ inline HPrimitive hp_add(HPrimitive a, HPrimitive b, float s) {   // a + s*b
 #if NHVAR > 5
     r.scalar=a.scalar+s*b.scalar;
 #endif
+#if NPSCAL > 0
+    for(int i=0;i<NPSCAL;i++) r.pscal[i]=a.pscal[i]+s*b.pscal[i];
+#endif
     return r;
 }
 
@@ -538,6 +595,9 @@ inline HPrimitive local_ppm_half_slope(HPrimitive l, HPrimitive m, HPrimitive r)
     s.pressure   = 0.5f * local_ppm_mc(l.pressure,   m.pressure,   r.pressure);
 #if NHVAR > 5
     s.scalar     = 0.5f * local_ppm_mc(l.scalar,     m.scalar,     r.scalar);
+#endif
+#if NPSCAL > 0
+    for(int i=0;i<NPSCAL;i++) s.pscal[i] = 0.5f * local_ppm_mc(l.pscal[i], m.pscal[i], r.pscal[i]);
 #endif
     return s;
 }
@@ -553,6 +613,9 @@ inline HPrimitive transverse_source(HPrimitive m, HPrimitive s, float gamma, int
     src.pressure = -vdir * s.pressure - svel * gamma * m.pressure;
 #if NHVAR > 5
     src.scalar = -vdir * s.scalar;
+#endif
+#if NPSCAL > 0
+    for(int i=0;i<NPSCAL;i++) src.pscal[i] = -vdir * s.pscal[i];
 #endif
     return src;
 }
@@ -579,11 +642,17 @@ inline HTrace2 trace_cell_2d(thread const HPrimitive sg[36], int i, int j,
 #if NHVAR > 5
         l.scalar=SG2(i,j-1).scalar;c.scalar=m.scalar;r.scalar=SG2(i,j+1).scalar;
 #endif
+#if NPSCAL > 0
+        for(int ii=0;ii<NPSCAL;ii++){l.pscal[ii]=SG2(i,j-1).pscal[ii];c.pscal[ii]=m.pscal[ii];r.pscal[ii]=SG2(i,j+1).pscal[ii];}
+#endif
         HPrimitive p,n;local_ppm_trace(l,c,r,gamma,dtdx,p,n);
         t.qLy={p.density,p.velocity_z,p.velocity_x,p.velocity_y,p.pressure};
         t.qRy={n.density,n.velocity_z,n.velocity_x,n.velocity_y,n.pressure};
 #if NHVAR > 5
         t.qLy.scalar=p.scalar;t.qRy.scalar=n.scalar;
+#endif
+#if NPSCAL > 0
+        for(int ii=0;ii<NPSCAL;ii++){t.qLy.pscal[ii]=p.pscal[ii];t.qRy.pscal[ii]=n.pscal[ii];}
 #endif
         HPrimitive sx = local_ppm_half_slope(SG2(i-1,j), m, SG2(i+1,j));
         HPrimitive sy = local_ppm_half_slope(SG2(i,j-1), m, SG2(i,j+1));
@@ -603,6 +672,12 @@ inline HTrace2 trace_cell_2d(thread const HPrimitive sg[36], int i, int j,
 #if NHVAR > 5
     SLOPE2(scalar);
 #endif
+#if NPSCAL > 0
+    for(int ii=0;ii<NPSCAL;ii++){
+        sx.pscal[ii]=0.5f*slope_moncen(SG2(i-1,j).pscal[ii],m.pscal[ii],SG2(i+1,j).pscal[ii],slope);
+        sy.pscal[ii]=0.5f*slope_moncen(SG2(i,j-1).pscal[ii],m.pscal[ii],SG2(i,j+1).pscal[ii],slope);
+    }
+#endif
     #undef SLOPE2
     float divu=sx.velocity_x+sy.velocity_y;
     HPrimitive src;
@@ -613,6 +688,9 @@ inline HTrace2 trace_cell_2d(thread const HPrimitive sg[36], int i, int j,
     src.pressure=-m.velocity_x*sx.pressure-m.velocity_y*sy.pressure-divu*gamma*m.pressure;
 #if NHVAR > 5
     src.scalar=-m.velocity_x*sx.scalar-m.velocity_y*sy.scalar;
+#endif
+#if NPSCAL > 0
+    for(int ii=0;ii<NPSCAL;ii++) src.pscal[ii]=-m.velocity_x*sx.pscal[ii]-m.velocity_y*sy.pscal[ii];
 #endif
     HPrimitive p=hp_add(m,src,dtdx);HTrace2 t;
     t.qLx=hp_add(p,sx,1);t.qRx=hp_add(p,sx,-1);t.qLy=hp_add(p,sy,1);t.qRy=hp_add(p,sy,-1);
@@ -642,18 +720,30 @@ inline HTrace trace_cell_3d(thread const HPrimitive sg[216], int i, int j, int k
 #if NHVAR > 5
         yl.scalar=SG3(i,j-1,k).scalar;ym.scalar=m.scalar;yr.scalar=SG3(i,j+1,k).scalar;
 #endif
+#if NPSCAL > 0
+        for(int ii=0;ii<NPSCAL;ii++){yl.pscal[ii]=SG3(i,j-1,k).pscal[ii];ym.pscal[ii]=m.pscal[ii];yr.pscal[ii]=SG3(i,j+1,k).pscal[ii];}
+#endif
         HPrimitive yp,yn; local_ppm_trace(yl,ym,yr,gamma,dtdx,yp,yn);
         t.qLy={yp.density,yp.velocity_z,yp.velocity_x,yp.velocity_y,yp.pressure};
         t.qRy={yn.density,yn.velocity_z,yn.velocity_x,yn.velocity_y,yn.pressure};
+#if NPSCAL > 0
+        for(int ii=0;ii<NPSCAL;ii++){t.qLy.pscal[ii]=yp.pscal[ii];t.qRy.pscal[ii]=yn.pscal[ii];}
+#endif
         HPrimitive zl={SG3(i,j,k-1).density,SG3(i,j,k-1).velocity_z,SG3(i,j,k-1).velocity_x,SG3(i,j,k-1).velocity_y,SG3(i,j,k-1).pressure};
         HPrimitive zm={m.density,m.velocity_z,m.velocity_x,m.velocity_y,m.pressure};
         HPrimitive zr={SG3(i,j,k+1).density,SG3(i,j,k+1).velocity_z,SG3(i,j,k+1).velocity_x,SG3(i,j,k+1).velocity_y,SG3(i,j,k+1).pressure};
 #if NHVAR > 5
         zl.scalar=SG3(i,j,k-1).scalar;zm.scalar=m.scalar;zr.scalar=SG3(i,j,k+1).scalar;
 #endif
+#if NPSCAL > 0
+        for(int ii=0;ii<NPSCAL;ii++){zl.pscal[ii]=SG3(i,j,k-1).pscal[ii];zm.pscal[ii]=m.pscal[ii];zr.pscal[ii]=SG3(i,j,k+1).pscal[ii];}
+#endif
         HPrimitive zp,zn; local_ppm_trace(zl,zm,zr,gamma,dtdx,zp,zn);
         t.qLz={zp.density,zp.velocity_y,zp.velocity_z,zp.velocity_x,zp.pressure};
         t.qRz={zn.density,zn.velocity_y,zn.velocity_z,zn.velocity_x,zn.pressure};
+#if NPSCAL > 0
+        for(int ii=0;ii<NPSCAL;ii++){t.qLz.pscal[ii]=zp.pscal[ii];t.qRz.pscal[ii]=zn.pscal[ii];}
+#endif
         HPrimitive sx = local_ppm_half_slope(SG3(i-1,j,k), m, SG3(i+1,j,k));
         HPrimitive sy = local_ppm_half_slope(SG3(i,j-1,k), m, SG3(i,j+1,k));
         HPrimitive sz = local_ppm_half_slope(SG3(i,j,k-1), m, SG3(i,j,k+1));
@@ -692,6 +782,13 @@ inline HTrace trace_cell_3d(thread const HPrimitive sg[216], int i, int j, int k
     sy.scalar=0.5f*slope_moncen(SG3(i,j-1,k).scalar,m.scalar,SG3(i,j+1,k).scalar,slope);
     sz.scalar=0.5f*slope_moncen(SG3(i,j,k-1).scalar,m.scalar,SG3(i,j,k+1).scalar,slope);
 #endif
+#if NPSCAL > 0
+    for(int ii=0;ii<NPSCAL;ii++){
+        sx.pscal[ii]=0.5f*slope_moncen(SG3(i-1,j,k).pscal[ii],m.pscal[ii],SG3(i+1,j,k).pscal[ii],slope);
+        sy.pscal[ii]=0.5f*slope_moncen(SG3(i,j-1,k).pscal[ii],m.pscal[ii],SG3(i,j+1,k).pscal[ii],slope);
+        sz.pscal[ii]=0.5f*slope_moncen(SG3(i,j,k-1).pscal[ii],m.pscal[ii],SG3(i,j,k+1).pscal[ii],slope);
+    }
+#endif
     #undef SG3
 
     float divu = sx.velocity_x + sy.velocity_y + sz.velocity_z;
@@ -703,6 +800,10 @@ inline HTrace trace_cell_3d(thread const HPrimitive sg[216], int i, int j, int k
     src.pressure   = -m.velocity_x*sx.pressure  -m.velocity_y*sy.pressure  -m.velocity_z*sz.pressure  - divu*gamma*m.pressure;
 #if NHVAR > 5
     src.scalar     = -m.velocity_x*sx.scalar    -m.velocity_y*sy.scalar    -m.velocity_z*sz.scalar;   // passive (no divu)
+#endif
+#if NPSCAL > 0
+    for(int ii=0;ii<NPSCAL;ii++)
+        src.pscal[ii] = -m.velocity_x*sx.pscal[ii] -m.velocity_y*sy.pscal[ii] -m.velocity_z*sz.pscal[ii];   // pure passive (no divu)
 #endif
 
     HPrimitive p = hp_add(m, src, dtdx);   // half-step predicted state
@@ -726,10 +827,16 @@ inline HConserved flux_y(HPrimitive L, HPrimitive R, float g, int riem) {   // r
 #if NHVAR > 5
     Lr.scalar=L.scalar; Rr.scalar=R.scalar;   // scalar is rotation-invariant
 #endif
+#if NPSCAL > 0
+    for(int i=0;i<NPSCAL;i++){Lr.pscal[i]=L.pscal[i];Rr.pscal[i]=R.pscal[i];}
+#endif
     HConserved f=riemann_fluxes(Lr,Rr,g,riem);
     HConserved o={f.density,f.momentum_z,f.momentum_x,f.momentum_y,f.energy};
 #if NHVAR > 5
     o.scalar=f.scalar;
+#endif
+#if NPSCAL > 0
+    for(int i=0;i<NPSCAL;i++) o.pscal[i]=f.pscal[i];   // scalar flux is rotation-invariant
 #endif
     return o;
 }
@@ -739,10 +846,16 @@ inline HConserved flux_z(HPrimitive L, HPrimitive R, float g, int riem) {   // r
 #if NHVAR > 5
     Lr.scalar=L.scalar; Rr.scalar=R.scalar;
 #endif
+#if NPSCAL > 0
+    for(int i=0;i<NPSCAL;i++){Lr.pscal[i]=L.pscal[i];Rr.pscal[i]=R.pscal[i];}
+#endif
     HConserved f=riemann_fluxes(Lr,Rr,g,riem);
     HConserved o={f.density,f.momentum_y,f.momentum_z,f.momentum_x,f.energy};
 #if NHVAR > 5
     o.scalar=f.scalar;
+#endif
+#if NPSCAL > 0
+    for(int i=0;i<NPSCAL;i++) o.pscal[i]=f.pscal[i];
 #endif
     return o;
 }
@@ -754,6 +867,9 @@ inline HConserved cdiff(HConserved a, HConserved b, float s) {   // (a-b)*s
 #if NHVAR > 5
     r.scalar=(a.scalar-b.scalar)*s;
 #endif
+#if NPSCAL > 0
+    for(int i=0;i<NPSCAL;i++) r.pscal[i]=(a.pscal[i]-b.pscal[i])*s;
+#endif
     return r;
 }
 inline HConserved cadd(HConserved a, HConserved b) {
@@ -761,6 +877,9 @@ inline HConserved cadd(HConserved a, HConserved b) {
                   a.momentum_z+b.momentum_z,a.energy+b.energy};
 #if NHVAR > 5
     r.scalar=a.scalar+b.scalar;
+#endif
+#if NPSCAL > 0
+    for(int i=0;i<NPSCAL;i++) r.pscal[i]=a.pscal[i]+b.pscal[i];
 #endif
     return r;
 }
@@ -806,7 +925,11 @@ inline void godunov_oct_3d(thread const HPrimitive sg[216], float gamma, float d
 // ref all-false and no cache-oct neighbours these reduce EXACTLY to the plain
 // godunov_oct_{1d,3d} du (the boundary sums are then simply unused).
 //----------------------------------------------------------------------------
-inline HConserved czero() { HConserved z = {0.0f,0.0f,0.0f,0.0f,0.0f}; return z; }
+inline HConserved czero() { HConserved z = {0.0f,0.0f,0.0f,0.0f,0.0f};
+#if NPSCAL > 0
+    for(int i=0;i<NPSCAL;i++) z.pscal[i]=0.0f;
+#endif
+    return z; }
 
 inline void godunov_oct_1d_amr(thread const HPrimitive sg[6], thread const bool ref[6],
                                float gamma, float dtdx, int slope, int riemann,
@@ -944,6 +1067,12 @@ inline void interpol_hydro_oct(thread const HConserved u1[1 + 2*NDIM], int inter
         IL_COMP(density) IL_COMP(momentum_x) IL_COMP(momentum_y) IL_COMP(momentum_z) IL_COMP(energy)
 #if NHVAR > 5
         IL_COMP(scalar)
+#endif
+#if NPSCAL > 0
+        for (int i = 0; i < NPSCAL; ++i) { float a0 = s[0].pscal[i], v = a0;
+            for (int idim = 0; idim < NDIM; ++idim)
+                v += il_slope(a0, s[2*idim+1].pscal[i], s[2*idim+2].pscal[i], interpol_type) * xc[idim];
+            u2[b].pscal[i] = v; }
 #endif
         #undef IL_COMP
     }

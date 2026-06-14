@@ -24,7 +24,7 @@ kernel void set_unew(device const float*       uold [[buffer(0)]],
     if (gid >= (uint)P.num_octs) return;
     int oct = P.head_idx + (int)gid;
     for (int c = 1; c <= TWOTONDIM; ++c)
-        for (int v = 1; v <= NHVAR; ++v)
+        for (int v = 1; v <= NVAR_DEV; ++v)   // incl. passive scalars (NHVAR+1..NHVAR+NPSCAL)
             unew[UH(c, v, oct)] = uold[UH(c, v, oct)];
 }
 
@@ -36,7 +36,7 @@ kernel void set_uold(device       float*       uold [[buffer(0)]],
     if (gid >= (uint)P.num_octs) return;
     int oct = P.head_idx + (int)gid;
     for (int c = 1; c <= TWOTONDIM; ++c)
-        for (int v = 1; v <= NHVAR; ++v)
+        for (int v = 1; v <= NVAR_DEV; ++v)   // incl. passive scalars
             uold[UH(c, v, oct)] = unew[UH(c, v, oct)];
 }
 
@@ -61,7 +61,7 @@ kernel void upload(device const Oct*         grid   [[buffer(0)]],
 #endif
 
     const float inv = 1.0f / (float)TWOTONDIM;
-    for (int v = 1; v <= NHVAR; ++v) {
+    for (int v = 1; v <= NVAR_DEV; ++v) {   // restrict passive scalars too
         float acc = 0.0f;
         for (int ind = 1; ind <= TWOTONDIM; ++ind)
             acc += uold[UH(ind, v, oct)] * inv;
@@ -96,6 +96,9 @@ inline HPrimitive load_cell_prim(device const float* uold, device const float* f
                      uold[UH(cell,4,oct)], uold[UH(cell,5,oct)] };
 #if NHVAR > 5
     c.scalar = uold[UH(cell,6,oct)];
+#endif
+#if NPSCAL > 0
+    for (int i = 0; i < NPSCAL; ++i) c.pscal[i] = uold[UH(cell,NHVAR+1+i,oct)];
 #endif
     HPrimitive p = conserved_2_primitive_de(c, gamma, dual_energy);
     // Gravity half-step predictor, ONE component per dimension (umuscl ctoprim is
@@ -134,6 +137,10 @@ inline void reflux_face(device atomic_uint* lo, device atomic_uint* hi,
     atomic_add_fixed(lo, hi, UH(cell,5,fa), b.energy    *signed_w, fp_scale);
 #if NHVAR > 5
     atomic_add_fixed(lo, hi, UH(cell,6,fa), b.scalar    *signed_w, fp_scale);
+#endif
+#if NPSCAL > 0
+    for (int i = 0; i < NPSCAL; ++i)
+        atomic_add_fixed(lo, hi, UH(cell,NHVAR+1+i,fa), b.pscal[i]*signed_w, fp_scale);
 #endif
 }
 
@@ -200,6 +207,9 @@ kernel void hydro_godunov(device const float*       uold     [[buffer(0)]],
 #if NHVAR > 5
         unew[UH(c,6,oct)] += du[c-1].scalar;
 #endif
+#if NPSCAL > 0
+        for (int i = 0; i < NPSCAL; ++i) unew[UH(c,NHVAR+1+i,oct)] += du[c-1].pscal[i];
+#endif
     }
 
     // Coarse-fine reflux: for each outer face whose neighbour is a coarser
@@ -234,7 +244,7 @@ kernel void hydro_reflux_finalize(device       float*       unew      [[buffer(0
     int oct = P.head_idx + (int)gid;
     float inv = 1.0f / P.fp_scale;
     for (int c = 1; c <= TWOTONDIM; ++c)
-        for (int v = 1; v <= NHVAR; ++v) {
+        for (int v = 1; v <= NVAR_DEV; ++v) {   // reflux passive scalars too
             int idx = UH(c, v, oct);
             uint lo = atomic_load_explicit(&reflux_lo[idx], memory_order_relaxed);
             uint hi = atomic_load_explicit(&reflux_hi[idx], memory_order_relaxed);
@@ -260,6 +270,9 @@ kernel void sync_hydro(device       float*       uold  [[buffer(0)]],
                      uold[UH(cell,4,oct)], uold[UH(cell,5,oct)] };
 #if NHVAR > 5
     c.scalar = uold[UH(cell,6,oct)];
+#endif
+#if NPSCAL > 0
+    for (int i = 0; i < NPSCAL; ++i) c.pscal[i] = uold[UH(cell,NHVAR+1+i,oct)];
 #endif
     HPrimitive p = conserved_2_primitive_de(c, P.gamma, P.dual_energy);
     p.velocity_x += fgrav[IDX3(cell,1,oct)] * P.dt;   // one component per dim (see load_cell_prim)
@@ -288,6 +301,9 @@ kernel void grav_hydro(device const float*       uold  [[buffer(0)]],
                      unew[UH(cell,4,oct)], unew[UH(cell,5,oct)] };
 #if NHVAR > 5
     c.scalar = unew[UH(cell,6,oct)];
+#endif
+#if NPSCAL > 0
+    for (int i = 0; i < NPSCAL; ++i) c.pscal[i] = unew[UH(cell,NHVAR+1+i,oct)];
 #endif
     HPrimitive p = conserved_2_primitive_de(c, P.gamma, P.dual_energy);
     float rho_old = uold[UH(cell,1,oct)], rho_new = unew[UH(cell,1,oct)];
@@ -325,6 +341,9 @@ kernel void hydro_cmpdt(device const Oct*         grid  [[buffer(0)]],
                      uold[UH(cell,4,oct)], uold[UH(cell,5,oct)] };
 #if NHVAR > 5
     c.scalar = uold[UH(cell,6,oct)];
+#endif
+#if NPSCAL > 0
+    for (int i = 0; i < NPSCAL; ++i) c.pscal[i] = uold[UH(cell,NHVAR+1+i,oct)];
 #endif
     HPrimitive p = conserved_2_primitive_de(c, P.gamma, P.dual_energy);
 
@@ -394,6 +413,9 @@ inline HPrimitive load_prim(device const float* uold, int cell, int oct, float g
 #if NHVAR > 5
     c.scalar = uold[UH(cell,6,oct)];
 #endif
+#if NPSCAL > 0
+    for (int i = 0; i < NPSCAL; ++i) c.pscal[i] = uold[UH(cell,NHVAR+1+i,oct)];
+#endif
     return conserved_2_primitive_de(c, gamma, dual_energy);
 }
 
@@ -461,6 +483,9 @@ kernel void hydro_fill_cache(device       float*               uold  [[buffer(0)
 #if NHVAR > 5
     u1[0].scalar = uold[UH(cellp,6,fa)];
 #endif
+#if NPSCAL > 0
+    for (int i = 0; i < NPSCAL; ++i) u1[0].pscal[i] = uold[UH(cellp,NHVAR+1+i,fa)];
+#endif
     for (int dir = 1; dir <= 2*NDIM; ++dir) {
         int idim = (dir-1)/2;
         int off  = FLAG_iii[dir-1][cellp-1];
@@ -474,6 +499,9 @@ kernel void hydro_fill_cache(device       float*               uold  [[buffer(0)
 #if NHVAR > 5
         u1[dir].scalar = uold[UH(nc,6,no)];
 #endif
+#if NPSCAL > 0
+        for (int i = 0; i < NPSCAL; ++i) u1[dir].pscal[i] = uold[UH(nc,NHVAR+1+i,no)];
+#endif
     }
     HConserved u2[TWOTONDIM];
     interpol_hydro_oct(u1, P.interpol_var, P.interpol_type, P.smallr, P.gamma, P.dual_energy, u2);
@@ -483,6 +511,9 @@ kernel void hydro_fill_cache(device       float*               uold  [[buffer(0)
         uold[UH(c,5,cache)] = u2[c-1].energy;
 #if NHVAR > 5
         uold[UH(c,6,cache)] = u2[c-1].scalar;
+#endif
+#if NPSCAL > 0
+        for (int i = 0; i < NPSCAL; ++i) uold[UH(c,NHVAR+1+i,cache)] = u2[c-1].pscal[i];
 #endif
     }
 }
@@ -537,6 +568,9 @@ kernel void hydro_fill_boundary(device       float*          uold        [[buffe
         uold[UH(cell,3,cache)] = d*v;
         uold[UH(cell,4,cache)] = d*w;
         uold[UH(cell,5,cache)] = p/(P.gamma-1.0f) + ek;
+#if NPSCAL > 0
+        for (int i = 0; i < NPSCAL; ++i) uold[UH(cell,NHVAR+1+i,cache)] = 0.0f;
+#endif
         return;
     }
     if (ref <= 0) return;                                   // no interior reference (shouldn't happen)
@@ -544,7 +578,7 @@ kernel void hydro_fill_boundary(device       float*          uold        [[buffe
     int src;
     if (type == 1) src = BND_IND1[cell-1][dir-1];           // reflexive (same map L/R)
     else           src = (shift == 1) ? BND_IND2_R[cell-1][dir-1] : BND_IND2_L[cell-1][dir-1];
-    for (int ivar = 1; ivar <= NHVAR; ++ivar) {
+    for (int ivar = 1; ivar <= NVAR_DEV; ++ivar) {   // incl. passive scalars (rev never applies to them)
         float rev = (type == 1 && ivar == 1+dir) ? -1.0f : 1.0f;
         uold[UH(cell,ivar,cache)] = uold[UH(src,ivar,ref)] * rev;
     }

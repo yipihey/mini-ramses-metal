@@ -5,7 +5,7 @@ contains
 !#####################################################
 !#####################################################
 recursive subroutine m_amr_step(pst,ilevel,icount,done)
-  use ramses_commons, only: pst_t
+  use ramses_commons, only: pst_t, capi_time_cap_active, capi_time_cap_target
   use pm_parameters
   use flag_utils, only: m_flag_fine
   use update_time_module, only: m_update_time
@@ -300,6 +300,9 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   !----------------------
   call m_timer('time step','start')
   call m_newdt_fine(pst,ilevel)
+  if(capi_time_cap_active.and.capi_time_cap_target>g%t)then
+     g%dtnew(ilevel)=min(g%dtnew(ilevel),capi_time_cap_target-g%t)
+  endif
 
   !-----------------------
   ! Set unew equal to uold
