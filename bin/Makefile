@@ -49,15 +49,10 @@ MPIF90 = mpif90
 EXEC = ramses
 #############################################################################
 # Compute NVAR
-# MHD=1 raises the conserved baseline to 8 (the documented MHD build,
-# hydro_parameters.f90: ie=8, nprim=NVAR+3): slots are rho, momenta, E(5)
-# + 3 passive-scalar slots; B lives in the separate bold/bnew face arrays,
-# NOT in uold. NENER/NPSCAL/... add on top.
-ifeq ($(MHD),1)
-NHYDRO = 8
-else
+# Conserved uold baseline: rho, momenta, E (5). MHD stores B in bold/bnew face
+# arrays, not uold; hydro_parameters.f90 sets nprim=NVAR+3 and ie=8 for MHD.
+# NENER/NPSCAL/NMETAL/NION add on top of NHYDRO.
 NHYDRO = 5
-endif
 ifeq ($(RTZ),1)
 NION := $(N_CARBON_IONS)+$(N_NITROGEN_IONS)+$(N_OXYGEN_IONS)
 NION := $(NION)+$(N_NEON_IONS)+$(N_MAGNESIUM_IONS)+$(N_SILICON_IONS)
