@@ -143,14 +143,14 @@ subroutine adaptive_loop(pst)
 
   ! Timing since startup
   tt2 = mdl_wtime(mdl)
-  print '(A,F14.7)',' Time elapsed since startup:',tt2-tt1
+  print '(A,F0.7)',' Time elapsed since startup: ',tt2-tt1
 
   ! Output mesh structure
   do ilevel=r%levelmin,r%nlevelmax
      if(pst%s%m%noct_tot(ilevel)>0)write(*,999)&
           & ilevel,pst%s%m%noct_tot(ilevel),pst%s%m%noct_min(ilevel),pst%s%m%noct_max(ilevel),pst%s%m%noct_tot(ilevel)/mdl_threads(mdl)
   end do
-999 format(' Level ',I2,' has ',I11,' grids (',3(I8,','),')')
+999 format(' Level ',I0,' has ',I0,' grids (',I0,',',I0,',',I0,')')
 
   g%nstep_coarse_old=g%nstep_coarse
 
@@ -230,7 +230,7 @@ subroutine adaptive_loop(pst)
      tt1 = mdl_wtime(mdl)
      call r_balance_part(pst,r%levelmin,1,dummy,0)
      tt2 = mdl_wtime(mdl)
-     print '(A,F14.7)',' Time elapsed load balancing:',tt2-tt1
+     print '(A,F0.7)',' Time elapsed load balancing: ',tt2-tt1
      call m_clump_finder(pst,.true.,.false.)
      return
   endif
@@ -329,7 +329,7 @@ subroutine adaptive_loop(pst)
 
      tt2 = mdl_wtime(mdl)
      if(mod(g%nstep_coarse,r%ncontrol)==0)then
-        if(.not. done)print '(A,F14.7)',' Time elapsed since last coarse step:',tt2-tt1
+        if(.not. done)print '(A,F0.7)',' Time elapsed since last coarse step: ',tt2-tt1
 #ifdef _METAL
         if(.not. done)call m_output_timer(.false.,'dummy')   ! periodic breakdown (profiling)
         if(.not. done)call m_metal_prof_report()             ! GPU sub-op breakdown

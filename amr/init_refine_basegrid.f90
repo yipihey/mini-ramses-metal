@@ -21,7 +21,7 @@ subroutine m_init_refine_basegrid(pst)
 
   if(r%verbose)write(*,*)'Entering init_refine_basegrid'
 
-  write(*,*)'Building initial base grid at level ',r%levelmin
+  write(*,'(" Building initial base grid at level ",I0)')r%levelmin
 
   ! Call recursive slave routine
   call r_init_refine_basegrid(pst,r%levelmin,1)

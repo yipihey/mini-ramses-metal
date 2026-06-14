@@ -8,20 +8,21 @@ module cooling_device
 contains
 
   ! =========================================================================
-  attributes(global) subroutine cooling_kernel(uold, grid, head_idx, num_octs, gamma, dt, &
+  attributes(global) subroutine cooling_kernel(uold, grid, head_idx, num_octs, &
+       & gamma, smallr, smallc2, dt, &
        & eos_type, eos_T2, eos_nH, eos_index, scale_T2, scale_nH)
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
-    real(kind=8), value :: gamma, dt
+    real(kind=dp), value :: gamma, smallr, smallc2
     real(kind=8), value :: eos_T2, eos_nH, eos_index
-    real(kind=8), value :: scale_T2, scale_nH
+    real(kind=8), value :: dt, scale_T2, scale_nH
     integer(kind=4), value :: eos_type
 
     integer :: cell_idx, oct_idx, block_idx
-    real(kind=8) :: density, energy, kinetic, temperature, nH
-    real(kind=8) :: velocity_x, velocity_y, velocity_z, T2min
+    real(kind=dp) :: density, energy, kinetic, poverrho, temperature, nH
+    real(kind=dp) :: velocity_x, velocity_y, velocity_z, T2min
     logical :: ok_leaf
 
     block_idx = blockIdx%x - 1
@@ -35,13 +36,15 @@ contains
     cell_idx = threadIdx%x
 
     ! Get cell physical variables
-    density     = uold(cell_idx, 1, oct_idx)
+    density     = max(uold(cell_idx, 1, oct_idx), smallr)
     velocity_x  = uold(cell_idx, 2, oct_idx) / density
     velocity_y  = uold(cell_idx, 3, oct_idx) / density
     velocity_z  = uold(cell_idx, 4, oct_idx) / density
     energy      = uold(cell_idx, 5, oct_idx) / density
     kinetic     = 0.5 * (velocity_x**2 + velocity_y**2 + velocity_z**2)
-    temperature = (gamma - 1.0d0) * (energy - kinetic) * scale_T2
+    poverrho    = (gamma - 1.0_dp) * (energy - kinetic)
+    poverrho    = max(poverrho, smallc2 / gamma)
+    temperature = poverrho * scale_T2
     nH          = density * scale_nH
 
     ! Compute minimum temperature for isothermal/polytropic EOS.

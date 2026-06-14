@@ -29,7 +29,7 @@ subroutine m_input_part_zoom(pst)
   call r_input_part_zoom(pst,dummy,1,output,3)
   pst%s%p%npart_tot=output%npart_tot
   pst%s%p%npart_max=output%npart_max
-  write(*,*)'Found npart_tot=',pst%s%p%npart_tot
+  write(*,'(A,I0)')'Found npart_tot= ',pst%s%p%npart_tot
 
 end subroutine m_input_part_zoom
 !#########################################################################
