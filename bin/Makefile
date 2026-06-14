@@ -201,7 +201,25 @@ else
    GPU_ARCH_OPTS = $(CUDA_ARCH)
 endif
    FFLAGS = -cpp -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx,curand $(DEFINES)
-   LIBS = -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx,curand -lstdc++
+   # gpu_star.cuf needs CURAND; pgacclnk invokes /usr/bin/ld, so add NVHPC math_libs.
+   ifneq ($(NVHPC_MATH_LIB),)
+      NVHPC_EXTRA_LIBS = -L$(NVHPC_MATH_LIB)
+   else ifneq ($(NVHPC_CUDA_HOME),)
+      NVHPC_SDK_ROOT := $(abspath $(NVHPC_CUDA_HOME)/../..)
+      NVHPC_MATH_LIB := $(NVHPC_SDK_ROOT)/math_libs/lib64
+      ifneq ($(wildcard $(NVHPC_MATH_LIB)/libcurand.so),)
+         NVHPC_EXTRA_LIBS = -L$(NVHPC_MATH_LIB)
+      endif
+   else
+      NVHPC_MATH_LIB := $(firstword $(wildcard /opt/nvidia/hpc_sdk/Linux_x86_64/*/math_libs/lib64))
+      ifeq ($(NVHPC_MATH_LIB),)
+         NVHPC_MATH_LIB := $(firstword $(wildcard /cm/shared/apps/nvhpc/*/Linux_x86_64/*/math_libs/lib64))
+      endif
+      ifneq ($(wildcard $(NVHPC_MATH_LIB)/libcurand.so),)
+         NVHPC_EXTRA_LIBS = -L$(NVHPC_MATH_LIB)
+      endif
+   endif
+   LIBS = -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx,curand $(NVHPC_EXTRA_LIBS) -lstdc++
    GPU_PATH = ../gpu
    ifeq ($(CUDA_PROFILE),1)
       FFLAGS += -gpu=lineinfo,ptxinfo -Minstrument -traceback -gopt
