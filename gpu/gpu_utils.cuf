@@ -20,14 +20,7 @@ module gpu_utils
   !> where the inner 2 by 2 by 2 cells are "real" and the outer 2 cells are ghost/halo cells.
   !> Can either be used on it's own or allocated in shared memory. Note that it is zero
   !> indexed to make 1D to 3D indexing easier.
-  !> Under MHD the cell-centred magnetic field is NOT stored: every consumer
-  !> recomputes it as 0.5*(bf_low + bf_high) from the shared face-B buffer
-  !> (bitwise equal to the CPU ctoprim cell-centring because the two stored
-  !> copies of each face are maintained bitwise identical -- the face-B
-  !> redundancy invariant). Under MHD `refined` is also stored byte-wide and
-  !> only on the consumed [1, 2*nsubgrid+2]^3 lattice (zero_fine_fluxes /
-  !> zero_fine_emf read nothing outside it) -- both are shared-memory
-  !> occupancy savings for the MHD integrator kernel.
+  !> MHD: cell-centred B is derived from face-B; refined flags use byte storage on the inner lattice.
   type, public :: subgrid_6x6x6cell_primitive
      ! UNPADDED on purpose (P0 leading-dim 6->7 pad reverted: measured as a
      ! no-op on job 2823239). The fill loop in subgrid_conserved_2_primitive

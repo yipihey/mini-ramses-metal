@@ -27,11 +27,7 @@ module gpu_runner
   !> Arrays to hold the hydro variables on the device
   real(kind=dp), device, allocatable, dimension(:,:,:) :: uold, unew
 
-  !> Arrays to hold the face-centred B field on the device (MHD)
-  !> (The MHD integrator needs no further device storage: its corner states and
-  !> face-B slopes live in kernel shared memory -- see the B1 budget block in
-  !> gpu_hydro.cuf. The former mhd_corner_scratch / mhd_dbf_scratch global
-  !> scratch arrays, ~174 KB per oct of the integrated level, are gone.)
+  !> Device arrays for face-centred B (MHD).
   real(kind=dp), device, allocatable, dimension(:,:,:) :: bold, bnew
 
   !> Arrays to hold the gravity variables on the device
@@ -620,9 +616,7 @@ contains
     integer(kind=4) :: threadsX_per_block, threadsY_per_block
     integer(kind=4) :: new_ifree, old_ifree, new_head, new_tail, new_noct
     integer(kind=4) :: ilev, ind, ibit, ibucket, skip_bit, noct_level
-    ! D4 constrained-interpolation parameters (mirror CPU r%interpol_*/r%smallr).
-    ! smallr is copied into a kind=dp local before the launch (sim%r%smallr is
-    ! hardcoded real(kind=8); avoids the S-0450 kind mismatch under NPRE=4).
+    ! MHD prolongation parameters.
     integer(kind=4) :: interpol_var, interpol_type
     real(kind=dp) :: smallr_d
 

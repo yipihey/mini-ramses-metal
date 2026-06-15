@@ -111,29 +111,21 @@ module hydro_device
   end type primitive_t
 
 #ifdef MHD
-  !> @brief
-  !> Face-centred magnetic field subgrid (CPU h%bf). Exact extents: each
-  !> component drops the outermost LOW plane along its own axis (bx(0,*,*) /
-  !> by(*,0,*) / bz(*,*,0)) -- those faces would need an oct outside the 3x3x3
-  !> nbor stencil and were verified unread by every consumer (edge_e phase
-  !> reads bx at i>=1 cyclically, the trace and the cell-B recompute read
-  !> bx/by/bz at their own-axis index >= 1).
+  ! Face-centred B subgrid.
   type, public :: subgrid_face_b_t
      real(kind=dp), dimension(1:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: bx
      real(kind=dp), dimension(0:2*nsubgrid+3, 1:2*nsubgrid+3, 0:2*nsubgrid+3) :: by
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:2*nsubgrid+3) :: bz
   end type subgrid_face_b_t
 
-  !> @brief
-  !> Edge-centred electric field subgrid (CPU h%Ex/h%Ey/h%Ez). 
+  ! Edge-centred electric field subgrid.
   type, public :: subgrid_edge_e_t
      real(kind=dp), dimension(1:2*nsubgrid+2, 1:2*nsubgrid+3, 1:2*nsubgrid+3) :: Ex
      real(kind=dp), dimension(1:2*nsubgrid+3, 1:2*nsubgrid+2, 1:2*nsubgrid+3) :: Ey
      real(kind=dp), dimension(1:2*nsubgrid+3, 1:2*nsubgrid+3, 1:2*nsubgrid+2) :: Ez
   end type subgrid_edge_e_t
 
-  !> @brief
-  !> Anisotropic edge-EMF primitive family (CPU h%emfx/h%emfy/h%emfz).
+  ! Edge-parallel EMF subgrids.
   type, public :: subgrid_2x3x3edge_primitive   ! edges parallel to x (emfx)
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid) :: edge_e
   end type subgrid_2x3x3edge_primitive
@@ -144,8 +136,7 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1) :: edge_e
   end type subgrid_3x3x2edge_primitive
 
-  !> @brief
-  !> Anisotropic edge corner-state family (CPU h%qRT/h%qRB/h%qLT/h%qLB)
+  ! Edge corner states for EMF solve.
   type, public :: subgrid_2x3x3edge_corner   ! edges parallel to x (feed emfx)
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: density
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: velocity_y
@@ -323,23 +314,7 @@ contains
   ! ==========================================================================
 
   ! ==========================================================================
-  !> @brief
-  !> Compute the limited TVD slopes of cell (i,j,k) in all three directions
-  !> (v4.1). Dedicated device function factored out of the trace: trace_3d calls
-  !> it once per cell instead of inlining the per-cell slope_moncen block. The
-  !> returned slopes carry the half*dq convention (the 0.5 factor is applied
-  !> here), exactly as the former inline block stored them.
-  !>
-  !> @param[in] local_subgrid : The subgrid of primitive variables
-  !> @param[in] i, j, k : The cell indices within the subgrid
-  !> @param[in] slope : The slope limiter id (0: 1st order, 1: minmod, 2: moncen)
-  !> @param[out] slopes_x, slopes_y, slopes_z : The limited half*dq slopes
-  !> @param[in] scalar_sub : The passive-scalar subgrid (1:nscalar)
-  !> @param[in] bf (MHD) : The face-continuous face-B buffer (the cell-centred
-  !>           B of this cell and its 6 face neighbours is recomputed here as
-  !>           0.5*(bf_low + bf_high) -- bitwise equal to the formerly stored
-  !>           cell-centred B under the face-B redundancy invariant)
-  !> @param[out] dscal_x, dscal_y, dscal_z : The limited half*dq scalar slopes
+  !> Limited TVD slopes (half*dq) for hydro and transverse B.
   attributes(device) subroutine compute_tvd_slopes(local_subgrid, i, j, k, slope, &
 #if NVAR>5+NENER
        & scalar_sub, dscal_x, dscal_y, dscal_z, &
@@ -373,7 +348,7 @@ contains
     cell%velocity_z = local_subgrid%velocity_z(i, j, k)
     cell%pressure   = local_subgrid%pressure  (i, j, k)
 #ifdef MHD
-    ! Cell-centred B of this cell and of the 6 face neighbours, from bf
+    ! Cell-centred B from face-B buffer.
     Bxc    = 0.5_dp*(bf%bx(i  ,j,k) + bf%bx(i+1,j  ,k))
     Byc    = 0.5_dp*(bf%by(i,j  ,k) + bf%by(i  ,j+1,k))
     Bzc    = 0.5_dp*(bf%bz(i,j,k  ) + bf%bz(i  ,j,k+1))
@@ -397,11 +372,11 @@ contains
     slopes_x%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i - 1, j, k), cell%velocity_z, local_subgrid%velocity_z(i + 1, j, k), slope)
     slopes_x%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i - 1, j, k), cell%pressure,   local_subgrid%pressure  (i + 1, j, k), slope)
 #ifdef MHD
-    ! Transverse B slopes only, on the bf-derived cell-centred B. The normal-B
-    ! slopes (slopes_x%Bx / slopes_y%By / slopes_z%Bz) are consumed by NOTHING
-    ! (the normal B is face-predicted in the trace), so they are zero-filled
-    ! instead of computed -- 3 limiter evaluations and their stencil loads
-    ! removed per cell.
+    ! Transverse B slopes; normal-B slopes unused (face-predicted).
+    
+    
+    
+    
     slopes_x%Bx         = 0.0_dp
     slopes_x%By         = 0.5_dp * slope_moncen(Byc_xm, Byc, Byc_xp, slope)
     slopes_x%Bz         = 0.5_dp * slope_moncen(Bzc_xm, Bzc, Bzc_xp, slope)
@@ -450,11 +425,6 @@ contains
   !> @param[in] conserved : The conserved variables
   !> @param[in] gamma : The adiabatic index
 #ifdef MHD
-  !> @param[in] bxl, bxr  : Low/high x-face magnetic field of the cell
-  !> @param[in] byl, byr  : Low/high y-face magnetic field of the cell
-  !> @param[in] bzl, bzr  : Low/high z-face magnetic field of the cell
-  !> @param[in] smallr    : Density floor
-  !> @param[in] smallc    : Sound-speed floor
 #endif
   !> @return
   !> A primitive_t object with the primitive variables in a cell
@@ -536,61 +506,24 @@ contains
   ! ==========================================================================
 
 #ifdef MHD
-  ! ==========================================================================
-  ! MHD device helpers shared by the unified conversion pipeline and solvers.
-  ! ==========================================================================
 
-  ! ==========================================================================
-  !> @brief
-  !> Compute B^2 = Bx^2 + By^2 + Bz^2 from the cell-centred magnetic field.
-  !> Parentheses guarantee associativity of the transverse terms, matching the
-  !> existing magnitude_squared helper.
-  !>
-  !> @param[in] Bx : The x component of the (cell-centred) magnetic field
-  !> @param[in] By : The y component of the (cell-centred) magnetic field
-  !> @param[in] Bz : The z component of the (cell-centred) magnetic field
-  !>
-  !> @return
-  !> The magnitude squared of the magnetic field
+  ! Squared magnitude of cell-centred B.
   attributes(device) function compute_bsquared(Bx, By, Bz) result(bsquared)
     real(kind=dp), value :: Bx, By, Bz
     real(kind=dp) :: bsquared
     bsquared = Bx**2 + (By**2 + Bz**2)
     return
   end function compute_bsquared
-  ! ==========================================================================
 
-  ! ==========================================================================
-  !> @brief
-  !> Compute the magnetic energy density emag = 0.5*(Bx^2 + By^2 + Bz^2) from the
-  !> cell-centred magnetic field (CPU ctoprim, umuscl.f90:1830-1833).
-  !>
-  !> @param[in] Bx : The x component of the (cell-centred) magnetic field
-  !> @param[in] By : The y component of the (cell-centred) magnetic field
-  !> @param[in] Bz : The z component of the (cell-centred) magnetic field
-  !>
-  !> @return
-  !> The magnetic energy density
+  ! Magnetic energy density 0.5*|B|^2 from cell-centred B.
   attributes(device) function compute_emag(Bx, By, Bz) result(emag)
     real(kind=dp), value :: Bx, By, Bz
     real(kind=dp) :: emag
     emag = 0.5_dp * compute_bsquared(Bx, By, Bz)
     return
   end function compute_emag
-  ! ==========================================================================
 
-  ! ==========================================================================
-  !> @brief
-  !> GPU implementation of the 1D HLL MHD Riemann solver. This is a direct port
-  !> of CPU riemann_hll_mhd (godunov_utils.f90), with x as the normal direction;
-  !> callers rotate interface states for y/z faces in the MHD Riemann driver.
-  !>
-  !> @param[in] left  : The state on the left side of the interface
-  !> @param[in] right : The state on the right side of the interface
-  !> @param[in] gamma : The adiabatic index
-  !>
-  !> @return
-  !> flux : The conserved_t of the HLL MHD fluxes
+  ! 1D HLL MHD Riemann flux (x-normal; y/z via rotation in driver).
   attributes(device) function hll_mhd_fluxes(left, right, gamma, smallr, smallc) result(flux)
     type(primitive_t), intent(in) :: left, right
     real(kind=dp), value :: gamma, smallr, smallc
@@ -610,7 +543,7 @@ contains
     left_state = left
     right_state = right
 
-    ! Enforce continuity of the normal magnetic field across the interface.
+    ! Continuity of normal B across the interface.
     bx_mean = 0.5_dp * (left_state%Bx + right_state%Bx)
     left_state%Bx = bx_mean
     right_state%Bx = bx_mean
@@ -647,7 +580,7 @@ contains
     vdotbl = blx * ul + bly * vl + blz * wl
     vdotbr = brx * ur + bry * vr + brz * wr
 
-    ! Compute the left and right physical MHD fluxes (CPU find_mhd_flux).
+    ! MHD physical fluxes at left and right.
     left_fluxes%density = rl * ul
     left_fluxes%momentum_x = rl * ul * ul + ptotl - blx * blx
     left_fluxes%momentum_y = rl * ul * vl - blx * bly
@@ -666,7 +599,7 @@ contains
     right_fluxes%By = bry * ur - brx * vr
     right_fluxes%Bz = brz * ur - brx * wr
 
-    ! Fast magnetosonic speeds (CPU find_speed_fast).
+    ! Fast magnetosonic wave speeds.
     b2l = compute_bsquared(blx, bly, blz)
     c2l = gamma * pl / rl
     d2l = 0.5_dp * (b2l / rl + c2l)
@@ -680,7 +613,7 @@ contains
     speed_l = min(min(ul, ur) - max(cfleft, cfright), 0.0_dp)
     speed_r = max(max(ul, ur) + max(cfleft, cfright), 0.0_dp)
 
-    ! HLL flux, matching CPU fgdnv = (SR*fleft-SL*fright+SR*SL*(uright-uleft))/(SR-SL).
+    ! HLL combination of left/right fluxes.
     flux%density = hll_flux(speed_l, speed_r, left_fluxes%density, right_fluxes%density, &
          & left_state_c%density, right_state_c%density)
     flux%momentum_x = hll_flux(speed_l, speed_r, left_fluxes%momentum_x, right_fluxes%momentum_x, &
@@ -700,27 +633,8 @@ contains
 
     return
   end function hll_mhd_fluxes
-  ! ==========================================================================
 
-  ! ==========================================================================
-  !> @brief
-  !> GPU implementation of the HLLD MHD Riemann solver (Miyoshi & Kusano 2005,
-  !> JCP 208, 315). Direct port of CPU riemann_hlld (godunov_utils.f90:967-1249),
-  !> x as the normal direction (callers rotate y/z). Returns the conserved_t
-  !> Godunov flux with the SAME field mapping as hll_mhd_fluxes (Bx flux = 0, By/Bz
-  !> are the transverse-B fluxes), so it is a drop-in alternative in the dispatcher.
-  !> The two-state-per-side structure (acoustic star + Alfven double-star) resolves
-  !> the rotational/Alfven waves the single HLL average smears. Floors match
-  !> hll_mhd_fluxes (smallr, smallp); the Alfven-degeneracy guard
-  !> abs(estar)<1e-4*A^2 is the CPU one. The fast speed reuses find_speed_fast's
-  !> formula with the continuity-enforced normal field A.
-  !>
-  !> @param[in] left  : The state on the left side of the interface
-  !> @param[in] right : The state on the right side of the interface
-  !> @param[in] gamma : The adiabatic index
-  !>
-  !> @return
-  !> flux : The conserved_t of the HLLD MHD fluxes
+  ! 1D HLLD MHD Riemann flux (Miyoshi & Kusano; x-normal).
   attributes(device) function hlld_mhd_fluxes(left, right, gamma, smallr, smallc) result(flux)
     type(primitive_t), intent(in) :: left, right
     real(kind=dp), value :: gamma, smallr, smallc
@@ -738,18 +652,17 @@ contains
     smallp = smallc**2 / gamma
     entho = 1.0_dp / (gamma - 1.0_dp)
 
-    ! Floor the states (GPU convention, matches hll_mhd_fluxes; no-op for the
-    ! already trace-floored inputs).
+    ! Floor density and pressure.
     ls = left; rs = right
     ls%density  = max(ls%density,  smallr);  rs%density  = max(rs%density,  smallr)
     ls%pressure = max(ls%pressure, smallp*ls%density)
     rs%pressure = max(rs%pressure, smallp*rs%density)
 
-    ! Enforce continuity of the normal magnetic field (CPU :1006-1008).
+    ! Continuity of normal B across the interface.
     A = 0.5_dp*(ls%Bx + rs%Bx)
     sgnm = sign(1.0_dp, A)
 
-    ! Left variables (CPU :1011-1025). %By/%Bz are the transverse B (Bl,Cl).
+    ! Left state variables.
     rl = ls%density; ul = ls%velocity_x; vl = ls%velocity_y; wl = ls%velocity_z
     Pl = ls%pressure; Bl = ls%By; Cl = ls%Bz
     ekinl = 0.5_dp*(ul*ul + vl*vl + wl*wl)*rl
@@ -758,7 +671,7 @@ contains
     Ptotl = Pl + emagl
     vdotBl = ul*A + vl*Bl + wl*Cl
 
-    ! Right variables (CPU :1028-1042).
+    ! Right state variables.
     rr = rs%density; ur = rs%velocity_x; vr = rs%velocity_y; wr = rs%velocity_z
     Pr = rs%pressure; Br = rs%By; Cr = rs%Bz
     ekinr = 0.5_dp*(ur*ur + vr*vr + wr*wr)*rr
@@ -773,14 +686,14 @@ contains
     b2r = A*A + Br*Br + Cr*Cr; c2r = gamma*Pr/rr; d2r = 0.5_dp*(b2r/rr + c2r)
     cfastr = sqrt(d2r + sqrt(d2r**2 - c2r*A*A/rr))
 
-    ! HLL wave speeds, Lagrangian sound speeds, acoustic star state (CPU :1049-1060).
+    ! HLL wave speeds and star state.
     SL = min(ul, ur) - max(cfastl, cfastr)
     SR = max(ul, ur) + max(cfastl, cfastr)
     rcl = rl*(ul - SL); rcr = rr*(SR - ur)
     ustar    = (rcr*ur    + rcl*ul    + (Ptotl - Ptotr))      /(rcr + rcl)
     Ptotstar = (rcr*Ptotl + rcl*Ptotr + rcl*rcr*(ul - ur))    /(rcr + rcl)
 
-    ! Left star region (CPU :1063-1087).
+    ! Left star region.
     rstarl = rl*(SL - ul)/(SL - ustar)
     estar  = rl*(SL - ul)*(SL - ustar) - A*A
     el     = rl*(SL - ul)*(SL - ul   ) - A*A
@@ -796,7 +709,7 @@ contains
     etotstarl = ((SL - ul)*etotl - Ptotl*ul + Ptotstar*ustar + A*(vdotBl - vdotBstarl))/(SL - ustar)
     sqrrstarl = sqrt(rstarl); calfvenl = abs(A)/sqrrstarl; SAL = ustar - calfvenl
 
-    ! Right star region (CPU :1090-1114).
+    ! Right star region.
     rstarr = rr*(SR - ur)/(SR - ustar)
     estar  = rr*(SR - ur)*(SR - ustar) - A*A
     er     = rr*(SR - ur)*(SR - ur   ) - A*A
@@ -812,7 +725,7 @@ contains
     etotstarr = ((SR - ur)*etotr - Ptotr*ur + Ptotstar*ustar + A*(vdotBr - vdotBstarr))/(SR - ustar)
     sqrrstarr = sqrt(rstarr); calfvenr = abs(A)/sqrrstarr; SAR = ustar + calfvenr
 
-    ! Double star region (CPU :1117-1123).
+    ! Double-star region.
     vstarstar = (sqrrstarl*vstarl + sqrrstarr*vstarr + sgnm*(Bstarr - Bstarl))/(sqrrstarl + sqrrstarr)
     wstarstar = (sqrrstarl*wstarl + sqrrstarr*wstarr + sgnm*(Cstarr - Cstarl))/(sqrrstarl + sqrrstarr)
     Bstarstar = (sqrrstarl*Bstarr + sqrrstarr*Bstarl + sgnm*sqrrstarl*sqrrstarr*(vstarr - vstarl))/(sqrrstarl + sqrrstarr)
@@ -821,7 +734,7 @@ contains
     etotstarstarl = etotstarl - sgnm*sqrrstarl*(vdotBstarl - vdotBstarstar)
     etotstarstarr = etotstarr + sgnm*sqrrstarr*(vdotBstarr - vdotBstarstar)
 
-    ! Sample the solution at x/t = 0 (CPU :1126-1222).
+    ! Sample Riemann solution at x/t=0.
     if (SL > 0.0_dp) then
        ro = rl; uo = ul; vo = vl; wo = wl; Bo = Bl; Co = Cl; Ptoto = Ptotl; etoto = etotl; vdotBo = vdotBl
     else if (SAL > 0.0_dp) then
@@ -840,7 +753,7 @@ contains
        ro = rr; uo = ur; vo = vr; wo = wr; Bo = Br; Co = Cr; Ptoto = Ptotr; etoto = etotr; vdotBo = vdotBr
     endif
 
-    ! Godunov flux (CPU :1225-1232). Bx flux is zero (constrained transport).
+    ! Godunov flux; Bx flux zero (CT).
     flux%density    = ro*uo
     flux%momentum_x = ro*uo*uo + Ptoto - A*A
     flux%momentum_y = ro*uo*vo - A*Bo
@@ -852,22 +765,8 @@ contains
 
     return
   end function hlld_mhd_fluxes
-  ! ==========================================================================
 
-  ! ==========================================================================
-  !> @brief
-  !> GPU implementation of the 2D HLL edge EMF solver. This is a direct port of
-  !> CPU riemann2d_hll_fast (godunov_utils.f90), using the four edge corner states
-  !> qLL/qLR/qRL/qRR and returning the unscaled electric field.
-  !>
-  !> @param[in] qLL   : Left-bottom corner state
-  !> @param[in] qLR   : Left-top corner state
-  !> @param[in] qRL   : Right-bottom corner state
-  !> @param[in] qRR   : Right-top corner state
-  !> @param[in] gamma : The adiabatic index
-  !>
-  !> @return
-  !> E : The unscaled edge EMF
+  ! 2D HLL edge EMF from four corner states.
   attributes(device) function riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc) result(E)
     type(primitive_t), intent(in) :: qLL, qLR, qRL, qRR
     real(kind=dp), value :: gamma, smallr, smallc
@@ -951,25 +850,8 @@ contains
 
     return
   end function riemann2d_hll_emf
-  ! ==========================================================================
 
-  ! ==========================================================================
-  !> @brief
-  !> GPU implementation of the 2D HLLD edge EMF solver. This ports CPU
-  !> riemann2d_hlld (godunov_utils.f90) for the already-rotated edge frame used
-  !> by cmp_mag_flx: velocity_x/Bx and velocity_y/By are the two directions in
-  !> the edge-normal plane, velocity_z/Bz is the edge-parallel component.
-  !>
-  !> @param[in] qLL   : Left-bottom corner state
-  !> @param[in] qLR   : Left-top corner state
-  !> @param[in] qRL   : Right-bottom corner state
-  !> @param[in] qRR   : Right-top corner state
-  !> @param[in] gamma : The adiabatic index
-  !> @param[in] smallr: Density floor
-  !> @param[in] smallc: Sound-speed floor
-  !>
-  !> @return
-  !> E : The unscaled edge EMF
+  ! 2D HLLD edge EMF in the rotated edge frame.
   attributes(device) function riemann2d_hlld_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
        & switch_llf_dmin, switch_llf_pmin) result(E)
     type(primitive_t), intent(in) :: qLL, qLR, qRL, qRR
@@ -1158,22 +1040,8 @@ contains
 
     return
   end function riemann2d_hlld_emf
-  ! ==========================================================================
 
-  ! ==========================================================================
-  !> @brief
-  !> Dispatch GPU 2D MHD EMF solvers. HLLF and HLLD are implemented; other solver
-  !> ids intentionally fall back to 2D HLL until their ports are added.
-  !>
-  !> @param[in] qLL       : Left-bottom corner state
-  !> @param[in] qLR       : Left-top corner state
-  !> @param[in] qRL       : Right-bottom corner state
-  !> @param[in] qRR       : Right-top corner state
-  !> @param[in] gamma     : The adiabatic index
-  !> @param[in] riemann2d : 2D solver id
-  !>
-  !> @return
-  !> E : The unscaled edge EMF
+  ! Dispatch 2D MHD EMF solver (HLLD, HLLF, else HLL).
   attributes(device) function riemann2d_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
        & switch_llf_dmin, switch_llf_pmin, riemann2d) result(E)
     type(primitive_t), intent(in) :: qLL, qLR, qRL, qRR
@@ -1187,13 +1055,12 @@ contains
     else if (riemann2d .eq. solver2d_hllf) then
        E = riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc)
     else
-       ! TODO: add solver2d_hlla / simple here.
+       ! Unimplemented 2D solvers fall back to HLL.
        E = riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc)   ! fall back to 2D HLL
     endif
 
     return
   end function riemann2d_emf
-  ! ==========================================================================
 #endif
 
   ! ==========================================================================
@@ -1232,22 +1099,7 @@ contains
   ! ==========================================================================
 
   ! =========================================================================
-  !> @brief
-  !> Convert a subgrid of conserved variables to primitive variables in shared memory.
-  !> Under MHD this additionally fills the shared face-B buffer (bf), computes the
-  !> cell-centred B, applies the density/internal-energy floors and the magnetic
-  !> energy correction (CPU ctoprim), and loads the passive scalars.
-  !>
-  !> @param[in] grid : The oct array (main + cache); used for grid%refined only
-  !> @param[in] head_idx : The head index of the octs at the current AMR level
-  !> @param[in] block_idx : The CUDA block index of the calling thread
-  !> @param[in] thread_idx : The index of calling thread within its block
-  !> @param[in] gamma : The adiabatic index
-  !> @param[in] smallr, smallc (MHD) : Density and sound-speed floors
-  !> @param[out] local_subgrid : The local subgrid in shared memory to write the primitive variables to
-  !> @param[out] scalar_sub (MHD) : The passive-scalar subgrid (1:nvar-5)
-  !> @param[out] bf (MHD) : The face-continuous low-face B buffer
-  !>
+  !> Convert conserved subgrid to primitives; MHD fills face-B and scalars.
   attributes(device) subroutine subgrid_conserved_2_primitive(grid, uold, bold, f, constant_gravity, nbor, &
 #if NVAR>5+NENER
        & scalar_sub, &
@@ -1293,15 +1145,7 @@ contains
     work_size = 2*nsubgrid+4
 
     ! LEXICOGRAPHIC work decode (i fastest). The shared subgrids are unpadded
-    ! stride-6 rows, so the destination linear offset i + 6j + 36k == work_idx:
-    ! a warp's 32 lanes store to 32 consecutive shared addresses for every
-    ! field below -- coalesced, bank-conflict-free. (The previous oct-major
-    ! Morton decode scattered each warp over 4 octs x 8 Morton cells, which
-    ! NCU billed as the kernel's #1 signal: 99.9M excessive shared wavefronts
-    ! and 1.8-way store conflicts on the bf/local_subgrid fills.) This is a
-    ! pure permutation of the same 216 independent (oct, cell) work items --
-    ! per-item arithmetic is untouched, so the shared contents after the
-    ! syncthreads are bitwise identical to the old decode.
+    ! Lay out work items for coalesced shared-memory stores.
     do work_idx = thread_idx, work_size**3 - 1, blockDim%x
 
        ! Destination lattice coordinates within the 6x6x6 subgrid
@@ -1327,7 +1171,7 @@ contains
        cell_idx = 1 + ib + 2*jb + 4*kb
 
 #ifdef MHD
-       ! This cell's six raw face-B (bold comps 1-3 = low x/y/z, 4-6 = high x/y/z).
+       ! Six face-B components from bold.
        b0(1) = bold(cell_idx, 1, source_idx)
        b0(2) = bold(cell_idx, 2, source_idx)
        b0(3) = bold(cell_idx, 3, source_idx)
@@ -1335,25 +1179,7 @@ contains
        b0(5) = bold(cell_idx, 5, source_idx)
        b0(6) = bold(cell_idx, 6, source_idx)
 
-       ! Face-continuous low faces (CPU ctoprim:1768/1781/1794): a cell's low-d face
-       ! = 0.5*(self_low_d + low-d-neighbour_high_d), keeping B single-valued at each
-       ! face (divB). The low-d neighbour is the cell with this cell's own-axis
-       ! position bit flipped: cell index hhh(cell_idx,dir) == cell_idx + s*(1-2*bit)
-       ! (s = 1/2/4 for x/y/z), living in the same oct when the bit is 1
-       ! (iii(cell_idx,dir)==0) and in the low-d stencil oct (ind_nbor - 1/3/9)
-       ! when the bit is 0 -- the arithmetic below is exactly the old hhh/iii
-       ! table walk, with the two divergent stores per direction merged into a
-       ! single store + gather behind a predicated source-index select (halves
-       ! the instruction count on NCU's hottest shared lines and the ~20
-       ! predicated-off threads/warp divergence signal). The OUTERMOST low
-       ! faces bx(0,*,*)/by(*,0,*)/bz(*,*,0) would need an oct outside the
-       ! 3x3x3 nbor stencil; they are never read (edge_e reads bx at i>=1, by
-       ! at j>=1, bz at k>=1; the trace and the cell-B recompute read bx/by/bz
-       ! at their own-axis index >= 1), so the trimmed subgrid_face_b_t no
-       ! longer stores them and the fill skips both the write and the
-       ! out-of-stencil oct fetch. Guard soundness for the selects: bit==0
-       ! with own-axis index >= 1 forces an even index >= 2, so the stencil
-       ! slot ind_nbor - 1/3/9 always exists.
+       ! Face-continuous low faces: average with low-d neighbour across each face.
        ! Low-x face of this cell:
        if (i >= 1) then
           source_idx_face = source_idx
@@ -1373,14 +1199,14 @@ contains
           bf%bz(i,j,k) = 0.5_dp*(b0(3) + bold(cell_idx + 4*(1 - 2*kb), 6, source_idx_face))
        endif
 
-       ! Cell-centred B = average of the two opposing faces of THIS cell.
+       ! Cell-centred B from opposing face pair.
        Bxc = 0.5_dp*(b0(1) + b0(4))
        Byc = 0.5_dp*(b0(2) + b0(5))
        Bzc = 0.5_dp*(b0(3) + b0(6))
 
-       ! Hydro conversion + MHD energy correction (CPU ctoprim:1804-1845).
-       ! Intentionally duplicates conserved_2_primitive for inlining; cold paths
-       ! call the function. Floor density and internal energy before trace/source.
+       ! Convert to primitives with MHD energy correction.
+       ! Inline primitive conversion with floors.
+       
        rho  = max(uold(cell_idx, 1, source_idx), smallr)
        invD = 1.0_dp / rho
        primitive%density    = rho
@@ -1426,19 +1252,13 @@ contains
        local_subgrid%pressure  (i, j, k) = primitive%pressure
 #if NVAR>5+NENER
        ! Passive scalars q(ie+nener+n) = uold(5+nener+n)/rho
-       ! (CPU ctoprim:1870-1879).
+       ! Passive scalars from conserved slots.
        do n = 1, nscalar
           scalar_sub(i, j, k, n) = uold(cell_idx, 5+nener+n, source_idx) * invD
        end do
 #endif
 #ifdef MHD
-       ! The cell-centred B is NOT stored: consumers recompute it from the
-       ! shared bf as 0.5*(bf_low + bf_high), which is bitwise equal to the
-       ! own-face average used for the pressure correction above as long as
-       ! the two stored copies of each face are bitwise identical (the face-B
-       ! redundancy invariant the CT update preserves).
-
-       ! Store refinement map (MHD stores only the consumed lattice)
+       ! Store refinement flags.
        if (i >= 1 .and. i <= 2*nsubgrid+2 .and. j >= 1 .and. j <= 2*nsubgrid+2 &
             & .and. k >= 1 .and. k <= 2*nsubgrid+2) then
           local_subgrid%refined(i, j, k) = grid(source_idx)%refined(cell_idx)
@@ -1455,13 +1275,7 @@ contains
   end subroutine subgrid_conserved_2_primitive
 
 #ifdef MHD
-  ! =========================================================================
-  !> @brief Edge-centred E (CPU trace3d:935-951) recomputed on demand so the
-  !> resident subgrid_edge_e_t buffer need not occupy shared memory (P1 diet).
-  !> Each result is bitwise-identical to the former phase-1 fill (same operand
-  !> order); the inputs (shared local_subgrid velocities and bf) are stable
-  !> through the trace because phase 1 only ever wrote edge_e.
-  ! =========================================================================
+  ! x-edge electric field from velocities and face-B.
   attributes(device) function edge_e_x(ls, bf, i, j, k) result(E)
     type(subgrid_6x6x6cell_primitive), intent(in) :: ls
     type(subgrid_face_b_t), intent(in) :: bf
@@ -1507,37 +1321,7 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  !> @brief
-  !> Compute the interface states with tracing.
-  !> Under MHD this is the full constrained-transport trace (CPU trace3d): the
-  !> raw edge-centred E (Ex,Ey,Ez) is recomputed inline per cell (no resident
-  !> edge_e buffer -- P1 diet); the predictor adds the
-  !> Lorentz-force source terms, predicts the face-B by the discrete curl of
-  !> edge-E (single-valued normal B keeps divB clean), writes B and the passive
-  !> scalars to the interface states, and stores each corner state into the
-  !> slot of the ONE oct edge that consumes it (the shared subgrid_*edge_corner
-  !> buffers; the write-side inverse of the CPU cmp_mag_flx gather shifts).
-  !> The 12 face-B transverse slopes (CPU dbf) are recomputed inline from the
-  !> shared bf via face_b_tvd_slope -- nothing is staged in global memory.
-  !> induction=.true. zeroes the velocity source terms (kinematic-dynamo mode).
-  !>
-  !> @param[in] local_subgrid : The subgrid of primitive variables to solve
-  !> @param[in] thread_idx : The index of the current thread
-  !> @param[in] gamma : The adiabatic index
-  !> @param[in] dtdx : dt / dx
-  !> @param[in] left_interfaces_x : The left side interfaces normal to x
-  !> @param[in] left_interfaces_y : The left side interfaces normal to y
-  !> @param[in] left_interfaces_z : The left side interfaces normal to z
-  !> @param[in] right_interfaces_x : The right side interfaces normal to x
-  !> @param[in] right_interfaces_y : The right side interfaces normal to y
-  !> @param[in] right_interfaces_z : The right side interfaces normal to z
-  !> @param[in] scalar_sub (MHD) : The passive-scalar subgrid (1:nvar-5)
-  !> @param[in] bf (MHD) : The face-continuous low-face B buffer
-  !> @param[inout] corner_x/y/z (MHD) : The edge corner-state buffers
-  !> @param[in] smallr, smallc2 : Density and squared sound-speed floors
-  !> @param[in] smallc (MHD) : Sound-speed floor
-  !> @param[in] slope_mag (MHD) : The magnetic slope limiter id
-  !> @param[in] induction (MHD) : Pure-induction (kinematic dynamo) switch
+  !> Interface states with tracing; MHD adds constrained-transport predictor.
   !>
   attributes(device) subroutine trace_3d(local_subgrid, thread_idx, &
 #if NVAR>5+NENER
@@ -1593,11 +1377,11 @@ contains
     real(kind=dp) :: sr0, uu,vv,ww,Aa,Bb,Cc
     logical :: okp_x, okm_x, oka_x, okp_y, okm_y, oka_y, okp_z, okm_z, oka_z
 
-    ! Phase 1 (raw edge-centred E) and its barrier are gone: the resident
-    ! subgrid_edge_e_t buffer was removed (P1 shmem diet). local_subgrid and bf
-    ! are already block-consistent (synced at the end of the prim conversion)
-    ! and phase 1 only ever wrote edge_e, so each cell recomputes the 12 edge-E
-    ! values it needs inline below (edge_e_{x,y,z}) with no extra syncthreads.
+    ! Edge E recomputed inline (no edge_e shared buffer).
+    
+    
+    
+    
 #endif
 
     ! Compute the size of the section of the subgrid to operate on
@@ -1614,7 +1398,7 @@ contains
        i = i + 1; j = j + 1; k = k + 1
 
 #ifdef MHD
-       ! ---- Face-centred B values (CPU trace3d:961-966) -----------------------
+       ! Face
        AL = bf%bx(i  ,j  ,k  )
        AR = bf%bx(i+1,j  ,k  )
        BL = bf%by(i  ,j  ,k  )
@@ -1622,22 +1406,15 @@ contains
        CL = bf%bz(i  ,j  ,k  )
        CR = bf%bz(i  ,j  ,k+1)
 
-       ! ---- Cell-centred B = mean of the two UNPREDICTED faces ----------------
-       ! Replaces the formerly stored local_subgrid%Bx/By/Bz (CPU ctoprim q(6:8));
-       ! bitwise equal to the own-face average under the face-B redundancy
+       ! Cell
+       ! Replaces the formerly stored local_subgrid%Bx/By/Bz );
        ! invariant, and free: AL..CR are already in registers. Must be taken
        ! BEFORE the curl predictor advances AL..CR below.
        A = half*(AL+AR)
        B = half*(BL+BR)
        C = half*(CL+CR)
 
-       ! ---- Face-centred transverse slopes (0.5*dbf; CPU trace3d:969-982) -----
-       ! Recomputed inline from the shared bf via face_b_tvd_slope (B3) -- the
-       ! CPU stages these in h%dbf / the old GPU spilled them to global scratch;
-       ! they are a pure 3-point function of bf, so recomputing the 12 values
-       ! this cell needs is cheaper than a global round-trip. Slope axes follow
-       ! CPU uslope (umuscl.f90:2255-2333): dbx along y/z, dby along x/z,
-       ! dbz along x/y; L/R = the cell's low/high face on the component's axis.
+       ! TVD slopes on face-B from the shared bf buffer.
        dALy = half*face_b_tvd_slope(bf%bx(i  ,j-1,k), bf%bx(i  ,j,k), bf%bx(i  ,j+1,k), slope_mag)
        dARy = half*face_b_tvd_slope(bf%bx(i+1,j-1,k), bf%bx(i+1,j,k), bf%bx(i+1,j+1,k), slope_mag)
        dALz = half*face_b_tvd_slope(bf%bx(i  ,j,k-1), bf%bx(i  ,j,k), bf%bx(i  ,j,k+1), slope_mag)
@@ -1651,9 +1428,7 @@ contains
        dCLy = half*face_b_tvd_slope(bf%bz(i,j-1,k  ), bf%bz(i,j,k  ), bf%bz(i,j+1,k  ), slope_mag)
        dCRy = half*face_b_tvd_slope(bf%bz(i,j-1,k+1), bf%bz(i,j,k+1), bf%bz(i,j+1,k+1), slope_mag)
 
-       ! ---- Edge-centred E recomputed inline (CPU trace3d:935-1000) -----------
-       ! Resident subgrid_edge_e_t removed (P1 shmem diet); edge_e_{x,y,z}
-       ! reproduce the former phase-1 fill bitwise from shared local_subgrid+bf.
+       ! Edge electric fields from inline edge_e_{x,y,z}.
        ELL = edge_e_x(local_subgrid, bf, i  , j  , k  ); ELR = edge_e_x(local_subgrid, bf, i  , j  , k+1)
        ERL = edge_e_x(local_subgrid, bf, i  , j+1, k  ); ERR = edge_e_x(local_subgrid, bf, i  , j+1, k+1)
        FLL = edge_e_y(local_subgrid, bf, i  , j  , k  ); FLR = edge_e_y(local_subgrid, bf, i  , j  , k+1)
@@ -1661,7 +1436,7 @@ contains
        GLL = edge_e_z(local_subgrid, bf, i  , j  , k  ); GLR = edge_e_z(local_subgrid, bf, i  , j+1, k  )
        GRL = edge_e_z(local_subgrid, bf, i+1, j  , k  ); GRR = edge_e_z(local_subgrid, bf, i+1, j+1, k  )
 
-       ! ---- Face-B predicted by discrete curl of edge-E (CPU trace3d:1003-1015)
+       ! Face
        sAL0 = + (GLR-GLL) - (FLR-FLL)
        sAR0 = + (GRR-GRL) - (FRR-FRL)
        sBL0 = - (GRL-GLL) + (ELR-ELL)
@@ -1683,8 +1458,8 @@ contains
        cell%velocity_z = local_subgrid%velocity_z(i, j, k)
        cell%pressure   = local_subgrid%pressure  (i, j, k)
 #ifdef MHD
-       ! CPU trace3d scalar names: original (pre-predictor) cell values (the
-       ! cell-centred B A/B/C was formed from AL..CR above)
+       ! Pre-predictor cell scalars for trace.
+       
        r = local_subgrid%density   (i,j,k)
        u = local_subgrid%velocity_x(i,j,k)
        v = local_subgrid%velocity_y(i,j,k)
@@ -1692,7 +1467,7 @@ contains
        p = local_subgrid%pressure  (i,j,k)
 #endif
 
-       ! Compute the TVD Slopes (dedicated device function, v4.1; half*dq)
+       ! TVD slopes (half*dq).
        call compute_tvd_slopes(local_subgrid, i, j, k, slope, &
 #if NVAR>5+NENER
             & scalar_sub, dscal_x, dscal_y, dscal_z, &
@@ -1702,8 +1477,8 @@ contains
 #endif
             & slopes_x, slopes_y, slopes_z)
 #ifdef MHD
-       ! Unpack into the CPU trace3d slope names (transverse B only; the normal
-       ! B is face-predicted, so slopes_x%Bx / slopes_y%By / slopes_z%Bz unused).
+       ! Unpack transverse-B slopes for trace.
+       
        drx = slopes_x%density;    dry = slopes_y%density;    drz = slopes_z%density
        dux = slopes_x%velocity_x; duy = slopes_y%velocity_x; duz = slopes_z%velocity_x
        dvx = slopes_x%velocity_y; dvy = slopes_y%velocity_y; dvz = slopes_z%velocity_y
@@ -1735,7 +1510,7 @@ contains
                                 -cell%velocity_z * slopes_z%pressure   &
                                 - (slopes_x%velocity_x + slopes_y%velocity_y + slopes_z%velocity_z) * gamma * cell%pressure
 #ifdef MHD
-       ! Lorentz-force source terms (CPU trace3d:1083-1090)
+       ! Lorentz-force source terms.
        source_term%velocity_x = source_term%velocity_x + (-(B*dBx+C*dCx)/r) + (B*dAy/r) + (C*dAz/r)
        source_term%velocity_y = source_term%velocity_y + (A*dBx/r) + (-(A*dAy+C*dCy)/r) + (C*dBz/r)
        source_term%velocity_z = source_term%velocity_z + (A*dCx/r) + (B*dCy/r) + (-(A*dAz+B*dBz)/r)
@@ -1751,9 +1526,9 @@ contains
        cell%velocity_z = cell%velocity_z + dtdx * source_term%velocity_z
        cell%pressure   = cell%pressure   + dtdx * source_term%pressure
 #ifdef MHD
-       ! Predicted scalar aliases for the B interface/corner writes below; the
-       ! predicted cell-centred B is the mean of the predicted faces
-       ! (CPU trace3d:1102-1110).
+       ! Predicted face-B mean for interface writes.
+       
+       
        r = cell%density
        u = cell%velocity_x
        v = cell%velocity_y
@@ -1869,25 +1644,12 @@ contains
        end if
 
 #ifdef MHD
-       ! ---- Corner-state edge-feed guards -------------------------------------
-       ! Each cell corner is consumed by exactly ONE oct edge, so it is stored
-       ! straight into that edge's slot of the shared corner_x/y/z buffers (the
-       ! write-side inverse of the CPU cmp_mag_flx gather shifts,
-       ! umuscl.f90:220-258). The guards keep the mapped edge index on the
-       ! stored lattice: a +d corner maps to transverse edge index cell_d-1 in
-       ! [0,2*nsubgrid] (okp_d), a -d corner to cell_d-2 (okm_d), and the
-       ! along-axis segment to cell_a-2 in [0,2*nsubgrid-1] (oka_a). Corner
-       ! values of cells outside these ranges fed no oct edge (the cell-indexed
-       ! scheme computed and discarded them).
+       ! Store corner states into shared edge-corner buffers.
        okp_x = i <= 2*nsubgrid+1; okm_x = i >= 2; oka_x = okm_x .and. okp_x
        okp_y = j <= 2*nsubgrid+1; okm_y = j >= 2; oka_y = okm_y .and. okp_y
        okp_z = k <= 2*nsubgrid+1; okm_z = k >= 2; oka_z = okm_z .and. okp_z
 
-       ! ---- X-edge corner states (orientation 1) (CPU trace3d:1226-1289) ------
-       ! Corner letters: R/L = the cell's +y/-y side, T/B = +z/-z. The cell's
-       ! RT corner is the LL corner of the x-edge at (i-2,j-1,k-1), etc. The
-       ! edge-parallel velocity u is not stored (no 2D EMF solver reads it);
-       ! components stay in the PHYSICAL frame (gather_corner_x permutes, C3).
+       ! X edges: map cell corners into corner_x slots.
        if (oka_x .and. okp_y .and. okp_z) then   ! qRT -> LL slot
           corner_x%density(i-2,j-1,k-1,iqLL) = r + (+dry+drz)
           corner_x%velocity_y(i-2,j-1,k-1,iqLL) = v + (+dvy+dvz)
@@ -1933,12 +1695,7 @@ contains
           if (corner_x%pressure(i-2,j-2,k-2,iqRR) < smallp) corner_x%pressure(i-2,j-2,k-2,iqRR) = p
        end if
 
-       ! ---- Y-edge corner states (orientation 2) (CPU trace3d:1290-1353) ------
-       ! Corner letters: R/L = the cell's +x/-x side, T/B = +z/-z. The 2D
-       ! solver's first in-plane axis for y-edges is physical z (CPU lp1=4), so
-       ! the cell's RT corner is the LL corner of edge (i-1,j-2,k-1) but RB
-       ! feeds the RL slot and LT the LR slot (cf. the CPU Ey gather swap,
-       ! umuscl.f90:236-242). The edge-parallel velocity v is not stored.
+       ! Y edges: permute corner letters into edge corner slots.
        if (okp_x .and. oka_y .and. okp_z) then   ! qRT -> LL slot
           corner_y%density(i-1,j-2,k-1,iqLL) = r + (+drx+drz)
           corner_y%velocity_x(i-1,j-2,k-1,iqLL) = u + (+dux+duz)
@@ -1984,10 +1741,7 @@ contains
           if (corner_y%pressure(i-2,j-2,k-2,iqRR) < smallp) corner_y%pressure(i-2,j-2,k-2,iqRR) = p
        end if
 
-       ! ---- Z-edge corner states (orientation 3) (CPU trace3d:1354-1417) ------
-       ! Corner letters: R/L = the cell's +x/-x side, T/B = +y/-y. The cell's
-       ! RT corner is the LL corner of edge (i-1,j-1,k-2), etc. The
-       ! edge-parallel velocity w is not stored.
+       ! Z edges: map cell corners into corner_z slots.
        if (okp_x .and. okp_y .and. oka_z) then   ! qRT -> LL slot
           corner_z%density(i-1,j-1,k-2,iqLL) = r + (+drx+dry)
           corner_z%velocity_x(i-1,j-1,k-2,iqLL) = u + (+dux+duy)
@@ -2035,10 +1789,9 @@ contains
 #endif
 #if NVAR>5+NENER
 
-       ! ---- Passive-scalar advection predictor (CPU trace3d:1423-1448) --------
        ! Uses the ORIGINAL cell velocities (re-read from local_subgrid once,
        ! hoisted out of the scalar loop), not predicted.
-       ! Scalar slopes come from compute_tvd_slopes (dscal_*, v4.1).
+       ! Passive-scalar slopes from compute_tvd_slopes.
        uscal = local_subgrid%velocity_x(i,j,k)
        vscal = local_subgrid%velocity_y(i,j,k)
        wscal = local_subgrid%velocity_z(i,j,k)
@@ -2291,7 +2044,7 @@ contains
     else if (riemann .eq. solver_hll) then
        flux = hll_mhd_fluxes(left_state_p, right_state_p, gamma, smallr, smallc)
     else
-       ! TODO: add solver_llf / solver_roe / solver_upwind here.
+       ! Unimplemented 1D solvers fall back to HLL.
        flux = hll_mhd_fluxes(left_state_p, right_state_p, gamma, smallr, smallc)   ! fall back to HLL
     endif
 #else
@@ -2311,28 +2064,7 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  !> @brief
-  !> Driver for the Riemann solvers. This subroutine handles arranging the interface states and reading/writing data from shared memory.
-  !> Under MHD it rotates the magnetic field along with the velocity into the
-  !> face-normal frame (the CPU bn,bt1,bt2 / ln,lt1,lt2 permutations, cmpflxm
-  !> umuscl.f90:131-204), dispatches the MHD solvers through riemann_fluxes, and
-  !> advects the passive scalars with the same SL/SR HLL flux as the CPU
-  !> (find_mhd_flux: ff(s)=d*u*s, cvar(s)=d*s; godunov_utils.f90:1332-1335).
-  !> At NDIM=3 the magnetic-flux slots (Bx/By/Bz) are written but never consumed --
-  !> B is advanced by constrained transport (the EMF curl in C5), not by these
-  !> face fluxes (CPU guards the face-flux B update #if NDIM<3, godunov_fine:771).
-  !>
-  !> @param[in,out] left_interfaces_x : The left interfaces at the i+1/2 interfaces. The fluxes along the X interfaces are returned in this array
-  !> @param[in] right_interfaces_x : The right interfaces at the i-1/2 interfaces.
-  !> @param[in,out] left_interfaces_y : The left interfaces at the j+1/2 interfaces. The fluxes along the Y interfaces are returned in this array
-  !> @param[in] right_interfaces_y : The right interfaces at the j-1/2 interfaces.
-  !> @param[in,out] left_interfaces_z : The left interfaces at the k+1/2 interfaces. The fluxes along the Z interfaces are returned in this array
-  !> @param[in] right_interfaces_z : The right interfaces at the k-1/2 interfaces.
-  !> @param[in] gamma : The adiabatic index
-  !> @param[in] smallr, smallc : Density floor + floor value used by the active solver
-  !>           (MHD passes smallc; hydro passes smallc2 through this slot).
-  !> @param[in] thread_idx : The index of this thread
-  !>
+  !> Riemann driver: rotates MHD states to face-normal frame and computes fluxes.
   attributes(device) subroutine riemann_driver(left_interfaces_x, right_interfaces_x, left_interfaces_y, &
        & right_interfaces_y, left_interfaces_z, right_interfaces_z, thread_idx, &
        & gamma, smallr, smallc, riemann)
@@ -2501,9 +2233,7 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  !> Zero the conserved fluxes at faces touching a refined cell. Under MHD this
-  !> also zeroes the passive-scalar fluxes and the unused-in-3D transverse-B
-  !> advection fluxes, for CPU fidelity (CPU godunov_fine.f90:648-664).
+  !> Zero fluxes at refined faces (MHD: includes scalar and transverse-B slots).
   attributes(device) subroutine zero_fine_fluxes(local_subgrid, fluxes_x, fluxes_y, fluxes_z, thread_idx)
     type(subgrid_6x6x6cell_primitive), intent(in)    :: local_subgrid
     type(subgrid_3x2x2cell_primitive), intent(inout) :: fluxes_x
@@ -2590,14 +2320,7 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  !> Conservative update at the current level. Under MHD this also updates the
-  !> passive scalars (CPU godunov_fine.f90:764-769) and advances the 6 face-B of
-  !> each cell by the discrete curl of the EMFs (constrained transport, CPU
-  !> godunov_fine.f90:823-861), with the EMF *dt/dx scaling APPLIED EXACTLY ONCE
-  !> HERE (the trace and EMF solve keep raw E). bnew was pre-loaded with bold by
-  !> set_unew, so bnew = bold + dt/dx*curl(E). Each cell writes its own 6 faces
-  !> -- no atomics at the current level (the shared oct-boundary edges get
-  !> identical EMFs from both blocks, preserving the face-B redundancy / divB).
+  !> Conservative update; MHD also updates scalars and face-B via CT.
   attributes(device) subroutine conservative_update(unew, bnew, nbor, fluxes_x, fluxes_y, fluxes_z, &
 #ifdef MHD
        & emfx, emfy, emfz, &
@@ -2702,10 +2425,7 @@ contains
 
 #endif
 #ifdef MHD
-       ! ---- Constrained-transport update of the 6 face-B (CPU :823-861) -------
-       ! EMF indices are in the per-orientation edge frame (v4.1 family); (i,j,k)
-       ! here is the oct-local cell coord {0,1} (i_subgrid_idx==1 for nsubgrid=1).
-       ! *dtdx ONCE.
+       ! Constrained-transport curl of edge EMFs advances face-B.
        dflux = ( (emfy%edge_e(i,j,k)-emfy%edge_e(i,j,k+1)) - (emfz%edge_e(i,j,k)-emfz%edge_e(i,j+1,k)) ) * dtdx
        bnew(cell_idx, 1, oct_idx) = bnew(cell_idx, 1, oct_idx) + dflux
        dflux = ( (emfy%edge_e(i+1,j,k)-emfy%edge_e(i+1,j,k+1)) - (emfz%edge_e(i+1,j,k)-emfz%edge_e(i+1,j+1,k)) ) * dtdx
@@ -2726,12 +2446,7 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  !> Coarse/fine flux correction into the parent level. Under MHD it also
-  !> corrects the passive scalars (unew slot 5+n from the scalar flux) and, in
-  !> Part 2, applies the coarse/fine EMF correction (CPU godunov_fine.f90:
-  !> 1037-1282): at each of the central oct's 12 boundary edges the fine EMF is
-  !> averaged (*0.25*weight) into the coarse face-B of whichever of the (up to
-  !> 3) octs sharing the edge are coarse; weight=0.5 if any sharer is refined.
+  !> Coarse/fine flux correction; MHD also corrects scalars and edge EMFs.
   attributes(device) subroutine coarse_cell_update(grid, unew, bnew, father, nbor, fluxes_x, fluxes_y, fluxes_z, &
 #ifdef MHD
        & emfx, emfy, emfz, &
@@ -3093,20 +2808,10 @@ contains
     end if
 
 #ifdef MHD
-    ! =================================================================
-    ! Part 2: coarse/fine EMF correction (CPU godunov_fine.f90:1037-1282).
-    ! Done by thread 0; emfx/emfy/emfz are the fine EMFs in the per-orientation
-    ! edge frame (v4.1 family); offsets
-    ! (di,dj,dk) index the octs sharing each of the 12 boundary edges. c1/c2/c3 =
-    ! is_coarse for those neighbours (CPU .not.ok1/2/3); weight=0.5 if any is
-    ! refined. atomicadd handles other blocks correcting the same coarse cell.
-    ! NB the GPU edge arrays hold RAW E (C5 scales its own curl inline), whereas
-    ! the CPU h%emf* are stored dt/dx-scaled before this correction runs -- so
-    ! every dflux below carries the *dtdx that the CPU applied at store time.
-    ! =================================================================
+    ! Coarse/fine EMF correction at oct boundary edges.
     if (thread_idx == 0) then
 
-       ! ---- 4 EMFz edges ----
+       ! 4 EMFz edges
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c1,oc1,cc1)
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1,-1, 0, c2,oc2,cc2)
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c3,oc3,cc3)
@@ -3148,7 +2853,7 @@ contains
           if(c3)then; info=atomicadd(bnew(cc3,4,oc3),dflux);  info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
        end if
 
-       ! ---- 4 EMFx edges ----
+       ! 4 EMFx edges
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c1,oc1,cc1)
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1,-1, c2,oc2,cc2)
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c3,oc3,cc3)
@@ -3190,7 +2895,7 @@ contains
           if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,6,oc3),-dflux); endif
        end if
 
-       ! ---- 4 EMFy edges ----
+       ! 4 EMFy edges
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c1,oc1,cc1)
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0,-1, c2,oc2,cc2)
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c3,oc3,cc3)
@@ -3239,38 +2944,8 @@ contains
   ! =========================================================================
 
 #ifdef MHD
-  ! #########################################################################
-  ! ##  MHD-ONLY DEVICE ROUTINES (no hydro analog)                         ##
-  ! ##                                                                     ##
-  ! ##  The MHD pipeline stages that extend the hydro routines above are   ##
-  ! ##  merged INTO them as #ifdef MHD blocks (CPU umuscl.f90 style). What ##
-  ! ##  remains here are the MHD-only pieces with no hydro counterpart:    ##
-  ! ##  face_b_tvd_slope (dbf), the passive-scalar flux helpers, the 2D    ##
-  ! ##  EMF corner gather/solve (cmp_mag_flx_mhd), zero_euler_fluxes_mhd,  ##
-  ! ##  zero_fine_emf, and get_cf_cell. They re-host the adversarially-    ##
-  ! ##  verified plane-sweep physics from history (git show               ##
-  ! ##  6e6a715b:gpu/gpu_hydro.cuf) and the CPU originals in              ##
-  ! ##  hydro/umuscl.f90 + hydro/godunov_fine.f90; math/signs/floors are   ##
-  ! ##  unchanged. EVERY working buffer lives in shared memory (B1 budget):##
-  ! ##  the four corner states are stored only on the consumed oct-edge    ##
-  ! ##  lattice (the subgrid_*edge_corner family) and the face-B transverse##
-  ! ##  slopes (dbf) are recomputed inline from the shared bf              ##
-  ! ##  (face_b_tvd_slope). The kernel therefore needs NO global scratch.  ##
-  ! #########################################################################
 
-  ! =========================================================================
-  !> @brief (Stage B3) Face-B transverse TVD slope (CPU dbf). The MHD-only
-  !> slope with no hydro analog: a pure 3-point limiter on the face-centred B,
-  !> the inline dbf branch of CPU uslope (umuscl.f90:2255-2333), selected at
-  !> runtime by slope_mag (0: first order -> zero slope). Returns a RAW
-  !> value-slope (no 1/dx, no 1/2). The trace (C1) calls this inline on the
-  !> shared bf for the 12 face-slopes each cell consumes -- dbf is never
-  !> stored (the former whole-subgrid mhd_dbf_scratch global spill is gone;
-  !> recomputing from shared is cheaper than a global round-trip).
-  !>
-  !> @param[in] bm, b0, bp  : face-B at the stencil points (t-1, t, t+1) along
-  !>                          the transverse direction of the slope
-  !> @param[in] slope_mag   : magnetic slope limiter id (slope_mag_type)
+  ! Transverse TVD slope on face-centred B (3-point limiter).
   attributes(device) function face_b_tvd_slope(bm, b0, bp, slope_mag) result(db)
     real(kind=dp), value :: bm, b0, bp
     integer, value :: slope_mag
@@ -3289,13 +2964,8 @@ contains
     slop = min(abs(dlft),abs(drgt)); dlim = merge(zero, slop, (dlft*drgt) <= zero)
     db = dsgn*min(dlim,abs(dcen))
   end function face_b_tvd_slope
-  ! =========================================================================
 
-  ! =========================================================================
-  !> @brief (Stage C2 helper) Passive-scalar interface flux, matched to the chosen
-  !> 1D solver: HLLD upwinds by the (HLLD) mass flux fdens (CPU riemann_hlld:1240-
-  !> 1244, fgdnv(s)=fgdnv(1)*qleft/qright); HLL (and the fall-throughs) use the full
-  !> HLL flux on (rho*u*s) with the same SL/SR as the MHD core (CPU riemann_hll_mhd).
+  ! Passive-scalar flux matched to the active 1D MHD solver.
   attributes(device) function scalar_flux(riemann, fdens, speed_l, speed_r, rhoL, uL, sL, rhoR, uR, sR) result(fs)
     ! NB: Fortran is case-insensitive, so the wave speeds cannot be named SL/SR
     ! alongside the scalar values sL/sR (duplicate dummy); they follow the
@@ -3313,10 +2983,7 @@ contains
        fs = hll_flux(speed_l, speed_r, rhoL*uL*sL, rhoR*uR*sR, rhoL*sL, rhoR*sR)
     endif
   end function scalar_flux
-  ! =========================================================================
 
-  ! =========================================================================
-  !> @brief Return the HLL/LLF hydro wave speeds used by scalar HLL fluxes.
   attributes(device) subroutine hll_hydro_wavespeeds(left, right, gamma, riemann, SL, SR)
     type(primitive_t), intent(in) :: left, right
     real(kind=dp), value :: gamma
@@ -3335,14 +3002,8 @@ contains
        SR = max(max(left%velocity_x, right%velocity_x) + max(sound_speed_l, sound_speed_r), 0.0_dp)
     endif
   end subroutine hll_hydro_wavespeeds
-  ! =========================================================================
 
-  ! =========================================================================
-  !> @brief (Stage C2 helper) Return the HLL fast-magnetosonic wave speeds SL/SR
-  !> for the 1D MHD Riemann problem, identical to the speed computation inside
-  !> hll_mhd_fluxes (B4) -- recomputed here (rather than modifying B4, which is
-  !> frozen) so the passive-scalar HLL flux in riemann_driver uses the same
-  !> SL/SR as the MHD-core flux. Floors match B4 (no-ops for realistic states).
+  ! Fast-magnetosonic HLL wave speeds for passive-scalar MHD fluxes.
   attributes(device) subroutine hll_mhd_wavespeeds(left, right, gamma, smallr, smallc, SL, SR)
     type(primitive_t), intent(in) :: left, right
     real(kind=dp), value :: gamma, smallr, smallc
@@ -3366,19 +3027,8 @@ contains
     SL = min(min(ul, ur) - max(cfleft, cfright), 0.0_dp)
     SR = max(max(ul, ur) + max(cfleft, cfright), 0.0_dp)
   end subroutine hll_mhd_wavespeeds
-  ! =========================================================================
 
-
-  ! =========================================================================
-  !> @brief (Stage C3 helpers) Read one edge corner state from the shared
-  !> edge-corner buffer and permute it into the canonical 2D-Riemann frame.
-  !> One function per edge orientation, the per-corner half of the CPU
-  !> cmp_mag_flx gather (umuscl.f90:1640-1685): solver velocity_x/y <- the two
-  !> in-plane velocities (CPU lp1/lp2), solver Bx/By <- the two in-plane B
-  !> (bp1/bp2, continuity applied later in emf_solve), solver Bz <- the
-  !> edge-parallel B (bor). The edge-parallel velocity (CPU lor) is consumed by
-  !> NO 2D EMF solver and is not stored; the dead solver velocity_z slot is
-  !> zero-filled so it is never undefined.
+  ! Permute edge corner state into the 2D Riemann frame (x edges).
   attributes(device) function gather_corner_x(c, islot, I, J, K) result(q)
     type(subgrid_2x3x3edge_corner), intent(in) :: c
     integer, value :: islot, I, J, K
@@ -3423,13 +3073,8 @@ contains
     q%By         = c%By(I,J,K,islot)
     q%Bz         = c%Bz(I,J,K,islot)
   end function gather_corner_z
-  ! =========================================================================
 
-  ! =========================================================================
-  !> @brief (Stage C3 helper) Enforce the parallel-B continuity of cmp_mag_flx
-  !> (umuscl.f90:1669-1685) on the four (already permuted) corner states, then
-  !> call the selected 2D EMF solver (HLLF/HLLD). Bx holds parallel-B-1 (bp1), By parallel-B-2
-  !> (bp2); both are made single-valued across their respective edge directions.
+  ! Apply parallel-B continuity and dispatch the 2D EMF solver.
   attributes(device) function emf_solve(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
        & switch_llf_dmin, switch_llf_pmin, riemann2d) result(E)
     type(primitive_t), intent(in) :: qLL, qLR, qRL, qRR
@@ -3448,22 +3093,8 @@ contains
     E = riemann2d_emf(sLL, sLR, sRL, sRR, gamma, smallr, smallc, &
          & switch_llf_dmin, switch_llf_pmin, riemann2d)
   end function emf_solve
-  ! =========================================================================
 
-  ! =========================================================================
-  !> @brief (Stage C3) Whole-subgrid EMF solve. The MHD-only stage with no hydro
-  !> analog. Mirrors the three CPU cmp_mag_flx calls (umuscl.f90:220-265). For
-  !> each output edge (I,J,K) of the oct (v4.1 edge family: 3x3 edge lines
-  !> transverse x 2*nsubgrid segments along the edge direction, 18 per
-  !> orientation) and each orientation it reads the four corner slots of that
-  !> edge from the shared corner_x/y/z buffers -- shift-free: the CPU's
-  !> orientation-specific gather shifts (and the qRT/qRB/qLT/qLB ->
-  !> qLL/qLR/qRL/qRR remap, umuscl.f90:220-258) were applied at the WRITE side
-  !> in trace_3d, so slot iqLL of edge (I,J,K) already holds what the CPU
-  !> gather would fetch. The per-orientation component permutation into the 2D
-  !> solver frame happens in gather_corner_x/y/z. emf_solve then enforces the
-  !> parallel-B continuity and dispatches the 2D solver. RAW E is stored (the
-  !> dt/dx scaling is applied once per consumer, C5/C6).
+  ! Solve edge EMFs on the oct subgrid from stored corner states.
   attributes(device) subroutine cmp_mag_flx_mhd(corner_x, corner_y, corner_z, emfx, emfy, emfz, &
        & thread_idx, gamma, smallr, smallc, &
        & switch_llf_dmin, switch_llf_pmin, riemann2d)
@@ -3480,19 +3111,11 @@ contains
     type(primitive_t) :: qLL, qLR, qRL, qRR
     real(kind=dp) :: E
 
-    ! 18 edges per orientation (v4.1 edge family): 3x3 edge lines in the
-    ! transverse plane x 2*nsubgrid segments along the edge direction.
     emf_size = (2*nsubgrid+1)**2 * (2*nsubgrid)
 
-    ! Unified gather -> ONE emf_solve call site -> scatter: the orientation
-    ! sub-branches split lanes of the same warp, so branching the full 2D
-    ! solver per orientation made each warp execute the inlined HLLD/HLL EMF
-    ! body once per sub-branch it covers (and inlined three copies of it).
-    ! Only the cheap per-orientation corner gathers and the one store diverge;
-    ! operands are identical, so the arithmetic is bitwise unchanged.
     do work_idx = thread_idx, emf_size*3 - 1, blockDim%x
        if (work_idx < emf_size) then
-          ! ---- EMF z (orientation 3): lp1=2 lp2=3 lor=4, bp1=6 bp2=7 bor=8 ----
+          ! EMF z (orientation 3): lp1=2 lp2=3 lor=4, bp1=6 bp2=7 bor=8
           ! Edges parallel to z: I,J in [0,2*nsubgrid], K in [0,2*nsubgrid-1].
           call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
           qLL = gather_corner_z(corner_z, iqLL, I, J, K)
@@ -3500,7 +3123,7 @@ contains
           qLR = gather_corner_z(corner_z, iqLR, I, J, K)
           qRR = gather_corner_z(corner_z, iqRR, I, J, K)
        else if (work_idx < 2*emf_size) then
-          ! ---- EMF y (orientation 2): lp1=4 lp2=2 lor=3, bp1=8 bp2=6 bor=7 ----
+          ! EMF y (orientation 2): lp1=4 lp2=2 lor=3, bp1=8 bp2=6 bor=7
           ! Edges parallel to y: I,K in [0,2*nsubgrid], J in [0,2*nsubgrid-1].
           call index_1Dto3D(work_idx - emf_size, 2*nsubgrid+1, 2*nsubgrid, I, J, K)
           qLL = gather_corner_y(corner_y, iqLL, I, J, K)
@@ -3508,7 +3131,7 @@ contains
           qLR = gather_corner_y(corner_y, iqLR, I, J, K)
           qRR = gather_corner_y(corner_y, iqRR, I, J, K)
        else
-          ! ---- EMF x (orientation 1): lp1=3 lp2=4 lor=2, bp1=7 bp2=8 bor=6 ----
+          ! EMF x (orientation 1): lp1=3 lp2=4 lor=2, bp1=7 bp2=8 bor=6
           ! Edges parallel to x: J,K in [0,2*nsubgrid], I in [0,2*nsubgrid-1].
           call index_1Dto3D(work_idx - 2*emf_size, 2*nsubgrid, 2*nsubgrid+1, I, J, K)
           qLL = gather_corner_x(corner_x, iqLL, I, J, K)
@@ -3533,15 +3156,8 @@ contains
     call syncthreads()
 
   end subroutine cmp_mag_flx_mhd
-  ! =========================================================================
 
-  ! =========================================================================
-  !> @brief Pure-induction (kinematic dynamo) mode: zero ALL Euler fluxes so the
-  !> conservative update leaves rho/momentum/energy/scalars untouched and only
-  !> the CT update advances B. Mirrors CPU godunov_fine.f90:667
-  !> (`if(r%induction)h%flux=0.0d0`); zeroing the flux arrays (rather than
-  !> gating the consumers) keeps C5/C6 and the coarse/fine Part-1 correction
-  !> bit-identical to the CPU. Called from the kernel only when induction.
+  ! Zero MHD Euler fluxes when induction-only CT is active.
   attributes(device) subroutine zero_euler_fluxes_mhd(fluxes_x, fluxes_y, fluxes_z, thread_idx)
     type(subgrid_3x2x2cell_primitive), intent(inout) :: fluxes_x
     type(subgrid_2x3x2cell_primitive), intent(inout) :: fluxes_y
@@ -3594,14 +3210,8 @@ contains
     call syncthreads()
 
   end subroutine zero_euler_fluxes_mhd
-  ! =========================================================================
 
-  ! =========================================================================
-  !> @brief (Stage C4b) Zero an edge EMF if ANY of the (up to 4) cells touching
-  !> that edge is refined. Port of CPU godunov_fine.f90:672-708. The edge (I,J,K)
-  !> in the local frame (v4.1 anisotropic edge family: 18 edges per orientation)
-  !> is at subgrid corner (X,Y,Z)=(I+2,J+2,K+2); the
-  !> four cells are the CPU okloc(i3-+..) neighbours mapped to the subgrid.
+  ! Zero edge EMF when any adjacent cell is refined.
   attributes(device) subroutine zero_fine_emf(local_mhd, emfx, emfy, emfz, thread_idx)
     type(subgrid_6x6x6cell_primitive), intent(in) :: local_mhd
     type(subgrid_2x3x3edge_primitive), intent(inout) :: emfx
@@ -3637,16 +3247,8 @@ contains
     call syncthreads()
 
   end subroutine zero_fine_emf
-  ! =========================================================================
 
-  ! =========================================================================
-  !> @brief (Stage C6 helper) For the neighbouring oct at oct-offset (di,dj,dk)
-  !> from this block's central oct, report whether it is a COARSE (cache) oct and,
-  !> if so, the parent coarse oct index + cell index it stands for. This is the
-  !> GPU analog of the CPU childloc/gridloc/cellloc lookup: a cache oct has index
-  !> > ngridmax (it represents an unrefined level-(ilevel-1) cell); its coarse cell
-  !> is father(cache) + the ckey-derived child position (same idiom as the hydro
-  !> coarse_cell_update). is_coarse maps to the CPU .not.ok(childloc).
+  ! Map cache oct to parent coarse cell for coarse/fine corrections.
   attributes(device) subroutine get_cf_cell(nbor, grid, father, subgrid_idx, ngridmax, &
        & di, dj, dk, is_coarse, coct, ccell)
     integer(kind=4), device :: nbor(1:subgridsize,*)
@@ -3670,76 +3272,11 @@ contains
        coct = fidx
     end if
   end subroutine get_cf_cell
-  ! =========================================================================
 
 #endif
 
-  ! ##########################################################################
-  ! ## STAGE B1: hydro_integrator_kernel (MHD) SHARED-MEMORY BUDGET           ##
-  ! ##########################################################################
   !
-  ! The fused MHD Godunov+CT kernel keeps EVERY working buffer in shared memory
-  ! -- no global scratch, mirroring the hydro kernel. Four observations shape
-  ! the footprint (1-2 made it fit where the cell-indexed design (~202 KB)
-  ! could not; 3-4 are the 2026-06-11 occupancy diet, NCU-driven: static
-  ! shared was the occupancy limiter at 7 blocks/SM on A100):
-  !
-  !   1. The four 2D-Riemann corner states are consumed ONLY on the oct's edges
-  !      (3x3x2 = 18 edges per orientation at nsubgrid=1, 4 corner slots each),
-  !      so they are stored on that edge lattice (the subgrid_*edge_corner
-  !      family) instead of the full 6^3 cell lattice: 165888 B -> 12096 B
-  !      (the edge-parallel velocity is not stored -- no 2D solver reads it).
-  !   2. The face-B transverse slopes (CPU dbf) are a pure 3-point limiter of
-  !      the shared bf, so the trace recomputes the 12 values each cell needs
-  !      inline (face_b_tvd_slope) instead of staging them anywhere.
-  !   3. The cell-centred B (CPU ctoprim q(6:8)) is NOT stored: every consumer
-  !      recomputes it as 0.5*(bf_low + bf_high) from the shared bf (the trace
-  !      gets it free from the AL..CR registers it already loads). This is
-  !      bitwise equal to the own-face average the CPU stores BECAUSE the two
-  !      stored copies of every face are maintained bitwise identical (the
-  !      face-B redundancy invariant that CT preserves and divB requires).
-  !      -3*216 reals.
-  !   4. Exact extents everywhere: bf drops the never-read outermost low plane
-  !      of each component (-3*36 reals); `refined` is stored byte-wide on the
-  !      consumed [1,2*nsubgrid+2]^3 lattice only (zero_fine_fluxes /
-  !      zero_fine_emf read nothing else); edge_e/emf/corner families were
-  !      already exact.
-  !
-  ! Resident shared per block (nsubgrid=1, nvar=8, FP64; refined = 1 B):
-  !   (A) subgrid_6x6x6cell_primitive  5*216*8 + 64*1          =  8704 B
-  !       (P0 pad REVERTED: unpadded stride-6 rows are required by the
-  !       lexicographic fill -- linear shared offset == work_idx -- and the
-  !       pad measured as a no-op on job 2823239)
-  !       scalar_subgrid (nvar-5=3)        3*216*8                 =  5184 B
-  !   (B) subgrid_face_b_t (bf, trimmed)   3*180*8                 =  4320 B
-  !   (D) subgrid_edge_e_t                  REMOVED (P1)            =     0 B
-  !       (was 3*(4*5*5)*8 = 2400 B; recomputed inline via edge_e_{x,y,z})
-  !   (E) emfx+emfy+emfz (v4.1 family)     3*18*8                  =   432 B
-  !   (F) corner_x/y/z (4 slots * 18 edges
-  !       * 7 fields per orientation)      3*4032                  = 12096 B
-  !   (G) 6 MHD interface arrays (11-wide) 6*12*11*8               =  6336 B
-  !       ------------------------------------------------------------------
-  !       TOTAL resident                                           = 37072 B
-  !                  = 36.2 KB < 48 KB static limit.
-  !
-  ! At NPRE=4 (the production A100 config) the reals halve: NCU measured
-  ! 15832 B static with the P0 pad -> 9 blocks/SM (164 KB carveout, +1 KB/block
-  ! driver reserve). Unpadded this is 15112 B -> (15112+1024)*10 = 161360
-  ! <= 167936 -> 10 blocks/SM, theoretical occupancy 28.1% -> 31.25%, PROVIDED
-  ! registers stay <= 102/thread (96 at fc782d7a; if a future change pushes
-  ! past 102, -gpu=maxregcount on gpu_hydro.o restores the cap). The next
-  ! shmem lever (11 blocks needs <14246 B) is slimming the corner_x/y/z
-  ! family (-6048 B FP32) -- physics audit first.
-  !
-  ! Reference: hydro_integrator_kernel resident shared is 12384 B = 12.1 KB
-  ! (subgrid_6x6x6cell_primitive 9504 + 6 interface arrays 2880); the hydro
-  ! build shares the unpadded type and the lexicographic fill (both are
-  ! solver-agnostic wins); everything else is inside #ifdef MHD.
-  ! NOTE: reducing threads/block does NOT shrink per-block shared memory (the
-  ! subgrids are sized by nsubgrid, compile-time); raising nsubgrid past 1 will
-  ! NOT fit (the corner family alone grows ~5.6x at nsubgrid=2) -- re-derive
-  ! this budget before touching nsubgrid.
-  ! ##########################################################################
+  ! Fused MHD Godunov+CT kernel; working buffers live in shared memory.
 
 #ifndef PAPER
   attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, bold, bnew, &
@@ -3754,8 +3291,7 @@ contains
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
-    ! Face-centred B (1:3 low faces, 4:6 high faces). Unallocated and unused
-    ! without MHD; passed unconditionally so the launch site is solver-agnostic.
+    ! Face-centred B; unused without MHD.
     real(kind=dp), device :: bold(1:twotondim,1:6,*)
     real(kind=dp), device :: bnew(1:twotondim,1:6,*)
     integer(kind=4), intent(in), value :: head_idx
@@ -3781,12 +3317,8 @@ contains
     real(kind=dp), shared :: scalar_subgrid(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
 #endif
 #ifdef MHD
-    ! MHD-only resident shared buffers -- see the shared-memory budget block
-    ! above: 39472 B total at nsubgrid=1, nvar=8, FP64 (~19.8 KB at NPRE=4)
-    ! -> fits the 48 KB static limit with ~8.5 KB headroom.
+    ! MHD shared buffers for face-B, edge EMFs, and corner states.
     type(subgrid_face_b_t), shared :: bf
-    ! P1 diet: resident subgrid_edge_e_t (1200 B FP32) removed -- the 12 edge-E
-    ! values each cell needs are recomputed inline in trace_3d via edge_e_{x,y,z}.
     type(subgrid_2x3x3edge_primitive), shared :: emfx
     type(subgrid_3x2x3edge_primitive), shared :: emfy
     type(subgrid_3x3x2edge_primitive), shared :: emfz
@@ -3812,9 +3344,7 @@ contains
     ! thread guard, probably not needed since num_blocks should always be equal to num_subgrids
     if (block_idx >= num_subgrids) return
 
-    ! =======================================================================
     ! Convert from conserved to primitive variables
-    ! =======================================================================
     call subgrid_conserved_2_primitive(grid, uold, bold, f, constant_gravity, nbor, &
 #if NVAR>5+NENER
          & scalar_subgrid, &
@@ -3824,9 +3354,7 @@ contains
 #endif
          & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
 
-    ! =======================================================================
     ! Perform tracing step and compute the interface states
-    ! =======================================================================
     ! This will compute the interface states and write them to shared memory
     call trace_3d(local_subgrid, thread_idx, &
 #if NVAR>5+NENER
@@ -3839,9 +3367,7 @@ contains
          & left_interfaces_x, right_interfaces_x, left_interfaces_y, right_interfaces_y, &
          & left_interfaces_z, right_interfaces_z, gamma, smallr, smallc2, dtdx, slope)
 
-    ! =======================================================================
     ! Compute the fluxes.
-    ! =======================================================================
     ! This will compute the fluxes and write them to shared memory. Note that
     ! it writes the fluxes to the `left_interfaces_?` arrays and that those
     ! fluxes are in the conserved variables despite what the member variables
@@ -3851,9 +3377,7 @@ contains
          & gamma, smallr, smallc, riemann)
 
 #ifdef MHD
-    ! Pure induction: zero the Euler fluxes so only the CT update acts
-    ! (CPU godunov_fine.f90:667). induction is block-uniform, so the
-    ! syncthreads inside the call is safe.
+    ! Zero Euler fluxes when induction-only CT is active.
     if (induction) then
        call zero_euler_fluxes_mhd(left_interfaces_x, left_interfaces_y, left_interfaces_z, thread_idx)
     endif
@@ -3863,9 +3387,7 @@ contains
          & gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin, riemann2d)
 #endif
 
-    ! =======================================================================
     ! Zero fluxes at boundaries with finer levels.
-    ! =======================================================================
     if (ilevel < levelmax) then
        call zero_fine_fluxes(local_subgrid, left_interfaces_x, left_interfaces_y, left_interfaces_z, thread_idx)
 #ifdef MHD
@@ -3873,9 +3395,7 @@ contains
 #endif
     endif
 
-    ! =======================================================================
     ! Update the conserved variables at current level.
-    ! =======================================================================
     call conservative_update(unew, bnew, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, &
 #ifdef MHD
          & emfx, emfy, emfz, &
@@ -3883,9 +3403,7 @@ contains
          & head_idx, block_idx, &
          & thread_idx, dtdx)
 
-    ! =======================================================================
     ! Update the conserved variables at coarser level.
-    ! =======================================================================
     if (ilevel > levelmin) then
        call coarse_cell_update(grid, unew, bnew, father, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, &
 #ifdef MHD
@@ -3897,9 +3415,7 @@ contains
   end subroutine hydro_integrator_kernel
 
 #endif
-  ! =========================================================================
 
-  ! =========================================================================
   attributes(device) subroutine hydro_crit(prim_lft, prim_mid, prim_rgt, ok, &
        & err_grad_d, err_grad_p, floor_d, floor_p)
     type(primitive_t) :: prim_lft, prim_mid, prim_rgt
@@ -3926,17 +3442,15 @@ contains
     endif
 
   end subroutine hydro_crit
-  ! =========================================================================
 
 #ifdef MHD
-  ! =========================================================================
-  ! Stage D2: MHD refinement criteria (CPU hydro_refine MHD branches,
-  ! godunov_utils.f90:157-208).  Takes the cell-centred B (0.5*(b_lo+b_hi) per
-  ! axis) of the left / mid / right cells; derives emag = sum 0.5*Bd^2 exactly as
-  ! the host (note pg/pm/pd are emag here, not thermal pressure), then applies the
-  ! magnetic-energy gradient (err_grad_b2) and the per-component B gradients
-  ! (err_grad_A/B/C).  Disabled criteria (namelist value < 0) are skipped, so the
-  ! defaults (-1.0) make this a no-op.
+  ! MHD AMR refinement criteria (magnetic energy and B gradients).
+  
+  
+  
+  
+  
+  
   attributes(device) subroutine hydro_crit_mhd(bc_lft, bc_mid, bc_rgt, ok, &
        & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C)
     real(kind=dp) :: bc_lft(1:3), bc_mid(1:3), bc_rgt(1:3)
@@ -3952,7 +3466,7 @@ contains
 
     ok = .false.
 
-    ! Cell-centred magnetic energy (CPU emagg/emagm/emagd)
+    ! Cell-centred magnetic energy at three stencil points.
     emagg = 0.0_dp; emagm = 0.0_dp; emagd = 0.0_dp
     do idim = 1, 3
        emagg = emagg + 0.5_dp*bc_lft(idim)**2
@@ -3960,7 +3474,7 @@ contains
        emagd = emagd + 0.5_dp*bc_rgt(idim)**2
     end do
 
-    ! Magnetic-energy gradient (pg/pm/pd = emag, not thermal pressure)
+    ! Magnetic-energy gradient criterion.
     if (err_grad_b2 >= 0.0_dp) then
        pg = emagg; pm = emagm; pd = emagd
        error = 2.0_dp*max( &
@@ -3969,7 +3483,7 @@ contains
        if (error > err_grad_b2) ok = .true.
     endif
 
-    ! Per-component cell-centred B gradients (Bx/By/Bz), scaled by sqrt(emag)
+    ! Per-component B gradient criteria.
     if (err_grad_A >= 0.0_dp) then
        vg = bc_lft(1); vm = bc_mid(1); vd = bc_rgt(1)
        cg = sqrt(emagg); cm = sqrt(emagm); cd = sqrt(emagd)
@@ -3998,17 +3512,14 @@ contains
     endif
 
   end subroutine hydro_crit_mhd
-  ! =========================================================================
 #endif
 
-  ! =========================================================================
   attributes(global) subroutine hydro_flag_kernel(flag1, grid, nbor, uold, bold, head_idx, num_octs, &
        & gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p, &
        & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C)
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
-    ! Face-centred B. Unallocated and unused without MHD; passed unconditionally
-    ! so the launch site is solver-agnostic (mirrors hydro_integrator_kernel).
+    ! Face-centred B; unused without MHD.
     real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
     integer(kind=4), device :: flag1(1:twotondim,*)
@@ -4018,8 +3529,7 @@ contains
     real(kind=dp), intent(in), value :: smallr, smallc2
     real(kind=dp), intent(in), value :: err_grad_d, floor_d
     real(kind=dp), intent(in), value :: err_grad_p, floor_p
-    ! MHD refinement thresholds (Stage D2). Passed unconditionally; unused
-    ! without MHD.
+    ! MHD refinement thresholds (unused when namelist < 0).
     real(kind=dp), intent(in), value :: err_grad_b2, floor_b2
     real(kind=dp), intent(in), value :: err_grad_A, floor_A
     real(kind=dp), intent(in), value :: err_grad_B, floor_B
@@ -4032,8 +3542,7 @@ contains
     type(conserved_t) :: cons_lft, cons_mid, cons_rgt
     logical :: ok
 #ifdef MHD
-    ! Cell-centred B (0.5*(b_lo+b_hi) per axis) of the left/mid/right cells, for
-    ! the D2 MHD refinement criteria.
+    ! Cell-centred B for MHD refinement criteria.
     real(kind=dp) :: bc_lft(1:3), bc_mid(1:3), bc_rgt(1:3)
     logical :: ok_mhd
 #endif
@@ -4145,8 +3654,7 @@ contains
        if (ok) flag1(cell_idx, oct_idx) = 1
 
 #ifdef MHD
-       ! MHD refinement criteria (Stage D2): magnetic-energy / B-component
-       ! gradients on the cell-centred B (CPU hydro_refine MHD branches).
+       ! MHD refinement on magnetic energy and B-component gradients.
        call hydro_crit_mhd(bc_lft, bc_mid, bc_rgt, ok_mhd, &
             & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C)
        if (ok_mhd) flag1(cell_idx, oct_idx) = 1
@@ -4155,9 +3663,7 @@ contains
     end do
 
   end subroutine hydro_flag_kernel
-  ! =========================================================================~
 
-  ! =========================================================================
   attributes(global) subroutine upload_kernel(grid, father, uold, bold, head_idx, num_octs, &
        & internal_energy, gamma, smallr, smallc2)
     type(oct), device :: grid(*)
@@ -4171,7 +3677,7 @@ contains
 
     integer :: tid, bid, cell_idx, oct_idx
     integer :: ind, father_idx, i, j, k
-    integer :: ivar ! Conserved-variable slot (1:nvar, CPU upload_fine parity)
+    integer :: ivar
     integer :: idim ! Spatial dimension (face-B restriction / energy split)
     real(kind=dp) :: eint_sum, ekin, erad, emag ! internal-energy restriction
 #ifndef MHD
@@ -4198,9 +3704,7 @@ contains
     k = grid(oct_idx)%ckey(3) - 2 * grid(father_idx)%ckey(3)
     cell_idx = 1 + i + 2*j + 4*k
 
-    ! Reset conservative variables and average the children, over ALL nvar slots
-    ! (CPU upload_fine does ivar=1,nvar, upload.f90:141-149 -- the passive
-    ! scalars at 6:nvar are restricted exactly like the five core variables).
+    ! Restrict all conserved variable slots.
     do ivar = 1, nvar
        uold(cell_idx, ivar, father_idx) = 0_dp
        do ind = 1, twotondim
@@ -4208,12 +3712,7 @@ contains
        end do
     end do
 
-    ! Restriction of the face-centred B field (mirrors CPU upload_fine, upload.f90:118-195).
-    ! A parent face-B is the area-average of the child faces lying ON that parent face
-    ! (twotondim/2 = 4 children share each parent face), NOT the twotondim volume average
-    ! used above for uold. This averaging preserves the face-B redundancy across the parent
-    ! level: a shared coarse face is the mean of the 4 fine faces on it, and those fine
-    ! faces are pairwise equal across the two coarse cells, so divB stays at round-off.
+    ! Restrict face-B by averaging child faces on each parent face.
 #ifdef MHD
     ! Child cells whose low/high face on each axis lies on the corresponding parent face
     hh(1,1:4) = (/1,3,5,7/) ! low-x face children
@@ -4243,12 +3742,7 @@ contains
     end do
 #endif
 
-    ! Average INTERNAL energy instead of total energy (internal_energy), mirroring CPU
-    ! upload_fine (upload.f90:222-262). The slot-5 average above is TOTAL energy; when
-    ! interpol_var==1 we OVERWRITE it: per child eint = E - ekin - erad - emag, average
-    ! those, then add back the parent's ekin (+erad)(+emag) from the already-restricted
-    ! parent cell. Per the PI, the GPU kernel's MISSING interpol_var==1 guard (it always
-    ! averaged total energy) is the likely cause of the earlier hydro regression.
+    ! Overwrite total energy with averaged internal energy when requested.
     if (internal_energy) then
 #ifndef MHD
        smalle = smallc2/gamma/(gamma - 1.0_dp)
@@ -4261,9 +3755,7 @@ contains
           end do
           emag = 0.0_dp
 #ifdef MHD
-          ! Mirrors CPU upload.f90:233 EXACTLY: this emag is LINEAR in B
-          ! (0.125*(B_lo+B_hi), no square), unlike courant_fine's 0.125*(.)**2. Kept
-          ! bug-for-bug so the GPU restriction matches the CPU bit-for-bit.
+          ! Linear emag from face-B (matches restriction convention).
           do idim = 1, 3
              emag = emag + 0.125_dp*(bold(ind,idim,oct_idx)+bold(ind,idim+3,oct_idx))
           end do
@@ -4302,9 +3794,7 @@ contains
     end if
 
   end subroutine upload_kernel
-  ! =========================================================================
 
-  ! =========================================================================
   attributes(global) subroutine set_uold_kernel(uold, unew, bold, bnew, head_idx, num_octs)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
@@ -4339,7 +3829,7 @@ contains
     uold(cell_idx, 4, oct_idx) = unew(cell_idx, 4, oct_idx)
     uold(cell_idx, 5, oct_idx) = unew(cell_idx, 5, oct_idx)
 
-    ! Set bold to bnew (mirrors CPU set_uold, godunov_fine.f90:213 m%bold(:,:,i)=m%bnew(:,:,i)).
+    ! Copy bnew to bold.
 #ifdef MHD
     do ib = 1, 6
        bold(cell_idx, ib, oct_idx) = bnew(cell_idx, ib, oct_idx)
@@ -4353,9 +3843,7 @@ contains
 #endif
 
   end subroutine set_uold_kernel
-  ! =========================================================================
 
-  ! =========================================================================
   attributes(global) subroutine set_unew_kernel(uold, unew, bold, bnew, head_idx, num_octs)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
@@ -4390,7 +3878,7 @@ contains
     unew(cell_idx, 4, oct_idx) = uold(cell_idx, 4, oct_idx)
     unew(cell_idx, 5, oct_idx) = uold(cell_idx, 5, oct_idx)
 
-    ! Set bnew to bold (mirrors CPU set_unew, godunov_fine.f90:150 m%bnew(:,:,i)=m%bold(:,:,i)).
+    ! Copy bold to bnew.
 #ifdef MHD
     do ib = 1, 6
        bnew(cell_idx, ib, oct_idx) = bold(cell_idx, ib, oct_idx)
@@ -4404,9 +3892,7 @@ contains
 #endif
 
   end subroutine set_unew_kernel
-  ! =========================================================================
 
-  ! =========================================================================
   attributes(global) subroutine sync_hydro(uold, f, constant_gravity, head_idx, num_octs, gamma, smallr, smallc2, dt)
     real(kind=8), device :: constant_gravity(1:3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
@@ -4432,10 +3918,7 @@ contains
     cell_idx = threadIdx%x
 
 #ifdef MHD
-       ! MHD: apply the gravity source DIRECTLY on the conserved variables
-       ! (CPU synchro_hydro_fine, synchro_hydro_fine.f90:88-115). The magnetic
-       ! energy is never separated out -- it rides inside (E - kinetic), so it is
-       ! not folded into a gas pressure (D3) and B is untouched. No bold needed.
+       ! Apply gravity on conserved variables; magnetic energy stays in total E.
        rho = max(uold(cell_idx, 1, oct_idx), smallr)
        mx  = uold(cell_idx, 2, oct_idx)
        my  = uold(cell_idx, 3, oct_idx)
@@ -4481,9 +3964,7 @@ contains
 #endif
 
   end subroutine sync_hydro
-  ! =========================================================================
 
-  ! =========================================================================
   attributes(global) subroutine grav_hydro(uold, unew, f, constant_gravity, head_idx, num_octs, gamma, smallr, smallc2, dt)
     real(kind=8), device :: constant_gravity(1:3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
@@ -4511,10 +3992,7 @@ contains
     cell_idx = threadIdx%x
 
 #ifdef MHD
-       ! MHD: gravity source DIRECTLY on the conserved unew (CPU gravity_hydro_fine,
-       ! synchro_hydro_fine.f90:177-207). emag stays inside (E - kinetic) -> not
-       ! folded into pressure (D3); B is untouched; no bold needed. The dispatcher
-       ! passes dt = 0.5*dtnew, so fact = d_old/d*dt == CPU d_old/d*0.5*dtnew.
+       ! Apply gravity on unew; face-B unchanged.
        d  = max(unew(cell_idx, 1, oct_idx), smallr)
        mx = unew(cell_idx, 2, oct_idx)
        my = unew(cell_idx, 3, oct_idx)
@@ -4561,9 +4039,7 @@ contains
 #endif
 
   end subroutine grav_hydro
-  ! =========================================================================
 
-  ! =========================================================================
   ! Comments from Guillaume:
   ! Modifying data_out, vol_loc, mass_loc, ekin_loc, eint_loc, emag_loc, dt_loc, sound_speed, grav, ctot 
   ! requires changing other files in the code. This should be done if OK for numerical accuracy.
@@ -4644,8 +4120,7 @@ contains
           ekin_loc = conserved%energy*vol_loc
 
 #ifdef MHD
-             ! MHD: cell-centred B + emag-subtracted gas pressure (CPU cmpdt,
-             ! godunov_utils.f90:244-305). Wave speed = |v_d| + fast magnetosonic
+             ! MHD: cell-centred B + emag-subtracted gas pressure (,
              ! speed per direction; sound speed (|v_d|+smallc) under induction.
              primitive = conserved_2_primitive(conserved, gamma, &
                   & bold(cell_idx,1,oct_idx), bold(cell_idx,4,oct_idx), &
@@ -4702,9 +4177,7 @@ contains
     endif
 
   end subroutine cmpdt_kernel
-  ! =========================================================================
 
-  ! =========================================================================
   attributes(global) subroutine gather_send_buffer(uold, uold_send, idx_send, num_send)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: uold_send(*)
@@ -4737,9 +4210,7 @@ contains
     end do
 
   end subroutine gather_send_buffer
-  ! =========================================================================
 
-  ! =========================================================================
   attributes(global) subroutine scatter_recv_buffer(uold, uold_recv, idx_recv, num_recv)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: uold_recv(*)
@@ -4772,10 +4243,7 @@ contains
     end do
 
   end subroutine scatter_recv_buffer
-  ! =========================================================================
 
-  ! =========================================================================
-  !> @brief Check an array of nvar reals for NaN and print location if found
   attributes(device) subroutine check_nan(label, arr, ix, iy, iz, ivar_hint)
     character(len=1), intent(in) :: label
     real(kind=dp), intent(in) :: arr(1:nvar)
@@ -4787,10 +4255,7 @@ contains
       end if
     end do
   end subroutine check_nan
-  ! =========================================================================
 
-  ! =========================================================================
-  !> @brief Load conserved variables for a cell given a subgrid and a 1-based ubsgrid index. E.g. for an oct it runs from 1 to 6
   attributes(device) function load_conserved(ix, iy, iz, uold, nbor, subgrid_idx) result(Uin)
 
     real(kind=dp) :: Uin(1:nvar)
@@ -4815,8 +4280,6 @@ contains
     end do
   end function load_conserved
 
-  ! =========================================================================
-  !> @brief Add to conserved variables for a cell given a subgrid and a 1-based ubsgrid index. E.g. for an oct it runs from 1 to 6
   attributes(device) subroutine add_conserved(ix, iy, iz, dU, idim, unew, nbor, grid, father, subgrid_idx, ngridmax, &
        & skip_refined_fluxes, coarse_update)
 
@@ -4893,13 +4356,11 @@ contains
     end do
   end subroutine add_conserved
 
-  ! ---------------------------------------------------------------------------
   ! Device subroutine: compute slopes qds(ix,iy,ivar,dir) for one (ix,iy) point
   ! qds stores the gradient dqds, including the 1/dx factor.
   ! slope_type: 0=zero, 1=minmod, 2=moncen, 3=positivity-preserving 3D unsplit
   ! q_storage layout: (1:m+4, 1:m+4, nvar, 3) with slots im(=prev), ic(=curr), ip(=next)
   ! qds layout: (2:m+3, 2:m+3, nvar, 3) with slots for X/Y/Z slopes.
-  ! ---------------------------------------------------------------------------
   attributes(device) subroutine compute_slopes(q_storage, qds, ix, iy, ic, im, ip, idx, slope_type, mf, nvar)
     implicit none
     integer, value :: ix, iy, ic, im, ip, mf, nvar, slope_type
@@ -5047,8 +4508,6 @@ contains
     end select
   end subroutine compute_slopes
 
-
-   ! =========================================================================
 #ifdef PAPER
 #if NVAR>5+NENER
 #error "hydro_integrator_paper_kernel does not support passive scalars; use the default GPU hydro integrator"
@@ -5409,6 +4868,5 @@ contains
 
   end subroutine hydro_integrator_paper_kernel
 #endif
-  ! =========================================================================
 
 end module hydro_device
