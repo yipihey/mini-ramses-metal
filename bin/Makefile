@@ -39,19 +39,13 @@ CUDA_PROFILE = 0
 PAPER = 0
 CUB_SORT_PART = 1
 CUB_SORT_REFINE = 1
-# Warp-cooperative fine-force gather in the GPU particle kick (default OFF).
-KICK_COOP_GATHER = 0
 CUB_SCAN_REFINE = 1
-FASTMATH = 0
 DEBUG = 0
 HDF5 = 0
 MPIF90 = mpif90
 EXEC = ramses
 #############################################################################
 # Compute NVAR
-# Conserved uold baseline: rho, momenta, E (5). MHD stores B in bold/bnew face
-# arrays, not uold; hydro_parameters.f90 sets nprim=NVAR+3 and ie=8 for MHD.
-# NENER/NPSCAL/NMETAL/NION add on top of NHYDRO.
 NHYDRO = 5
 ifeq ($(RTZ),1)
 NION := $(N_CARBON_IONS)+$(N_NITROGEN_IONS)+$(N_OXYGEN_IONS)
@@ -173,7 +167,7 @@ ifeq ($(COMPILER),INTEL)
    endif
 endif
 #############################################################################
-# NVHPC compiler (optional -gpu=$(CUDA_ARCH),fastmath via FASTMATH=1)
+# NVHPC compiler (optional -gpu=$(CUDA_ARCH),fastmath in FFLAGS and LIBS)
 ifeq ($(COMPILER),NVHPC)
    ifeq ($(PAPER),1)
       DEFINES += -DPAPER
@@ -187,34 +181,8 @@ ifeq ($(COMPILER),NVHPC)
    ifneq ($(CUB_SCAN_REFINE),0)
       DEFINES += -DCUB_SCAN_REFINE
    endif
-   ifeq ($(KICK_COOP_GATHER),1)
-      DEFINES += -DKICK_COOP_GATHER
-   endif
-ifeq ($(FASTMATH),1)
-   GPU_ARCH_OPTS = $(CUDA_ARCH),fastmath
-else
-   GPU_ARCH_OPTS = $(CUDA_ARCH)
-endif
-   FFLAGS = -cpp -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx,curand $(DEFINES)
-   # gpu_star.cuf needs CURAND; pgacclnk invokes /usr/bin/ld, so add NVHPC math_libs.
-   ifneq ($(NVHPC_MATH_LIB),)
-      NVHPC_EXTRA_LIBS = -L$(NVHPC_MATH_LIB)
-   else ifneq ($(NVHPC_CUDA_HOME),)
-      NVHPC_SDK_ROOT := $(abspath $(NVHPC_CUDA_HOME)/../..)
-      NVHPC_MATH_LIB := $(NVHPC_SDK_ROOT)/math_libs/lib64
-      ifneq ($(wildcard $(NVHPC_MATH_LIB)/libcurand.so),)
-         NVHPC_EXTRA_LIBS = -L$(NVHPC_MATH_LIB)
-      endif
-   else
-      NVHPC_MATH_LIB := $(firstword $(wildcard /opt/nvidia/hpc_sdk/Linux_x86_64/*/math_libs/lib64))
-      ifeq ($(NVHPC_MATH_LIB),)
-         NVHPC_MATH_LIB := $(firstword $(wildcard /cm/shared/apps/nvhpc/*/Linux_x86_64/*/math_libs/lib64))
-      endif
-      ifneq ($(wildcard $(NVHPC_MATH_LIB)/libcurand.so),)
-         NVHPC_EXTRA_LIBS = -L$(NVHPC_MATH_LIB)
-      endif
-   endif
-   LIBS = -gpu=$(GPU_ARCH_OPTS) -cuda -cudalib=nvtx,curand $(NVHPC_EXTRA_LIBS) -lstdc++
+   FFLAGS = -cpp -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx,curand $(DEFINES)
+   LIBS = -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx,curand -lstdc++
    GPU_PATH = ../gpu
    ifeq ($(CUDA_PROFILE),1)
       FFLAGS += -gpu=lineinfo,ptxinfo -Minstrument -traceback -gopt
