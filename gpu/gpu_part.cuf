@@ -12,7 +12,6 @@ module part_device
        & partial_sums_0, partial_sums_1, partial_sums_2, &
        & partial_sums_dp_0, partial_sums_dp_1, partial_sums_dp_2, &
        & xp, vp, mp, phip, levelp, sortp, idp, &
-!       & jp, zp, tp, tm, size_p, charge, idm, idt, &
        & xp_swap, isp_swap, idp_swap, &
        & gpu_scan, gpu_scan_dp, d_skip
 #if defined(CUB_SORT_PART)
@@ -470,7 +469,7 @@ subroutine gpu_split_part(sim, ilevel)
 
   ! Compute prefix sum
   call nvtxStartRange("gpu_split_part", color=4) ! purple
-  call gpu_scan(head_idx, num_parts, n_fine_dev)
+  call gpu_scan(prefix_sum, head_idx, num_parts, n_fine_dev)
   call nvtxEndRange()
 
   n_fine = n_fine_dev
@@ -660,7 +659,8 @@ subroutine gpu_sort_part(sim, ilevel)
   integer, intent(in) :: ilevel
 
   integer(kind=4) :: head_idx, tail_idx, num_parts, val
-  integer :: num_threads, num_blocks
+  integer :: num_threads, num_blocks, nblks
+  integer, parameter :: nrnd = 16, nthr = 128
   integer :: ibit, level
   real(kind=8) :: dx, dx_inv, shift
   character(len=32) :: nvtx_lbl
@@ -698,11 +698,13 @@ subroutine gpu_sort_part(sim, ilevel)
   call nvtxEndRange()
 
 #if defined(CUB_SORT_PART)
-  ! idp_swap has keys to sort by. isp_swap is empty array where indices are
-  ! created. sortp has the sorted indices. xp_swap will have the sorted keys. we
-  ! don't need input indices or sorted keys but cub requires no overlap on
-  ! input and output buffers so we need to provide space for these. xp_swap and
-  ! isp_swap just happen to be available and the right size.
+  ! generate the input sequence [head_idx ... head_idx + num_parts - 1]
+  nblks = (((num_parts + nrnd - 1)/nrnd) + nthr - 1)/nthr
+  call init_global_swap_table_kernel_u8<<<nblks,nthr>>>(isp_swap, head_idx, num_parts)
+
+  ! idp_swap has keys to sort by. isp_swap is the input indices sequence
+  ! sortp has the sorted indices. hkeyp will have the sorted keys. we don't
+  ! need sorted keys but cub requires no overlap on input and output buffers.
   call radix_sort(c_loc(idp_swap(head_idx)), c_loc(hkeyp(head_idx)), &
                 & c_loc(isp_swap(head_idx)), c_loc(sortp(head_idx)), &
                 & head_idx, num_parts, 0, ndim * level)
@@ -724,7 +726,7 @@ subroutine gpu_sort_part(sim, ilevel)
           & sortp, prefix_sum, head_idx, num_parts, ibit)
 
      ! Compute prefix sum
-     call gpu_scan(head_idx, num_parts)
+     call gpu_scan(prefix_sum, head_idx, num_parts)
 
      ! Compute sorted indices
      call compute_local_swap_table<<<num_blocks, num_threads>>>(isp_swap, &
@@ -1914,7 +1916,7 @@ subroutine gpu_cic_part_small(sim, ilevel, rtype)
   call nvtxStartRange("gpu_cic_part_small:runs", color=4)
   call init_leader_marker_part_small<<<blk, nblk>>>(sortp, idp_swap, &
        & prefix_sum, head_idx, num_parts)
-  call gpu_scan(head_idx, num_parts)
+  call gpu_scan(prefix_sum, head_idx, num_parts)
   call fill_run_tail_part_small<<<blk, nblk>>>(prefix_sum, isp_swap, &
        & head_idx, num_parts)
   call nvtxEndRange()

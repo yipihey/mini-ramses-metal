@@ -83,7 +83,8 @@ option(MPI          "Enable MPI parallelism"                       OFF)
 option(HDF5         "Enable HDF5 output"                           OFF)
 option(CUDA_PROFILE "Enable NVTX profiling instrumentation"        OFF)
 option(PAPER        "Enable PAPER timing mode (NVHPC only)"        OFF)
-option(CUB_SORT_PART   "Use CUB radix sort for particles (NVHPC)" ON)
+option(CUB_SORT_PART   "Use CUB radix sort for particles (NVHPC)"  ON)
+option(CUB_SORT_REFINE "Use CUB radix sort for refine (NVHPC)"     ON)
 option(CUB_SCAN_REFINE "Use CUB inclusive scan for refine (NVHPC)" ON)
 
 set(CUDA_ARCH "sm_80" CACHE STRING "CUDA target architecture (e.g. sm_80, sm_90)")
@@ -212,9 +213,12 @@ elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     endif()
 
 elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
-    list(APPEND defines -DCUB_SORT_PART -DCUB_SCAN_REFINE)
+    list(APPEND defines -DCUB_SORT_PART -DCUB_SORT_REFINE -DCUB_SCAN_REFINE)
     if(NOT CUB_SORT_PART)
         list(REMOVE_ITEM defines -DCUB_SORT_PART)
+    endif()
+    if(NOT CUB_SORT_REFINE)
+        list(REMOVE_ITEM defines -DCUB_SORT_REFINE)
     endif()
     if(NOT CUB_SCAN_REFINE)
         list(REMOVE_ITEM defines -DCUB_SCAN_REFINE)
@@ -222,7 +226,7 @@ elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
     if(PAPER)
         list(APPEND defines -DPAPER)
     endif()
-    set(fort_flags -cpp ${defines} -gpu=${CUDA_ARCH},fastmath -cuda -cudalib=nvtx -Mfreeform)
+    set(fort_flags -cpp ${defines} -gpu=${CUDA_ARCH},fastmath -cuda -cudalib=nvtx,curand -Mfreeform)
     if(DEBUG)
         list(APPEND fort_flags
             -O0 -traceback -g
@@ -235,7 +239,7 @@ elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
         list(APPEND fort_flags -gpu=lineinfo,ptxinfo -Minstrument -traceback -gopt)
     endif()
     # Link flags mirror LIBS in the Makefile
-    set(nvhpc_link_flags -gpu=${CUDA_ARCH},fastmath -cuda -cudalib=nvtx -lstdc++)
+    set(nvhpc_link_flags -gpu=${CUDA_ARCH},fastmath -cuda -cudalib=nvtx,curand -lstdc++)
     if(CUDA_PROFILE)
         list(APPEND nvhpc_link_flags -gpu=lineinfo,ptxinfo -Minstrument -traceback -gopt)
     endif()
@@ -466,8 +470,10 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
         gpu/gpu_utils.cuf
         gpu/gpu_hydro.cuf
         gpu/gpu_cooling.cuf
+        gpu/gpu_star.cuf
         gpu/gpu_rho.cuf
         gpu/gpu_mg.cuf
+
         gpu/gpu_refine.cuf
         gpu/gpu_flag.cuf
         gpu/gpu_runner.cuf

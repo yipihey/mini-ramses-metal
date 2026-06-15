@@ -1,5 +1,5 @@
-# Auto-generated Fortran module dependencies
-# Regenerate: python3 gen_deps.py  (from repo root, output to bin/deps.mk)
+# Auto-generated Fortran module dependency rules for parallel make.
+# Regenerate: python3 utils/py/gen_deps.py > bin/deps.mk
 
 adaptive_loop.o: amr_step.o clump_finder.o gpu_manager.o init_amr.o init_hydro.o init_part.o init_refine_adaptive.o init_refine_basegrid.o init_refine_ramses.o init_refine_restart.o init_rt.o init_time.o init_xion.o input_part.o load_balance.o mdl.o ramses_commons.o read_params.o turb_init.o update_time.o
 amr_commons.o: amr_parameters.o domain_hilbert.o hash.o hydro_commons.o hydro_parameters.o oct_commons.o rt_commons.o rt_parameters.o
@@ -145,8 +145,9 @@ gpu_nbor.o: amr_parameters.o gpu_utils.o oct_commons.o
 gpu_part.o: amr_parameters.o cub_module_radix_sort_f.o gpu_refine.o gpu_runner.o gpu_utils.o oct_commons.o ramses_commons.o
 gpu_refine.o: amr_parameters.o gpu_utils.o hydro_parameters.o oct_commons.o
 gpu_rho.o: amr_parameters.o gpu_utils.o hydro_parameters.o oct_commons.o
-gpu_runner.o: amr_parameters.o cache.o cache_commons.o cub_inclusive_scan_f.o gpu_cooling.o gpu_flag.o gpu_hydro.o gpu_mg.o gpu_refine.o gpu_rho.o gpu_utils.o hydro_parameters.o oct_commons.o ramses_commons.o
+gpu_runner.o: amr_parameters.o cache.o cache_commons.o cub_inclusive_scan_f.o gpu_cooling.o gpu_flag.o gpu_hydro.o gpu_mg.o gpu_refine.o gpu_rho.o gpu_star.o gpu_utils.o hydro_parameters.o oct_commons.o ramses_commons.o
 gpu_scan.o: amr_parameters.o
+gpu_star.o: amr_parameters.o gpu_utils.o hydro_parameters.o oct_commons.o
 gpu_utils.o: amr_parameters.o oct_commons.o
 init_amr.o: gpu_runner.o gpu_utils.o
 init_part.o: gpu_part.o gpu_runner.o
@@ -159,6 +160,7 @@ phi_fine_cg.o: gpu_runner.o
 refine_utils.o: gpu_runner.o
 rho_fine.o: gpu_part.o gpu_runner.o
 smooth.o: gpu_runner.o
+star_formation.o: gpu_runner.o
 synchro_hydro_fine.o: gpu_runner.o
 upload.o: gpu_runner.o
 endif

@@ -1,5 +1,12 @@
 #include "cub_module_radix_sort.h"
 #include <cub/cub.cuh>
+#include <cstdint>
+
+/// working space for device scan
+void *g_cub_module_radix_sort_workspace = nullptr;
+size_t g_cub_module_radix_sort_work_size = 0;
+int g_cub_module_radix_sort_verbose = 0;
+
 
 #define CUDA_CHECK(call) \
 { \
@@ -12,24 +19,28 @@
   } \
 }
 
-/// create a sequence of id0 + (0 to nvals - 1)
-template <int nrnd>
-__global__
-void cub_module_radix_sort_initialize(int32_t *ids, int32_t id0, int32_t nvals)
+///  checks the alighnment of the passed ptr and aborts if it is not correctly aligned
+#if !defined(NDEBUG)
+// @returns true if the pointer is aligned to it's type's size
+template<typename T>
+bool is_aligned(T *ptr)
 {
-  // TODO: can use int4 if nvals is divisible by 4
-  #pragma unroll nrnd
-  for (int32_t  q = blockIdx.x*blockDim.x + threadIdx.x;
-       q < nvals; q += gridDim.x*blockDim.x)
-  {
-    ids[q] = q + id0;
-  }
+  if (0 == uintptr_t(ptr) % sizeof(T))
+    return true;
+  return false;
 }
 
-/// working space for device scan
-void *g_cub_module_radix_sort_workspace = nullptr;
-size_t g_cub_module_radix_sort_work_size = 0;
-int g_cub_module_radix_sort_verbose = 0;
+#define CHECK_ALIGN(var) \
+if (!is_aligned(var)) \
+{ \
+  std::cerr << "ERROR: " #var " is not " << sizeof(decltype(var)) \
+            << " byte aligned." << std::endl; \
+  abort(); \
+}
+
+#else
+#define CHECK_ALIGN(var)
+#endif
 
 // --------------------------------------------------------------------------
 void cub_module_radix_sort_allocate_workspace(int32_t num_elem)
@@ -68,15 +79,14 @@ void cub_module_radix_sort(int64_t *keys_in, int64_t *keys_out,
   if (1 < g_cub_module_radix_sort_verbose)
     std::cerr << "cub_module_radix_sort" << std::endl;
 
+  // check for misaligned buffers.
+  CHECK_ALIGN(keys_in)
+  CHECK_ALIGN(keys_out)
+  CHECK_ALIGN(idx_in)
+  CHECK_ALIGN(idx_out)
+
   // allocate workspace
   cub_module_radix_sort_allocate_workspace(num_elem);
-
-  // initialize an array with 1,2, .. N. after sort this array describes
-  // the sorted order
-  constexpr int nrnd = 4;
-  constexpr int nthr = 128;
-  int nblk = ( ((num_elem + nrnd - 1) / nrnd) + nthr - 1 ) / nthr;
-  cub_module_radix_sort_initialize<nrnd><<<nblk,nthr>>>(idx_in, idx0, num_elem);
 
   CUDA_CHECK(cub::DeviceRadixSort::SortPairs(g_cub_module_radix_sort_workspace,
                                              g_cub_module_radix_sort_work_size,
