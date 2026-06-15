@@ -1,0 +1,33 @@
+attributes(device) function poisson_knuth(localstate, lambda) result(n)
+  use curand_device
+  implicit none
+  type(curandStatePhilox4_32_10), intent(inout) :: localstate
+  real(8), intent(in) :: lambda
+  integer :: n
+  real(8) :: L, p
+
+  L = exp(-lambda)
+  n = 0
+  p = 1.0d0
+  do while (p > L)
+     p = p * curand_uniform_double(localstate)
+     n = n + 1
+  end do
+  n = n - 1
+end function
+
+attributes(device) function poisson_device(localstate, lambda) result(n)
+  use curand_device
+  implicit none
+  type(curandStatePhilox4_32_10), intent(inout) :: localstate
+  real(8), intent(in) :: lambda
+  integer :: n
+
+  if (lambda < 30.0d0) then
+     ! Knuth - exact, efficient for small lambda
+     n = poisson_knuth(localstate, lambda)
+  else
+     ! Normal approximation - good for large lambda
+     n = max(0, nint(lambda + sqrt(lambda) * curand_normal_double(localstate)))
+  endif
+end function

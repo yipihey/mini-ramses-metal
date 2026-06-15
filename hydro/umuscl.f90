@@ -1281,7 +1281,7 @@ subroutine trace3d(q,dq,qm,qp, &
            qLB(i,j,k,iB,1) = BL+ (   -dBLz)
            qLB(i,j,k,iC,1) = CL+ (-dCLy   )
            if (qLB(i,j,k,ir,1)<smallr) qLB(i,j,k,ir,1)=r
-           if (qLB(i,j,k,ip,1)<smallp) qLB(i,j,k,ir,1)=p
+           if (qLB(i,j,k,ip,1)<smallp) qLB(i,j,k,ip,1)=p
 #if NENER>0
            do irad=1,nener
               qLB(i,j,k,iC+irad,1) = e(irad) + (-dey(irad)-dez(irad))

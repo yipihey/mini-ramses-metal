@@ -88,14 +88,20 @@ module amr_commons
      ! Poisson solver parameters
      logical :: gravity_test=.false.  ! Use file rho_ana.f90 to test the Poisson solvers
      real(kind=8)::epsilon=1.0D-4     ! Convergence criterion for Poisson solvers
+     integer :: nvcycle = -1          ! Desired number of V-cycles
      real(kind=8),dimension(1:10)::gravity_params=0.0 ! Gravity parameters
      integer :: gravity_type=0     ! Type of force computation
      integer :: cic_levelmax=0     ! Maximum level for CIC dark matter interpolation
      integer :: cg_levelmin=999    ! Min level for CG solver
      logical :: fast_solver = .false. ! Fast solver with MPI pre-fetch (memory intensive)
      integer :: part_mass_deposition_scheme=1     ! part mass deposition schemes (CIC 1, TSC 2, PCS 3)
+     integer :: part_dep_algo=2                   ! part GPU CIC deposition algorithm
+     ! 1: large 27-offset
+     ! 2: medium shifted 8-offset (fastest, default)
+     ! 3: small shifted 8-offset prefix-sum)
      integer :: part_force_interpolation_scheme=1 ! part force interpolation schemes (CIC 1, TSC 2, PCS 3)
      integer :: star_mass_deposition_scheme=1     ! star mass deposition schemes
+     integer :: star_dep_algo=2                   ! star GPU CIC deposition algorithm
      integer :: star_force_interpolation_scheme=1 ! star force interpolation schemes
      integer :: sink_mass_deposition_scheme=1     ! sink mass deposition schemes
      integer :: sink_force_interpolation_scheme=1 ! sink force interpolation schemes
