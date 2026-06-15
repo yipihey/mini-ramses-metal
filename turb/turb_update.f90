@@ -10,6 +10,9 @@ contains
     use mdl_module
     use ramses_commons, only: pst_t
     use mdl_parameters
+#if defined(_CUDA) && defined(TURB)
+    use gpu_manager, only: gpu_update_turb
+#endif
     implicit none
     type(pst_t)::pst
 
@@ -20,7 +23,11 @@ contains
        call r_update_turb(pst%pLower)
        call mdl_get_reply(pst%s%mdl,rID,0)
     else
+#if defined(_CUDA) && defined(TURB)
+       call gpu_update_turb(pst)
+#else
        call turb_check_time(pst%s%r, pst%s%g, pst%s%turb)
+#endif
     endif
 
   end subroutine r_update_turb

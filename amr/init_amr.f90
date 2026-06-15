@@ -79,6 +79,9 @@ subroutine init_amr(r,g,m,type)
   use amr_commons, ONLY: run_t, global_t, mesh_t
   use hash
   use hilbert
+#ifdef TURB
+  use turb_commons, ONLY: TURB_GS
+#endif
 #ifdef _CUDA
   use gpu_runner
   use gpu_utils
@@ -220,6 +223,18 @@ subroutine init_amr(r,g,m,type)
      allocate(bnew(1:twotondim,1:6,1:m%ngridmax+m%ncachemax))
      bold=0d0
      bnew=0d0
+#endif
+#ifdef TURB
+     ! Turbulent driving fields (generated on host, interpolated on device) and per-cell
+     ! turbulent forcing. afield extents match host (0:TGRID_* == 0:TURB_GS-1).
+     allocate(afield_last_d(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1))
+     allocate(afield_next_d(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1))
+     allocate(afield_now_d (1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1))
+     allocate(fturb(1:twotondim,1:3,1:m%ngridmax+m%ncachemax))
+     afield_last_d=0d0
+     afield_next_d=0d0
+     afield_now_d=0d0
+     fturb=0d0
 #endif
 #ifdef GRAV
      allocate(rho(1:twotondim,1:m%ngridmax+m%ncachemax))

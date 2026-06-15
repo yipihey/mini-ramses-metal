@@ -183,5 +183,77 @@ end subroutine gpu_to_host_part
 !###########################################################
 !###########################################################
 !###########################################################
+#if defined(_CUDA) && defined(TURB)
+!> One-time seed of both device turbulence fields from the host (after init_turb).
+subroutine gpu_turb_init_fields(pst)
+  use ramses_commons, only: pst_t
+  implicit none
+  type(pst_t)::pst
+
+  if (.not. allocated(afield_next_d)) return
+
+  call nvtxStartRange("Copy initial turb fields host to device", color=5)!red
+  afield_last_d = pst%s%turb%afield_last
+  afield_next_d = pst%s%turb%afield_next
+  call GPU_Error_Check(__FILE__, __LINE__)
+  call nvtxEndRange()
+
+end subroutine gpu_turb_init_fields
+!###########################################################
+!###########################################################
+!###########################################################
+!> Device-side companion to turb_next_field: rotate next->last on the device (no H2D
+!> traffic) then upload only the freshly generated host afield_next.
+subroutine gpu_turb_next_field(pst)
+  use ramses_commons, only: pst_t
+  implicit none
+  type(pst_t)::pst
+
+  if (.not. allocated(afield_next_d)) return
+
+  call nvtxStartRange("Rotate + upload turb afield_next", color=5)!red
+  afield_last_d = afield_next_d                  ! device-to-device rotate
+  afield_next_d = pst%s%turb%afield_next         ! H2D: only the new 'next'
+  call GPU_Error_Check(__FILE__, __LINE__)
+  call nvtxEndRange()
+
+end subroutine gpu_turb_next_field
+!###########################################################
+!###########################################################
+!###########################################################
+!> GPU turbulence update (replaces host turb_check_time on the leaf):
+!> generate new field(s) on the host as time advances, mirror to the device, and
+!> time-interpolate afield_now on the device (Kernel A). The host afield_now is also
+!> updated so host-side diagnostics (e.g. current_turb_rms) stay correct.
+subroutine gpu_update_turb(pst)
+  use ramses_commons, only: pst_t
+  use turb_commons, only: turb_next_field
+  implicit none
+  type(pst_t)::pst
+  real(kind=8) :: last_tfrac, next_tfrac
+
+  ! Advance the host field(s) and mirror each new one to the device.
+  do
+     if (pst%s%g%t >= pst%s%turb%turb_next_time) then
+        call turb_next_field(pst%s%r, pst%s%turb)
+        call gpu_turb_next_field(pst)
+     else
+        exit
+     end if
+  end do
+
+  ! Device time-interpolation (Kernel A).
+  call gpu_turb_interp(pst%s)
+
+  ! Keep the host afield_now in sync for host-side diagnostics.
+  last_tfrac = (pst%s%g%t - pst%s%turb%turb_last_time)/pst%s%turb%turb_dt
+  next_tfrac = 1d0 - last_tfrac
+  pst%s%turb%afield_now = last_tfrac*pst%s%turb%afield_last + next_tfrac*pst%s%turb%afield_next
+
+end subroutine gpu_update_turb
+#endif
+!###########################################################
+!###########################################################
+!###########################################################
 !###########################################################
 end module gpu_manager
