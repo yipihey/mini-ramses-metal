@@ -11,6 +11,10 @@ recursive subroutine r_cooling_fine(pst,ilevel,input_size)
   use mdl_module
   use ramses_commons, only: pst_t
   use mdl_parameters
+#ifdef _CUDA
+  use cooling_module, only: set_table
+  use cooling_device, only: gpu_upload_cooling_table
+#endif
   implicit none
   type(pst_t)::pst
   integer,VALUE::input_size
@@ -25,6 +29,14 @@ recursive subroutine r_cooling_fine(pst,ilevel,input_size)
   else
 #ifdef _CUDA
      call gpu_cooling(pst%s, ilevel)
+     ! Cosmological runs: recompute the cooling table for the new aexp once
+     ! per coarse step (mirrors the CPU cooling_fine), then re-upload it to
+     ! the device so the next step's kernel sees the updated rates.
+     if(pst%s%r%cooling.and.ilevel==pst%s%r%levelmin.and.pst%s%r%cosmo)then
+        if(pst%s%g%myid==1)write(*,*)'Computing new cooling table'
+        call set_table(pst%s%cool,dble(pst%s%g%aexp))
+        call gpu_upload_cooling_table(pst%s%cool)
+     endif
 #else
      call cooling_fine(pst%s%r,pst%s%g,pst%s%m,pst%s%cool,pst%s%tables,ilevel)
 #endif
