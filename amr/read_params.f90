@@ -298,7 +298,6 @@ subroutine m_read_params(pst)
   character(LEN=10)::scheme='muscl'
   character(LEN=10)::riemann='llf'
   character(LEN=10)::riemann2d='none'
-  logical ::mhd=.false.
   logical ::induction=.false.
   logical ::entropy=.false.
   logical ::sgs_turb=.false.
@@ -616,7 +615,7 @@ subroutine m_read_params(pst)
   ! Hydro solver parameters
   namelist/hydro_params/gamma,courant_factor,smallr,smallc &
        & ,slope_type,slope_mag_type,difmag,etamag,gamma_rad &
-       & ,dual_energy,T2_fix,mhd,induction,entropy,sgs_turb,equilibrium_sgs,riemann,riemann2d,constant_gravity &
+       & ,dual_energy,T2_fix,induction,entropy,sgs_turb,equilibrium_sgs,riemann,riemann2d,constant_gravity &
        & ,niter_riemann,scheme,switch_llf_dmin,switch_llf_pmin,smagorinsky_lilly_constant
   ! Grid refinement parameters
   namelist/refine_params/x_refine,y_refine,z_refine,r_refine &
@@ -1376,7 +1375,6 @@ subroutine m_read_params(pst)
   s%r%gamma_rad=gamma_rad(1:nener+1)
   s%r%dual_energy=dual_energy
   s%r%T2_fix=T2_fix
-  s%r%mhd=mhd
   s%r%induction=induction
   s%r%entropy=entropy
   s%r%sgs_turb=sgs_turb
