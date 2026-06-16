@@ -109,60 +109,60 @@ cmake_print_variables(COMPILER NDIM NVAR NENER NION NRTGRP UNITS INIT HYDRO GRAV
 # Preprocessor defines
 # =============================================================================
 set(defines
-    -DNDIM=${NDIM}
-    -DNVAR=${NVAR}
-    -DNVECTOR=${NVECTOR}
-    -DNPRE=${NPRE}
-    -DNHILBERT=${NHILBERT}
+    NDIM=${NDIM}
+    NVAR=${NVAR}
+    NVECTOR=${NVECTOR}
+    NPRE=${NPRE}
+    NHILBERT=${NHILBERT}
 )
 
 if(NENER GREATER 0)
-    list(APPEND defines -DNENER=${NENER})
+    list(APPEND defines NENER=${NENER})
 endif()
 if(NION GREATER 0)
-    list(APPEND defines -DNION=${NION})
+    list(APPEND defines NION=${NION})
 endif()
 if(NOT UNITS STREQUAL "")
-    list(APPEND defines -DUNITS=${UNITS})
+    list(APPEND defines UNITS=${UNITS})
 endif()
 if(NOT INIT STREQUAL "")
-    list(APPEND defines -DINIT=${INIT})
+    list(APPEND defines INIT=${INIT})
 endif()
 if(HYDRO)
-    list(APPEND defines -DHYDRO)
+    list(APPEND defines HYDRO)
 endif()
 if(GRAV)
-    list(APPEND defines -DGRAV)
+    list(APPEND defines GRAV)
 endif()
 if(MHD)
-    list(APPEND defines -DMHD)
+    list(APPEND defines MHD)
 endif()
 if(RT)
-    list(APPEND defines -DRT -DNRTGRP=${NRTGRP})
+    list(APPEND defines RT NRTGRP=${NRTGRP})
 endif()
 if(RTZ)
-    list(APPEND defines -DRTZ
-        -DN_HYDROGEN_IONS=${N_HYDROGEN_IONS}
-        -DN_H2=${N_H2}
-        -DN_HELIUM_IONS=${N_HELIUM_IONS}
-        -DN_CARBON_IONS=${N_CARBON_IONS}
-        -DN_NITROGEN_IONS=${N_NITROGEN_IONS}
-        -DN_OXYGEN_IONS=${N_OXYGEN_IONS}
-        -DN_NEON_IONS=${N_NEON_IONS}
-        -DN_MAGNESIUM_IONS=${N_MAGNESIUM_IONS}
-        -DN_SILICON_IONS=${N_SILICON_IONS}
-        -DN_SULFUR_IONS=${N_SULFUR_IONS}
-        -DN_IRON_IONS=${N_IRON_IONS}
+    list(APPEND defines RTZ
+        N_HYDROGEN_IONS=${N_HYDROGEN_IONS}
+        N_H2=${N_H2}
+        N_HELIUM_IONS=${N_HELIUM_IONS}
+        N_CARBON_IONS=${N_CARBON_IONS}
+        N_NITROGEN_IONS=${N_NITROGEN_IONS}
+        N_OXYGEN_IONS=${N_OXYGEN_IONS}
+        N_NEON_IONS=${N_NEON_IONS}
+        N_MAGNESIUM_IONS=${N_MAGNESIUM_IONS}
+        N_SILICON_IONS=${N_SILICON_IONS}
+        N_SULFUR_IONS=${N_SULFUR_IONS}
+        N_IRON_IONS=${N_IRON_IONS}
     )
 endif()
 if(TURB)
-    list(APPEND defines -DTURB)
+    list(APPEND defines TURB)
 endif()
 if(TRCFLX)
-    list(APPEND defines -DTRCFLX)
+    list(APPEND defines TRCFLX)
 endif()
 if(NOT MPI)
-    list(APPEND defines -DWITHOUTMPI)
+    list(APPEND defines WITHOUTMPI)
 endif()
 
 # =============================================================================
@@ -186,7 +186,7 @@ endif()
 # Compiler flags
 # =============================================================================
 if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
-    set(fort_flags -cpp ${defines} -ffree-line-length-none -fimplicit-none -frecord-marker=4)
+    set(fort_flags -cpp -ffree-line-length-none -fimplicit-none -frecord-marker=4)
     if(CMAKE_Fortran_COMPILER_VERSION VERSION_GREATER_EQUAL 10)
         list(APPEND fort_flags -fallow-argument-mismatch)
     endif()
@@ -203,7 +203,7 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
     endif()
 
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
-    set(fort_flags -cpp ${defines} -recursive -fp-model source)
+    set(fort_flags -cpp -recursive -fp-model source)
     if(DEBUG)
         list(APPEND fort_flags
             -warn all -O0 -g -traceback -check bounds
@@ -213,20 +213,20 @@ elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     endif()
 
 elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
-    list(APPEND defines -DCUB_SORT_PART -DCUB_SORT_REFINE -DCUB_SCAN_REFINE)
+    list(APPEND defines CUB_SORT_PART CUB_SORT_REFINE CUB_SCAN_REFINE)
     if(NOT CUB_SORT_PART)
-        list(REMOVE_ITEM defines -DCUB_SORT_PART)
+        list(REMOVE_ITEM defines CUB_SORT_PART)
     endif()
     if(NOT CUB_SORT_REFINE)
-        list(REMOVE_ITEM defines -DCUB_SORT_REFINE)
+        list(REMOVE_ITEM defines CUB_SORT_REFINE)
     endif()
     if(NOT CUB_SCAN_REFINE)
-        list(REMOVE_ITEM defines -DCUB_SCAN_REFINE)
+        list(REMOVE_ITEM defines CUB_SCAN_REFINE)
     endif()
     if(PAPER)
-        list(APPEND defines -DPAPER)
+        list(APPEND defines PAPER)
     endif()
-    set(fort_flags -cpp ${defines} -gpu=${CUDA_ARCH},fastmath -cuda -cudalib=nvtx,curand -Mfreeform)
+    set(fort_flags -cpp -gpu=${CUDA_ARCH},fastmath -cuda -cudalib=nvtx,curand -Mfreeform)
     if(DEBUG)
         list(APPEND fort_flags
             -O0 -traceback -g
@@ -246,11 +246,16 @@ elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
     target_link_options(${EXEC} PRIVATE ${nvhpc_link_flags})
 
 elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "Cray")
-    set(fort_flags -e ZR ${defines})
+    set(fort_flags -e ZR)
 endif()
 
+target_compile_definitions(${EXEC} PRIVATE ${defines})
 target_compile_options(${EXEC} PRIVATE
     $<$<COMPILE_LANGUAGE:Fortran>:${fort_flags}>)
+set_target_properties(${EXEC} PROPERTIES 
+    Fortran_PREPROCESS ON
+    Fortran_MODULE_DIRECTORY "${CMAKE_BINARY_DIR}/modules"
+)
 
 # =============================================================================
 # Generated source files (git info, build command, patch)
@@ -480,6 +485,7 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
         gpu/gpu_part.cuf
     )
     list(APPEND fortran_files ${gpu_cuf_files} gpu/gpu_manager.f90)
+    set_source_files_properties(${gpu_cuf_files} PROPERTIES LANGUAGE Fortran)
 
     # -------------------------------------------------------------------------
     # CUB wrappers: .cu files compiled with nvcc, then .cuf wrappers compiled
@@ -569,14 +575,6 @@ endif()
 
 # =============================================================================
 # NVHPC: enforce GPU module compilation order via explicit OBJECT_DEPENDS.
-#
-# CMake's Fortran dependency scanner does not process .cuf files, so it
-# cannot infer that (e.g.) multigrid_fine_commons.f90 must wait for
-# gpu_runner.cuf to be compiled first.  We fix this in two steps:
-#
-#  1. Chain the GPU .cuf files sequentially (each waits for the previous
-#     object file), mirroring the MODOBJ order in bin/Makefile.
-#
 #  2. Scan every non-GPU source file at configure time for "USE gpu_*".
 #     Any file that USEs a GPU module is made to depend on the last GPU
 #     object in the chain, which transitively ensures all GPU modules exist.
@@ -584,21 +582,19 @@ endif()
 if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
     set(_gpu_obj_dir "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${EXEC}.dir/gpu")
 
-    # Step 1 – sequential chain across gpu_cuf_files
-    set(_prev_gpu_obj "")
-    foreach(_cuf IN LISTS gpu_cuf_files)
-        get_filename_component(_cuf_name "${_cuf}" NAME)
-        set(_cuf_obj "${_gpu_obj_dir}/${_cuf_name}.o")
-        if(_prev_gpu_obj)
-            set_source_files_properties("${_cuf}"
-                PROPERTIES OBJECT_DEPENDS "${_prev_gpu_obj}")
-        endif()
-        set(_prev_gpu_obj "${_cuf_obj}")
-    endforeach()
-    # gpu_manager.f90 also waits for the tail of the .cuf chain
+    # Step 1: GPU module dependencies (using object files)
+    set_source_files_properties(gpu/gpu_hydro.cuf gpu/gpu_cooling.cuf gpu/gpu_star.cuf gpu/gpu_rho.cuf
+                                gpu/gpu_mg.cuf gpu/gpu_refine.cuf gpu/gpu_flag.cuf
+        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o")
+
+    set_source_files_properties(gpu/gpu_runner.cuf
+        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o;${_gpu_obj_dir}/gpu_hydro.cuf.o;${_gpu_obj_dir}/gpu_cooling.cuf.o;${_gpu_obj_dir}/gpu_star.cuf.o;${_gpu_obj_dir}/gpu_rho.cuf.o;${_gpu_obj_dir}/gpu_mg.cuf.o;${_gpu_obj_dir}/gpu_refine.cuf.o;${_gpu_obj_dir}/gpu_flag.cuf.o")
+
+    set_source_files_properties(gpu/gpu_part.cuf
+        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o;${_gpu_obj_dir}/gpu_runner.cuf.o")
+
     set_source_files_properties(gpu/gpu_manager.f90
-        PROPERTIES OBJECT_DEPENDS "${_prev_gpu_obj}")
-    set(_last_gpu_obj "${_prev_gpu_obj}")
+        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_runner.cuf.o")
 
     # Step 2 – scan non-GPU sources for GPU module USE statements
     foreach(_src IN LISTS fortran_files)
@@ -612,10 +608,26 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
         if(NOT EXISTS "${_full}")
             continue()
         endif()
-        file(STRINGS "${_full}" _use_lines REGEX "[Uu][Ss][Ee][ \t]+gpu_")
-        if(_use_lines)
+        
+        set(_deps "")
+        file(STRINGS "${_full}" _use_runner REGEX "[Uu][Ss][Ee][ \t]+gpu_runner([ \t,;]|$)")
+        if(_use_runner)
+            list(APPEND _deps "${_gpu_obj_dir}/gpu_runner.cuf.o")
+        endif()
+        
+        file(STRINGS "${_full}" _use_part REGEX "[Uu][Ss][Ee][ \t]+part_device([ \t,;]|$)")
+        if(_use_part)
+            list(APPEND _deps "${_gpu_obj_dir}/gpu_part.cuf.o")
+        endif()
+        
+        file(STRINGS "${_full}" _use_utils REGEX "[Uu][Ss][Ee][ \t]+gpu_utils([ \t,;]|$)")
+        if(_use_utils)
+            list(APPEND _deps "${_gpu_obj_dir}/gpu_utils.cuf.o")
+        endif()
+
+        if(_deps)
             set_source_files_properties("${_src}"
-                PROPERTIES OBJECT_DEPENDS "${_last_gpu_obj}")
+                PROPERTIES OBJECT_DEPENDS "${_deps}")
         endif()
     endforeach()
 endif()
