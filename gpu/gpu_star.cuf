@@ -52,7 +52,7 @@ attributes(global) subroutine count_site_kernel(grid, uold, flag1, prefix_sum, &
 
   ! Leaf cell check
   ok = .not. grid(oct_idx)%refined(cell_idx)
-
+  
   ! Density threshold
   d = uold(cell_idx, 1, oct_idx)
   ok = ok .and. (d > d0)
