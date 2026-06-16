@@ -29,6 +29,7 @@ module hydro_device
   !> @brief
   !> Contains a 3 x 3 x 3 subgrid of primitive variables. Intended to act as a subgrid
   !> for interface states and fluxes. Note that it is zero indexed to make 1D to 3D
+  !> indexing easier
   !> indexing easier. Under MHD the interface states additionally carry the
   !> magnetic field (Bx, By, Bz). Passive scalars are present whenever the
   !> conserved state has slots beyond the hydro/radiation baseline.
@@ -79,6 +80,7 @@ module hydro_device
   end type subgrid_2x2x3cell_primitive
 
   !> @brief
+  !> A simple type for holding the conserved variables of a cell
   !> A simple type for holding the conserved variables of a cell.
   !> Under MHD it also carries the cell-centred magnetic field.
   type, public :: conserved_t
@@ -95,6 +97,7 @@ module hydro_device
   end type conserved_t
 
   !> @brief
+  !> A simple type for holding the primitive variables of a cell
   !> A simple type for holding the primitive variables of a cell.
   !> Under MHD it also carries the cell-centred magnetic field.
   type, public :: primitive_t
@@ -1321,6 +1324,18 @@ contains
   ! =========================================================================
 
   ! =========================================================================
+  !> @param[in] right_interfaces_z : The right side interfaces normal to z
+  !> @param[in] right_interfaces_y : The right side interfaces normal to y
+  !> @param[in] right_interfaces_x : The right side interfaces normal to x
+  !> @param[in] left_interfaces_z : The left side interfaces normal to z
+  !> @param[in] left_interfaces_y : The left side interfaces normal to y
+  !> @param[in] left_interfaces_x : The left side interfaces normal to x
+  !> @param[in] dtdx : dt / dx
+  !> @param[in] gamma : The adiabatic index
+  !> @param[in] thread_idx : The index of the current thread
+  !> @param[in] local_subgrid : The subgrid of primitive variables to solve
+  !> Compute the interface states with tracing
+  !> @brief
   !> Interface states with tracing; MHD adds constrained-transport predictor.
   !>
   attributes(device) subroutine trace_3d(local_subgrid, thread_idx, &
@@ -2021,7 +2036,7 @@ contains
 
   ! =========================================================================
   !> @brief
-  !> Dispatch GPU Riemann solvers.
+  !> Dispatch GPU hydro Riemann solvers (LLF, HLL, HLLC).
   !>
   !> @param[in] left_state_p : The state on the left side of the interface in primitive variables
   !> @param[in] right_state_p : The state on the right side of the interface in primitive variables
@@ -2064,6 +2079,18 @@ contains
   ! =========================================================================
 
   ! =========================================================================
+  !>
+  !> @param[in] thread_idx : The index of this thread
+  !> @param[in] gamma : The adiabatic index
+  !> @param[in] right_interfaces_z : The right interfaces at the k-1/2 interfaces.
+  !> @param[in,out] left_interfaces_z : The left interfaces at the k+1/2 interfaces. The fluxes along the Z interfaces are returned in this array
+  !> @param[in] right_interfaces_y : The right interfaces at the j-1/2 interfaces.
+  !> @param[in,out] left_interfaces_y : The left interfaces at the j+1/2 interfaces. The fluxes along the Y interfaces are returned in this array
+  !> @param[in] right_interfaces_x : The right interfaces at the i-1/2 interfaces.
+  !> @param[in,out] left_interfaces_x : The left interfaces at the i+1/2 interfaces. The fluxes along the X interfaces are returned in this array
+  !>
+  !> Driver for the Riemann solvers. This subroutine handles arranging the interface states and reading/writing data from shared memory
+  !> @brief
   !> Riemann driver: rotates MHD states to face-normal frame and computes fluxes.
   attributes(device) subroutine riemann_driver(left_interfaces_x, right_interfaces_x, left_interfaces_y, &
        & right_interfaces_y, left_interfaces_z, right_interfaces_z, thread_idx, &
@@ -2090,6 +2117,7 @@ contains
     do work_idx = thread_idx, interface_array_size * 3 - 1, blockDim%x
        if (work_idx < interface_array_size) then
           call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
+          ! Gather the interface states
           left_interface%density    = left_interfaces_x%density(i,j,k)
           left_interface%velocity_x = left_interfaces_x%velocity_x(i,j,k)
           left_interface%velocity_y = left_interfaces_x%velocity_y(i,j,k)
@@ -3344,6 +3372,7 @@ contains
     ! thread guard, probably not needed since num_blocks should always be equal to num_subgrids
     if (block_idx >= num_subgrids) return
 
+    ! =======================================================================
     ! Convert from conserved to primitive variables
     call subgrid_conserved_2_primitive(grid, uold, bold, f, constant_gravity, nbor, &
 #if NVAR>5+NENER
@@ -3355,6 +3384,7 @@ contains
          & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
 
     ! Perform tracing step and compute the interface states
+    ! =======================================================================
     ! This will compute the interface states and write them to shared memory
     call trace_3d(local_subgrid, thread_idx, &
 #if NVAR>5+NENER
@@ -3368,6 +3398,7 @@ contains
          & left_interfaces_z, right_interfaces_z, gamma, smallr, smallc2, dtdx, slope)
 
     ! Compute the fluxes.
+    ! =======================================================================
     ! This will compute the fluxes and write them to shared memory. Note that
     ! it writes the fluxes to the `left_interfaces_?` arrays and that those
     ! fluxes are in the conserved variables despite what the member variables
@@ -3395,6 +3426,7 @@ contains
 #endif
     endif
 
+    ! =======================================================================
     ! Update the conserved variables at current level.
     call conservative_update(unew, bnew, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, &
 #ifdef MHD
@@ -3404,6 +3436,7 @@ contains
          & thread_idx, dtdx)
 
     ! Update the conserved variables at coarser level.
+    ! =======================================================================
     if (ilevel > levelmin) then
        call coarse_cell_update(grid, unew, bnew, father, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, &
 #ifdef MHD
@@ -3416,6 +3449,7 @@ contains
 
 #endif
 
+  ! =========================================================================
   attributes(device) subroutine hydro_crit(prim_lft, prim_mid, prim_rgt, ok, &
        & err_grad_d, err_grad_p, floor_d, floor_p)
     type(primitive_t) :: prim_lft, prim_mid, prim_rgt
@@ -3442,6 +3476,7 @@ contains
     endif
 
   end subroutine hydro_crit
+  ! =========================================================================
 
 #ifdef MHD
   ! MHD AMR refinement criteria (magnetic energy and B gradients).
@@ -3663,6 +3698,7 @@ contains
     end do
 
   end subroutine hydro_flag_kernel
+  ! =========================================================================~
 
   attributes(global) subroutine upload_kernel(grid, father, uold, bold, head_idx, num_octs, &
        & internal_energy, gamma, smallr, smallc2)
@@ -3794,6 +3830,7 @@ contains
     end if
 
   end subroutine upload_kernel
+  ! =========================================================================
 
   attributes(global) subroutine set_uold_kernel(uold, unew, bold, bnew, head_idx, num_octs)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -3843,6 +3880,7 @@ contains
 #endif
 
   end subroutine set_uold_kernel
+  ! =========================================================================
 
   attributes(global) subroutine set_unew_kernel(uold, unew, bold, bnew, head_idx, num_octs)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -3892,6 +3930,7 @@ contains
 #endif
 
   end subroutine set_unew_kernel
+  ! =========================================================================
 
   attributes(global) subroutine sync_hydro(uold, f, constant_gravity, head_idx, num_octs, gamma, smallr, smallc2, dt)
     real(kind=8), device :: constant_gravity(1:3)
@@ -4178,6 +4217,7 @@ contains
 
   end subroutine cmpdt_kernel
 
+  ! =========================================================================
   attributes(global) subroutine gather_send_buffer(uold, uold_send, idx_send, num_send)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: uold_send(*)
@@ -4211,6 +4251,7 @@ contains
 
   end subroutine gather_send_buffer
 
+  ! =========================================================================
   attributes(global) subroutine scatter_recv_buffer(uold, uold_recv, idx_recv, num_recv)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: uold_recv(*)
@@ -4244,6 +4285,8 @@ contains
 
   end subroutine scatter_recv_buffer
 
+  !> @brief Check an array of nvar reals for NaN and print location if found
+  ! =========================================================================
   attributes(device) subroutine check_nan(label, arr, ix, iy, iz, ivar_hint)
     character(len=1), intent(in) :: label
     real(kind=dp), intent(in) :: arr(1:nvar)
@@ -4256,6 +4299,8 @@ contains
     end do
   end subroutine check_nan
 
+  !> @brief Load conserved variables for a cell given a subgrid and a 1-based ubsgrid index. E.g. for an oct it runs from 1 to 6
+  ! =========================================================================
   attributes(device) function load_conserved(ix, iy, iz, uold, nbor, subgrid_idx) result(Uin)
 
     real(kind=dp) :: Uin(1:nvar)
@@ -4280,6 +4325,8 @@ contains
     end do
   end function load_conserved
 
+  !> @brief Add to conserved variables for a cell given a subgrid and a 1-based ubsgrid index. E.g. for an oct it runs from 1 to 6
+  ! =========================================================================
   attributes(device) subroutine add_conserved(ix, iy, iz, dU, idim, unew, nbor, grid, father, subgrid_idx, ngridmax, &
        & skip_refined_fluxes, coarse_update)
 
@@ -4361,6 +4408,7 @@ contains
   ! slope_type: 0=zero, 1=minmod, 2=moncen, 3=positivity-preserving 3D unsplit
   ! q_storage layout: (1:m+4, 1:m+4, nvar, 3) with slots im(=prev), ic(=curr), ip(=next)
   ! qds layout: (2:m+3, 2:m+3, nvar, 3) with slots for X/Y/Z slopes.
+  ! ---------------------------------------------------------------------------
   attributes(device) subroutine compute_slopes(q_storage, qds, ix, iy, ic, im, ip, idx, slope_type, mf, nvar)
     implicit none
     integer, value :: ix, iy, ic, im, ip, mf, nvar, slope_type
@@ -4508,6 +4556,7 @@ contains
     end select
   end subroutine compute_slopes
 
+   ! =========================================================================
 #ifdef PAPER
 #if NVAR>5+NENER
 #error "hydro_integrator_paper_kernel does not support passive scalars; use the default GPU hydro integrator"
@@ -4868,5 +4917,6 @@ contains
 
   end subroutine hydro_integrator_paper_kernel
 #endif
+  ! =========================================================================
 
 end module hydro_device

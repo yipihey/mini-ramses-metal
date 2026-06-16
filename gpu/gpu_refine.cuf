@@ -668,7 +668,7 @@ end subroutine gather_twondim_parent_stencil
     end do
 #else
 #ifdef HYDRO
-    ! Straight injection (non-MHD build).
+    ! Straight injection for hydro variables
     do ind = 1, twotondim
        uold(ind,1,child_idx) = uold(cell_idx,1,oct_idx)
        uold(ind,2,child_idx) = uold(cell_idx,2,oct_idx)
@@ -2270,7 +2270,7 @@ end subroutine gather_twondim_parent_stencil
     end do
 #else
 #ifdef HYDRO
-    ! Straight injection (non-MHD build).
+    ! Straight injection for hydro variables
     do ind = 1, twotondim
        uold(ind,1,cache_idx) = uold(cell_idx,1,parent_idx)
        uold(ind,2,cache_idx) = uold(cell_idx,2,parent_idx)

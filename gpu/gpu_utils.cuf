@@ -19,6 +19,7 @@ module gpu_utils
   !> Contains a 6 by 6 by 6 subgrid of primitive variables. Intended to act as a subgrid
   !> where the inner 2 by 2 by 2 cells are "real" and the outer 2 cells are ghost/halo cells.
   !> Can either be used on it's own or allocated in shared memory. Note that it is zero
+  !> indexed to make 1D to 3D indexing easier
   !> indexed to make 1D to 3D indexing easier.
   !> MHD: cell-centred B is derived from face-B; refined flags use byte storage on the inner lattice.
   type, public :: subgrid_6x6x6cell_primitive
