@@ -579,58 +579,58 @@ endif()
 #     Any file that USEs a GPU module is made to depend on the last GPU
 #     object in the chain, which transitively ensures all GPU modules exist.
 # =============================================================================
-# if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
-#     set(_mod_dir "${CMAKE_BINARY_DIR}/modules")
-# 
-#     # Step 1: GPU module dependencies
-#     set_source_files_properties(gpu/gpu_hydro.cuf gpu/gpu_cooling.cuf gpu/gpu_star.cuf gpu/gpu_rho.cuf
-#                                 gpu/gpu_mg.cuf gpu/gpu_refine.cuf gpu/gpu_flag.cuf
-#         PROPERTIES OBJECT_DEPENDS "${_mod_dir}/gpu_utils.mod")
-# 
-#     set_source_files_properties(gpu/gpu_runner.cuf
-#         PROPERTIES OBJECT_DEPENDS "${_mod_dir}/gpu_utils.mod;${_mod_dir}/hydro_device.mod;${_mod_dir}/cooling_device.mod;${_mod_dir}/star_device.mod;${_mod_dir}/rho_device.mod;${_mod_dir}/mg_device.mod;${_mod_dir}/refine_device.mod;${_mod_dir}/flag_device.mod")
-# 
-#     set_source_files_properties(gpu/gpu_part.cuf
-#         PROPERTIES OBJECT_DEPENDS "${_mod_dir}/gpu_utils.mod;${_mod_dir}/gpu_runner.mod")
-# 
-#     set_source_files_properties(gpu/gpu_manager.f90
-#         PROPERTIES OBJECT_DEPENDS "${_mod_dir}/gpu_runner.mod")
-# 
-#     # Step 2 – scan non-GPU sources for GPU module USE statements
-#     foreach(_src IN LISTS fortran_files)
-#         if(IS_ABSOLUTE "${_src}")
-#             continue()  # skip generated files (absolute paths)
-#         endif()
-#         if("${_src}" MATCHES "^gpu/")
-#             continue()  # skip GPU sources themselves
-#         endif()
-#         set(_full "${CMAKE_SOURCE_DIR}/${_src}")
-#         if(NOT EXISTS "${_full}")
-#             continue()
-#         endif()
-#         
-#         set(_deps "")
-#         file(STRINGS "${_full}" _use_runner REGEX "[Uu][Ss][Ee][ \t]+gpu_runner([ \t,;]|$)")
-#         if(_use_runner)
-#             list(APPEND _deps "${_mod_dir}/gpu_runner.mod")
-#         endif()
-#         
-#         file(STRINGS "${_full}" _use_part REGEX "[Uu][Ss][Ee][ \t]+part_device([ \t,;]|$)")
-#         if(_use_part)
-#             list(APPEND _deps "${_mod_dir}/part_device.mod")
-#         endif()
-#         
-#         file(STRINGS "${_full}" _use_utils REGEX "[Uu][Ss][Ee][ \t]+gpu_utils([ \t,;]|$)")
-#         if(_use_utils)
-#             list(APPEND _deps "${_mod_dir}/gpu_utils.mod")
-#         endif()
-# 
-#         if(_deps)
-#             set_source_files_properties("${_src}"
-#                 PROPERTIES OBJECT_DEPENDS "${_deps}")
-#         endif()
-#     endforeach()
-# endif()
+if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
+    set(_gpu_obj_dir "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${EXEC}.dir/gpu")
+
+    # Step 1: GPU module dependencies (using object files)
+    set_source_files_properties(gpu/gpu_hydro.cuf gpu/gpu_cooling.cuf gpu/gpu_star.cuf gpu/gpu_rho.cuf
+                                gpu/gpu_mg.cuf gpu/gpu_refine.cuf gpu/gpu_flag.cuf
+        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o")
+
+    set_source_files_properties(gpu/gpu_runner.cuf
+        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o;${_gpu_obj_dir}/gpu_hydro.cuf.o;${_gpu_obj_dir}/gpu_cooling.cuf.o;${_gpu_obj_dir}/gpu_star.cuf.o;${_gpu_obj_dir}/gpu_rho.cuf.o;${_gpu_obj_dir}/gpu_mg.cuf.o;${_gpu_obj_dir}/gpu_refine.cuf.o;${_gpu_obj_dir}/gpu_flag.cuf.o")
+
+    set_source_files_properties(gpu/gpu_part.cuf
+        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o;${_gpu_obj_dir}/gpu_runner.cuf.o")
+
+    set_source_files_properties(gpu/gpu_manager.f90
+        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_runner.cuf.o")
+
+    # Step 2 – scan non-GPU sources for GPU module USE statements
+    foreach(_src IN LISTS fortran_files)
+        if(IS_ABSOLUTE "${_src}")
+            continue()  # skip generated files (absolute paths)
+        endif()
+        if("${_src}" MATCHES "^gpu/")
+            continue()  # skip GPU sources themselves
+        endif()
+        set(_full "${CMAKE_SOURCE_DIR}/${_src}")
+        if(NOT EXISTS "${_full}")
+            continue()
+        endif()
+        
+        set(_deps "")
+        file(STRINGS "${_full}" _use_runner REGEX "[Uu][Ss][Ee][ \t]+gpu_runner([ \t,;]|$)")
+        if(_use_runner)
+            list(APPEND _deps "${_gpu_obj_dir}/gpu_runner.cuf.o")
+        endif()
+        
+        file(STRINGS "${_full}" _use_part REGEX "[Uu][Ss][Ee][ \t]+part_device([ \t,;]|$)")
+        if(_use_part)
+            list(APPEND _deps "${_gpu_obj_dir}/gpu_part.cuf.o")
+        endif()
+        
+        file(STRINGS "${_full}" _use_utils REGEX "[Uu][Ss][Ee][ \t]+gpu_utils([ \t,;]|$)")
+        if(_use_utils)
+            list(APPEND _deps "${_gpu_obj_dir}/gpu_utils.cuf.o")
+        endif()
+
+        if(_deps)
+            set_source_files_properties("${_src}"
+                PROPERTIES OBJECT_DEPENDS "${_deps}")
+        endif()
+    endforeach()
+endif()
 
 # =============================================================================
 # Attach all Fortran sources
