@@ -33,10 +33,7 @@ recursive subroutine r_set_grid_device(pst)
 #ifdef HYDRO
      uold = pst%s%m%uold
 #ifdef MHD
-     ! Copy face-centred B host to device.
-     call nvtxStartRange("Copy MHD B field host to device", color=5)!red
      bold = pst%s%m%bold
-     call nvtxEndRange()
 #endif
 #endif
      call GPU_Error_Check(__FILE__, __LINE__)
@@ -126,10 +123,7 @@ recursive subroutine r_transfer_grid_host(pst)
 #ifdef HYDRO
      pst%s%m%uold = uold
 #ifdef MHD
-     ! Copy face-centred B device to host.
-     call nvtxStartRange("Copy MHD B field device to host", color=5)!red
      pst%s%m%bold = bold
-     call nvtxEndRange()
 #endif
 #endif
 #ifdef GRAV
