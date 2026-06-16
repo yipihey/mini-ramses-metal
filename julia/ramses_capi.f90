@@ -176,6 +176,27 @@ contains
     end do
   end subroutine ramses_get_particles
 
+  ! Add a uniform velocity (CODE units) to ALL particles' vp.  grafic strips the
+  ! mean (DC) component of the IC velocity field, so a bulk DM streaming velocity
+  ! cannot be imposed through the IC files — this sets it POST-init.  Used to boost
+  ! the DM into a different Galilean frame (e.g. the baryon rest frame) for the
+  ! streaming-velocity frame-invariance test.
+  subroutine ramses_boost_particles(handle, vx, vy, vz) &
+       bind(C, name="ramses_boost_particles")
+    integer(c_int), value :: handle
+    real(c_double), value :: vx, vy, vz
+    type(ramses_t), pointer :: s
+    integer :: i
+    real(kind=8) :: vb(3)
+    if (handle < 1 .or. handle > CAPI_MAXSTATE) return
+    s => capi_reg(handle)%p
+    if (.not. associated(s)) return
+    vb(1) = vx; vb(2) = vy; vb(3) = vz
+    do i = 1, s%p%npart
+       s%p%vp(i,1:ndim) = s%p%vp(i,1:ndim) + vb(1:ndim)
+    end do
+  end subroutine ramses_boost_particles
+
   ! Set the multigrid/CG convergence tolerance r%epsilon (CPU solve).  Used by
   ! the convergence-tolerance test: tighten eps and watch rel|Δphi| vs Metal.
   subroutine ramses_set_epsilon(handle, eps) bind(C, name="ramses_set_epsilon")
@@ -788,6 +809,31 @@ contains
     aexp  = real(s%g%aexp, c_double)
     nstep = int(s%g%nstep, c_int)
   end subroutine ramses_get_time
+
+  ! Code (conformal) time corresponding to a target expansion factor, by interpolating
+  ! the Friedman lookup table (aexp_frw, tau_frw) — exactly as init_time.f90 inverts it.
+  ! Lets a Julia driver cap the step (via ramses_set_time_cap) to land EXACTLY on an
+  ! output scale factor, mirroring how amr_step honours capi_time_cap_target.
+  subroutine ramses_t_from_aexp(handle, aexp_t, t_out) bind(C, name="ramses_t_from_aexp")
+    integer(c_int), value :: handle
+    real(c_double), value :: aexp_t
+    real(c_double), intent(out) :: t_out
+    type(ramses_t), pointer :: s
+    integer :: i, nfrw
+    real(dp) :: at
+    t_out = 0.0_c_double
+    if (handle < 1 .or. handle > CAPI_MAXSTATE) return
+    s => capi_reg(handle)%p
+    if (.not. associated(s)) return
+    nfrw = size(s%g%aexp_frw); at = real(aexp_t, dp)
+    i = 1
+    do while (s%g%aexp_frw(i) > at .and. i < nfrw)
+       i = i + 1
+    end do
+    if (i < 2) i = 2
+    t_out = real( s%g%tau_frw(i)*(at - s%g%aexp_frw(i-1))/(s%g%aexp_frw(i)-s%g%aexp_frw(i-1)) + &
+                  s%g%tau_frw(i-1)*(at - s%g%aexp_frw(i))/(s%g%aexp_frw(i-1)-s%g%aexp_frw(i)), c_double)
+  end subroutine ramses_t_from_aexp
 
 #ifdef _METAL
   ! GPU gravity for one level (deposit's GPU side runs in m_rho_fine; this does
