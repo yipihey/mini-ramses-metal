@@ -504,7 +504,7 @@ contains
    if (num_octs <= 0) return
 
    call nvtxStartRange("Count Star Formation Sites", color=3)!blue
-   ! Array flag1 contains the number of star quanta per AMR cell
+   ! Array flag1 contains the number of new stars formed per AMR cell
    ! Array prefix_sum = 1 if we have a SF site and 0 otherwise.
    call count_site_kernel<<<num_blocks, num_threads>>>(grid, uold, flag1, prefix_sum, &
         & head_idx, num_octs, ilevel, d0, dx, vol, factG, mstar, &
@@ -1582,23 +1582,27 @@ contains
 
     integer(kind=4) :: head_idx, num_octs, num_blocks, num_threads
     integer :: threadsX_per_block, threadsY_per_block
-    real(kind=8) :: dx, vol_loc
+    real(kind=dp) :: dx, vol_loc, mass_sph, m_refine, var_cut_refine
     real(kind=8), device :: multipole_d(ndim+1)
     real(kind=8) :: multipole_h(ndim+1)
 
-    dx      = real(sim%r%boxlen / 2**ilevel, kind=8)
+    dx = sim%r%boxlen/2**ilevel
     vol_loc = dx**ndim
+    mass_sph = sim%r%mass_sph
+    m_refine = sim%r%m_refine(ilevel)
+    var_cut_refine = sim%r%var_cut_refine
 
-    head_idx           = sim%m%head(ilevel)
-    num_octs           = sim%m%noct(ilevel)
+    head_idx = sim%m%head(ilevel)
+    num_octs = sim%m%noct(ilevel)
     threadsX_per_block = twotondim
     threadsY_per_block = 16
-    num_blocks         = (num_octs + threadsY_per_block - 1) / threadsY_per_block
+    num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
 
     if (num_octs > 0) then
        call nvtxStartRange("GPU cic_multipole2", color=1)!blue
        call deposit_rho<<<num_blocks, dim3(threadsX_per_block, threadsY_per_block, 1)>>>( &
-            & unew, rho, grid, nbor, head_idx, num_octs, dx, vol_loc, sim%r%ngridmax)
+            & uold, unew, rho, nref, grid, nbor, head_idx, num_octs, &
+            & dx, vol_loc, m_refine, mass_sph, var_cut_refine, sim%r%ivar_refine, sim%r%ngridmax)
        call nvtxEndRange()
     end if
 

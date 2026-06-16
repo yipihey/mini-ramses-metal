@@ -145,7 +145,7 @@ gpu_nbor.o: amr_parameters.o gpu_utils.o oct_commons.o
 gpu_part.o: amr_parameters.o cub_module_radix_sort_f.o gpu_refine.o gpu_runner.o gpu_utils.o oct_commons.o ramses_commons.o
 gpu_refine.o: amr_parameters.o gpu_utils.o hydro_parameters.o oct_commons.o
 gpu_rho.o: amr_parameters.o gpu_utils.o hydro_parameters.o oct_commons.o
-gpu_runner.o: amr_parameters.o cache.o cache_commons.o cub_inclusive_scan_f.o gpu_cooling.o gpu_flag.o gpu_hydro.o gpu_mg.o gpu_refine.o gpu_rho.o gpu_star.o gpu_utils.o hydro_parameters.o oct_commons.o ramses_commons.o
+gpu_runner.o: amr_parameters.o cache.o cache_commons.o cub_inclusive_scan_f.o cub_module_radix_sort_f.o gpu_cooling.o gpu_flag.o gpu_hydro.o gpu_mg.o gpu_refine.o gpu_rho.o gpu_star.o gpu_utils.o hydro_parameters.o oct_commons.o ramses_commons.o
 gpu_scan.o: amr_parameters.o
 gpu_star.o: amr_parameters.o gpu_utils.o hydro_parameters.o oct_commons.o
 gpu_utils.o: amr_parameters.o oct_commons.o

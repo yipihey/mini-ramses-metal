@@ -318,10 +318,10 @@ recursive subroutine r_user_flag(pst,ilevel,input_size,noct,output_size)
   type(pst_t)::pst
   integer,VALUE::input_size
   integer::output_size
-  integer::ilevel,noct
+  integer::ilevel, noct
 
   integer::next_noct
-  integer::nflag
+  integer::nflag, level_lock
   integer::rID
 
   if(pst%nLower>0)then
@@ -330,16 +330,29 @@ recursive subroutine r_user_flag(pst,ilevel,input_size,noct,output_size)
      call mdl_get_reply(pst%s%mdl,rID,output_size,next_noct)
      noct=noct+next_noct
   else
+
+     ! Unlock levels progressively
+     if(pst%s%r%cosmo.and.pst%s%r%aexp_lock_refine>0d0)then
+        if(ilevel.GT.pst%s%g%nlevelmax_part+3)then
+           level_lock=pst%s%r%nlevelmax+int(log(pst%s%g%aexp/pst%s%r%aexp_lock_refine/2.0d0)/log(2d0))
+           if(ilevel.GE.level_lock)then
+              noct=pst%s%g%nflag
+              return
+           endif
+        endif
+     endif
+
 #ifdef _CUDA
      if(pst%s%m%data_on_device)then
         call gpu_user_flag(pst%s, ilevel, nflag)
      else
-        call user_flag(pst%s,ilevel,nflag)
+        call user_flag(pst%s, ilevel, nflag)
      endif
 #else
-     call user_flag(pst%s,ilevel,nflag)
+     call user_flag(pst%s, ilevel, nflag)
 #endif
      noct=nflag
+
   endif
 
 end subroutine r_user_flag
@@ -359,17 +372,6 @@ subroutine user_flag(s,ilevel,nflag)
   ! some user-defined physical criteria at the level ilevel. 
   ! -------------------------------------------------------------------
   integer::level_lock
-
-  ! Unlock levels progressively
-  if(s%r%cosmo.and.s%r%aexp_lock_refine>0d0)then
-     if(ilevel.GT.s%g%nlevelmax_part+3)then
-        level_lock=s%r%nlevelmax+int(log(s%g%aexp/s%r%aexp_lock_refine/2.0d0)/log(2d0))
-        if(ilevel.GE.level_lock)then
-           nflag=s%g%nflag
-           return
-        endif
-     endif
-  endif
 
   ! Refinement rules for the gravity solver
   if(s%r%poisson)call poisson_flag(s,ilevel)

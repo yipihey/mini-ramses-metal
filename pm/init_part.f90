@@ -64,9 +64,9 @@ subroutine init_part(r,g,m,p)
 #ifdef _CUDA
   integer::scan_size
 #endif
-  !---------------------------------
-  ! Allocate PART particle variables
-  !---------------------------------
+  !--------------------------------------------
+  ! Allocate PART particle variables on the CPU
+  !--------------------------------------------
   p%type=PART_TYPE
   allocate(p%xp    (r%npartmax,ndim))
   allocate(p%vp    (r%npartmax,ndim))
@@ -94,6 +94,9 @@ subroutine init_part(r,g,m,p)
   p%tailp=0
 
   ! Device mirrors/scratch; H→D in r_set_grid_device.
+  !--------------------------------------------
+  ! Allocate PART particle variables on the GPU
+  !--------------------------------------------
 #ifdef _CUDA
   allocate(xp(1:r%npartmax, 1:ndim))
   allocate(vp(1:r%npartmax, 1:ndim))
@@ -127,10 +130,6 @@ subroutine init_star(r,g,m,p)
   use amr_commons, only: run_t,global_t,mesh_t
   use pm_parameters, only: STAR_TYPE
   use pm_commons, only: part_t
-#ifdef _CUDA
-  use gpu_runner
-  use cudafor
-#endif
   implicit none
   type(run_t)::r
   type(global_t)::g
@@ -139,9 +138,9 @@ subroutine init_star(r,g,m,p)
 #ifdef _CUDA
   integer::scan_size
 #endif
-  !-----------------------------------
-  ! Allocate star particle variables
-  !------------------------------------
+  !--------------------------------------------
+  ! Allocate star particle variables on the CPU
+  !--------------------------------------------
   p%type=STAR_TYPE
   allocate(p%xp    (r%nstarmax,ndim))
   allocate(p%vp    (r%nstarmax,ndim))
@@ -170,12 +169,15 @@ subroutine init_star(r,g,m,p)
   p%headp=1
   p%tailp=0
 
+  !--------------------------------------------
+  ! Allocate star particle variables on the GPU
+  !--------------------------------------------
 #ifdef _CUDA
-  allocate(star_xp    (1:r%nstarmax, 1:ndim))
-  allocate(star_vp    (1:r%nstarmax, 1:ndim))
-  allocate(star_mp    (1:r%nstarmax))
-  allocate(star_tp    (1:r%nstarmax))
-  allocate(star_zp    (1:r%nstarmax))
+  allocate(star_xp(1:r%nstarmax, 1:ndim))
+  allocate(star_vp(1:r%nstarmax, 1:ndim))
+  allocate(star_mp(1:r%nstarmax))
+  allocate(star_tp(1:r%nstarmax))
+  allocate(star_zp(1:r%nstarmax))
   allocate(star_levelp(1:r%nstarmax))
   if (r%nlevelmax > r%levelmin) allocate(star_idp(1:r%nstarmax))
 #ifdef OUTPUT_PARTICLE_POTENTIAL
