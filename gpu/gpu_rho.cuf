@@ -410,21 +410,15 @@ contains
        ! Update number density for refinement map
        if (m_refine >= 0) then
           deposit = monopole / mass_sph
-          info = atomicadd(nref(cell_idx, oct_idx), deposit)
+          if (ivar_refine > 0) then
+             mask = uold(cell_idx, ivar_refine, oct_idx) / uold(cell_idx, 1, oct_idx)
+             if (mask > var_cut_refine) then
+                info = atomicadd(nref(cell_idx, oct_idx), deposit)
+             endif
+          else
+             info = atomicadd(nref(cell_idx, oct_idx), deposit)
+          endif
        endif
-
-!!$       ! Update particle density for refinement map
-!!$       if (m_refine >= 0) then
-!!$          deposit = monopole / mass_sph
-!!$          if (ivar_refine > 0) then
-!!$             mask = uold(cell_idx, ivar_refine, oct_idx) / uold(cell_idx, 1, oct_idx)
-!!$             if (mask > var_cut_refine) then
-!!$                info = atomicadd(nref(cell_idx, oct_idx), deposit)
-!!$             endif
-!!$          else
-!!$             info = atomicadd(nref(cell_idx, oct_idx), deposit)
-!!$          endif
-!!$       endif
 
     else
 
@@ -470,21 +464,15 @@ contains
           ! Update number density for refinement map
           if (m_refine >= 0) then
              deposit = monopole * vol_cic(ind) / mass_sph
-             info = atomicadd(nref(tgt_cell_idx, tgt_oct_idx), deposit)
+             if (ivar_refine > 0) then
+                mask = uold(tgt_cell_idx, ivar_refine, tgt_oct_idx) / uold(tgt_cell_idx, 1, tgt_oct_idx)
+                if (mask > var_cut_refine) then
+                   info = atomicadd(nref(tgt_cell_idx, tgt_oct_idx), deposit)
+                endif
+             else
+                info = atomicadd(nref(tgt_cell_idx, tgt_oct_idx), deposit)
+             endif
           endif
-
-!!$          ! Update particle density for refinement map
-!!$          if (m_refine >= 0) then
-!!$             deposit = monopole * vol_cic(ind) / mass_sph
-!!$             if (ivar_refine > 0) then
-!!$                mask = uold(tgt_cell_idx, ivar_refine, tgt_oct_idx) / uold(tgt_cell_idx, 1, tgt_oct_idx)
-!!$                if (mask > var_cut_refine) then
-!!$                   info = atomicadd(nref(tgt_cell_idx, tgt_oct_idx), deposit)
-!!$                endif
-!!$             else
-!!$                info = atomicadd(nref(tgt_cell_idx, tgt_oct_idx), deposit)
-!!$             endif
-!!$          endif
 
        end do
 
