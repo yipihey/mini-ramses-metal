@@ -65,20 +65,7 @@ recursive subroutine r_kick_drift_part(pst,input_array,input_size,output_array,o
      action_part=input_array(2)
 #ifdef _CUDA
      if(pst%s%r%part)then
-        if(pst%s%p%type/=PART_TYPE)then
-           write(*,*)'ERROR: r_kick_drift_part: DM PART_TYPE only.'
-           call abort
-        endif
-        if(pst%s%r%part_force_interpolation_scheme/=1)then
-           write(*,'(A,I0,A)')'ERROR: r_kick_drift_part: CIC only (scheme ', &
-                & pst%s%r%part_force_interpolation_scheme,').'
-           call abort
-        endif
         call gpu_kick_drift_part(pst%s, ilevel, action_part)
-     endif
-     if(pst%s%r%star.or.pst%s%r%sink.or.pst%s%r%tree.or.pst%s%r%trac.or.pst%s%r%dust)then
-        write(*,*)'ERROR: r_kick_drift_part: non-DM not supported on GPU.'
-        call abort
      endif
 #else
      ! Force interpolation for various components (DM particles, star, sink, tree)
