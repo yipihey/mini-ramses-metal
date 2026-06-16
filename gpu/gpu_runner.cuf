@@ -478,7 +478,7 @@ contains
    if (num_octs <= 0) return
 
    call nvtxStartRange("Count Star Formation Sites", color=3)!blue
-   ! Array flag1 contains the number of star quanta per AMR cell
+   ! Array flag1 contains the number of new stars formed per AMR cell
    ! Array prefix_sum = 1 if we have a SF site and 0 otherwise.
    call count_site_kernel<<<num_blocks, num_threads>>>(grid, uold, flag1, prefix_sum, &
         & head_idx, num_octs, ilevel, d0, dx, vol, factG, mstar, &
