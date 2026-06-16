@@ -1,0 +1,37 @@
+---
+description: Makefiles, Slurm harness, namelists, and cluster submit workflows
+globs: "**/Makefile*,**/*.slurm,**/hackathon*,**/*.nml,**/submit_profiles.sh"
+alwaysApply: false
+---
+
+# Build and harness
+
+Read `AGENTS.md` plus the target runbook ([[runbook — Stellar]] / [[runbook — Marlowe]]) before changing build or submit paths.
+
+## Makefile / harness flags
+
+- Document flag changes in commit messages and session handoff.
+- Harness vars (`GPU_MHD`, `GPU_GRAV`, `GPU_NPRE`, `GPU_FASTMATH`, `CUB_SORT_*`) map to Makefile `MHD`, `GRAV`, `NPRE`, `FASTMATH`, etc.
+- GPU builds on cluster: **serial `make` only** (no `-j`).
+- Stellar `Makefile.a100`: default `NPRE=4`, `CUDA_ARCH=sm_80`.
+- Marlowe `Makefile.h100`: default `NPRE=8`, `CUDA_ARCH=sm_90`.
+- Cross-check Stellar vs Marlowe drift before copying namelists or plot commands.
+
+## Profiling and debug
+
+- Never enable `DEBUG=1` for performance benchmarks without noting it in handoff / run-log.
+- NCU/Nsys cases: cite exact `./submit_profiles.sh` case name (e.g. `nsys-l7`, `ncu-ot`, `ot-amr`).
+
+## Submit suggestions
+
+When proposing a run, include:
+
+1. Harness directory (`~/hackathon` or `~/marlowe/hackathon`)
+2. Full command with case name and relevant env overrides
+3. Expected binary (`ramses3d`, `ramses3d.mhd`, `ramses3d.hydro`)
+4. Sanity checks in `run.log`
+
+## Namelists
+
+- Show diff for any default change.
+- Warn about 80-char path truncation; prefer staged `ic_grafic` symlink over long absolute paths.

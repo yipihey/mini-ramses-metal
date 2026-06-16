@@ -1,0 +1,34 @@
+---
+description: Fortran and CUDA Fortran physics edits for mini-ramses GPU kernels
+globs: "**/*.{f90,F90,cuf,CUF}"
+alwaysApply: false
+---
+
+# Fortran / CUDA Fortran
+
+Read `AGENTS.md` and vault [[mini-ramses — debug-playbook]] before cluster-facing changes.
+
+## Physics and diffs
+
+- Never change physics silently. Show unified diff; explain numerical impact.
+- Prefer minimal diffs; match surrounding naming, module layout, and `-Mfreeform` style.
+- Respect Fortran conventions in this tree (implicit none, existing parameter names).
+
+## CUDA Fortran
+
+- Shared memory: MHD path requires **`nsubgrid=1`** — larger subgrid can OOM shared memory at launch.
+- Module build order matters (`gpu_utils` before `gpu_hydro`, `gpu_runner`, `gpu_part`). Do not reorder Makefile deps casually.
+- `atomicAdd` generic resolution: fix argument types at call site without altering physics (playbook #3).
+
+## Build flags
+
+- **Never combine `NPRE=4` with `FASTMATH=1`** — illegal memory access at runtime.
+- When touching precision-sensitive kernels, note recommended `GPU_NPRE` for harness rebuild.
+
+## Namelist / IC paths
+
+Before suggesting MHD/cluster runs: remind that `initfile` is **`character*80`**. Use harness `ic_grafic` symlink pattern; verify `Reading ic_grafic/ic_bxleft` and `emag>0` at step 1 in `run.log`.
+
+## Scope
+
+Core `.f90` / `.cuf` edits deserve review-level care. Do not refactor unrelated modules in the same change.

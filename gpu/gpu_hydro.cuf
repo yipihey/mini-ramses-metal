@@ -1486,7 +1486,7 @@ contains
        p = local_subgrid%pressure  (i,j,k)
 #endif
 
-       ! TVD slopes (half*dq).
+       ! Compute the TVD Slopes
        call compute_tvd_slopes(local_subgrid, i, j, k, slope, &
 #if NVAR>5+NENER
             & scalar_sub, dscal_x, dscal_y, dscal_z, &
@@ -2225,6 +2225,7 @@ contains
        end do
 #endif
 
+       ! Unpack the fluxes into the interface state arrays
        if (work_idx < interface_array_size) then
           left_interfaces_x%density   (i,j,k) = flux%density
           left_interfaces_x%velocity_x(i,j,k) = flux%momentum_x
@@ -3715,8 +3716,9 @@ contains
     end do
 
   end subroutine hydro_flag_kernel
-  ! =========================================================================
+  ! =========================================================================~
 
+  ! =========================================================================
   attributes(global) subroutine upload_kernel(grid, father, uold, bold, head_idx, num_octs, &
        & internal_energy, gamma, smallr, smallc2)
     type(oct), device :: grid(*)
@@ -3757,7 +3759,8 @@ contains
     k = grid(oct_idx)%ckey(3) - 2 * grid(father_idx)%ckey(3)
     cell_idx = 1 + i + 2*j + 4*k
 
-    ! Restrict all conserved variable slots.
+    ! Reset conservative variables
+    ! Average children variables
     do ivar = 1, nvar
        uold(cell_idx, ivar, father_idx) = 0_dp
        do ind = 1, twotondim
@@ -3795,13 +3798,15 @@ contains
     end do
 #endif
 
-    ! Overwrite total energy with averaged internal energy when requested.
+    ! Non-conservative upload
     if (internal_energy) then
 #ifndef MHD
        smalle = smallc2/gamma/(gamma - 1.0_dp)
 #endif
        eint_sum = 0.0_dp
        do ind = 1, twotondim
+          ! Compute children density
+          ! Compute children kinetic and internal energy
           ekin = 0.0_dp
           do idim = 1, 3
              ekin = ekin + 0.5_dp*uold(ind,idim+1,oct_idx)**2 / max(uold(ind,1,oct_idx), smallr)
@@ -3821,12 +3826,15 @@ contains
 #endif
 #ifndef MHD
           density = max(uold(ind,1,oct_idx), smallr)
+          ! Average children internal energy
           eint_sum = eint_sum + max(uold(ind,5,oct_idx) - ekin - erad - emag, smalle*density)
 #else
+          ! Average children internal energy
           eint_sum = eint_sum + uold(ind,5,oct_idx) - ekin - erad - emag
 #endif
        end do
-       ! Add back the parent-cell ekin (+erad)(+emag), recomputed from the restricted parent
+       ! Compute father density
+       ! Compute father kinetic energy
        ekin = 0.0_dp
        do idim = 1, 3
           ekin = ekin + 0.5_dp*uold(cell_idx,idim+1,father_idx)**2 / max(uold(cell_idx,1,father_idx), smallr)
@@ -3843,12 +3851,14 @@ contains
           erad = erad + uold(cell_idx,5+idim,father_idx)
        end do
 #endif
+       ! Add father internal energy
        uold(cell_idx,5,father_idx) = eint_sum*inv_twotondim + ekin + erad + emag
     end if
 
   end subroutine upload_kernel
   ! =========================================================================
 
+  ! =========================================================================
   attributes(global) subroutine set_uold_kernel(uold, unew, bold, bnew, head_idx, num_octs)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
@@ -3899,6 +3909,7 @@ contains
   end subroutine set_uold_kernel
   ! =========================================================================
 
+  ! =========================================================================
   attributes(global) subroutine set_unew_kernel(uold, unew, bold, bnew, head_idx, num_octs)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
@@ -3949,6 +3960,7 @@ contains
   end subroutine set_unew_kernel
   ! =========================================================================
 
+  ! =========================================================================
   attributes(global) subroutine sync_hydro(uold, f, constant_gravity, head_idx, num_octs, gamma, smallr, smallc2, dt)
     real(kind=8), device :: constant_gravity(1:3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
@@ -3995,13 +4007,17 @@ contains
        uold(cell_idx, 4, oct_idx) = mz
        uold(cell_idx, 5, oct_idx) = ener
 #else
-       ! Hydro: c2p -> velocity update -> p2c (unchanged).
+       ! Collect conservative variables
        cons%density    = uold(cell_idx, 1, oct_idx)
        cons%momentum_x = uold(cell_idx, 2, oct_idx)
        cons%momentum_y = uold(cell_idx, 3, oct_idx)
        cons%momentum_z = uold(cell_idx, 4, oct_idx)
        cons%energy     = uold(cell_idx, 5, oct_idx)
+
+       ! Convert to primitive
        prim = conserved_2_primitive(cons, gamma, smallr, smallc2)
+
+       ! Update velocity
 #ifdef GRAV
        prim%velocity_x = prim%velocity_x + f(cell_idx, 1, oct_idx) * dt
        prim%velocity_y = prim%velocity_y + f(cell_idx, 2, oct_idx) * dt
@@ -4011,7 +4027,11 @@ contains
        prim%velocity_y = prim%velocity_y + constant_gravity(2) * dt
        prim%velocity_z = prim%velocity_z + constant_gravity(3) * dt
 #endif
+
+       ! Convert back to conservative
        cons = primitive_2_conserved(prim, gamma)
+
+       ! Save to main memory
        uold(cell_idx, 1, oct_idx) = cons%density
        uold(cell_idx, 2, oct_idx) = cons%momentum_x
        uold(cell_idx, 3, oct_idx) = cons%momentum_y
@@ -4020,7 +4040,9 @@ contains
 #endif
 
   end subroutine sync_hydro
+  ! =========================================================================
 
+  ! =========================================================================
   attributes(global) subroutine grav_hydro(uold, unew, f, constant_gravity, head_idx, num_octs, gamma, smallr, smallc2, dt)
     real(kind=8), device :: constant_gravity(1:3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
@@ -4032,6 +4054,7 @@ contains
     real(kind=8), intent(in), value :: dt
 
     integer :: block_idx, cell_idx, oct_idx
+    ! real(kind=8) :: rho_old, rho_new
     real(kind=dp) :: rho_old_new_ratio_dt
     real(kind=dp) :: d, mx, my, mz, e_prim, fact
     type(primitive_t) :: prim
@@ -4069,14 +4092,22 @@ contains
        unew(cell_idx, 4, oct_idx) = mz
        unew(cell_idx, 5, oct_idx) = e_prim + 0.5_dp*(mx*mx + my*my + mz*mz)/d
 #else
-       ! Hydro: c2p -> velocity update -> p2c (unchanged).
+       ! Collect conservative variables
        cons%density    = unew(cell_idx, 1, oct_idx)
        cons%momentum_x = unew(cell_idx, 2, oct_idx)
        cons%momentum_y = unew(cell_idx, 3, oct_idx)
        cons%momentum_z = unew(cell_idx, 4, oct_idx)
        cons%energy     = unew(cell_idx, 5, oct_idx)
+
+       ! Convert to primitive
        prim = conserved_2_primitive(cons, gamma, smallr, smallc2)
+
+       ! Old and new densities
+       ! rho_old = uold(cell_idx, 1, oct_idx)
+       ! rho_new = unew(cell_idx, 1, oct_idx)
        rho_old_new_ratio_dt = dt * uold(cell_idx, 1, oct_idx) / unew(cell_idx, 1, oct_idx)
+
+       ! Update velocity
 #ifdef GRAV
        prim%velocity_x = prim%velocity_x + f(cell_idx, 1, oct_idx) * rho_old_new_ratio_dt
        prim%velocity_y = prim%velocity_y + f(cell_idx, 2, oct_idx) * rho_old_new_ratio_dt
@@ -4086,7 +4117,11 @@ contains
        prim%velocity_y = prim%velocity_y + constant_gravity(2) * rho_old_new_ratio_dt
        prim%velocity_z = prim%velocity_z + constant_gravity(3) * rho_old_new_ratio_dt
 #endif
+
+       ! Convert back to conservative
        cons = primitive_2_conserved(prim, gamma)
+
+       ! Save to main memory
        unew(cell_idx, 1, oct_idx) = cons%density
        unew(cell_idx, 2, oct_idx) = cons%momentum_x
        unew(cell_idx, 3, oct_idx) = cons%momentum_y
@@ -4095,7 +4130,9 @@ contains
 #endif
 
   end subroutine grav_hydro
+  ! =========================================================================
 
+  ! =========================================================================
   ! Comments from Guillaume:
   ! Modifying data_out, vol_loc, mass_loc, ekin_loc, eint_loc, emag_loc, dt_loc, sound_speed, grav, ctot 
   ! requires changing other files in the code. This should be done if OK for numerical accuracy.
@@ -4197,11 +4234,17 @@ contains
                      & + abs(primitive%velocity_z) + sqrt(c2v + sqrt(c2v**2 - a2*primitive%Bz**2*rinv))
              endif
 #else
-             ! Convert to primitive variables (hydro)
+             ! Convert to primitive variables
              primitive = conserved_2_primitive(conserved, gamma, smallr, smallc2)
+
+             ! Compute extensive quantities
+             vol_loc = dx*dx*dx
              mass_loc = primitive%density*vol_loc
+             ekin_loc = conserved%energy*vol_loc
              eint_loc = primitive%pressure/(gamma-1d0)*vol_loc
              emag_loc = 0_dp
+
+             ! Compute time step
              sound_speed = sqrt(gamma*primitive%pressure/primitive%density)
              ctot = (abs(primitive%velocity_x)+abs(primitive%velocity_y)+abs(primitive%velocity_z)+3d0*sound_speed)
 #endif
@@ -4233,6 +4276,7 @@ contains
     endif
 
   end subroutine cmpdt_kernel
+  ! =========================================================================
 
   ! =========================================================================
   attributes(global) subroutine gather_send_buffer(uold, uold_send, idx_send, num_send)
@@ -4267,6 +4311,7 @@ contains
     end do
 
   end subroutine gather_send_buffer
+  ! =========================================================================
 
   ! =========================================================================
   attributes(global) subroutine scatter_recv_buffer(uold, uold_recv, idx_recv, num_recv)
@@ -4301,9 +4346,10 @@ contains
     end do
 
   end subroutine scatter_recv_buffer
-
-  !> @brief Check an array of nvar reals for NaN and print location if found
   ! =========================================================================
+
+  ! =========================================================================
+  !> @brief Check an array of nvar reals for NaN and print location if found
   attributes(device) subroutine check_nan(label, arr, ix, iy, iz, ivar_hint)
     character(len=1), intent(in) :: label
     real(kind=dp), intent(in) :: arr(1:nvar)
@@ -4315,9 +4361,10 @@ contains
       end if
     end do
   end subroutine check_nan
-
-  !> @brief Load conserved variables for a cell given a subgrid and a 1-based ubsgrid index. E.g. for an oct it runs from 1 to 6
   ! =========================================================================
+
+  ! =========================================================================
+  !> @brief Load conserved variables for a cell given a subgrid and a 1-based ubsgrid index. E.g. for an oct it runs from 1 to 6
   attributes(device) function load_conserved(ix, iy, iz, uold, nbor, subgrid_idx) result(Uin)
 
     real(kind=dp) :: Uin(1:nvar)
@@ -4342,8 +4389,8 @@ contains
     end do
   end function load_conserved
 
-  !> @brief Add to conserved variables for a cell given a subgrid and a 1-based ubsgrid index. E.g. for an oct it runs from 1 to 6
   ! =========================================================================
+  !> @brief Add to conserved variables for a cell given a subgrid and a 1-based ubsgrid index. E.g. for an oct it runs from 1 to 6
   attributes(device) subroutine add_conserved(ix, iy, iz, dU, idim, unew, nbor, grid, father, subgrid_idx, ngridmax, &
        & skip_refined_fluxes, coarse_update)
 
@@ -4420,6 +4467,7 @@ contains
     end do
   end subroutine add_conserved
 
+  ! ---------------------------------------------------------------------------
   ! Device subroutine: compute slopes qds(ix,iy,ivar,dir) for one (ix,iy) point
   ! qds stores the gradient dqds, including the 1/dx factor.
   ! slope_type: 0=zero, 1=minmod, 2=moncen, 3=positivity-preserving 3D unsplit

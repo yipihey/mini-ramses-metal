@@ -1,0 +1,34 @@
+---
+description: Session-start and handoff behavior for mini-ramses agents
+alwaysApply: true
+---
+
+# Agent behavior
+
+## Session start
+
+1. Read repo `AGENTS.md`.
+2. Read Obsidian [[mini-ramses — debug-playbook]] before any cluster build or submit.
+3. Read [[mini-ramses — hub]] and the target [[runbook — Stellar]] or [[runbook — Marlowe]].
+
+Vault root: `/Users/moseley/Documents/Obsidian Vault/20-projects/mini-ramses/`
+
+## Execution limits
+
+- This agent usually **cannot** compile NVHPC/CUDA or run Slurm jobs from Mac.
+- Provide exact cluster commands; state assumptions (branch, `MINIRAM`, flags, case name).
+- Do not claim a fix worked without fresh `run.log` verification.
+
+## Edits
+
+- Never silently change namelist defaults — show diff.
+- Do not commit unless explicitly asked.
+
+## Session end (long tasks)
+
+Summarize for user handoff:
+
+- SHAs / files changed
+- Verified vs assumed
+- Next exact command (include `./submit_profiles.sh <case>` name)
+- Remind about `templates/session-handoff.md` in vault
