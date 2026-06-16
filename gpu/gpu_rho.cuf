@@ -444,14 +444,14 @@ contains
              ! Offset of corner from first cell of source oct: in (-1, 0, 1, 2)
              sum_d = key_cic(idim, ind) - 2*grid(oct_idx)%ckey(idim)
              if (sum_d < 0) then
-                in_vec(idim)         = -1
+                in_vec(idim) = -1
              else
-                in_vec(idim)         = sum_d / 2
+                in_vec(idim) = sum_d / 2
              end if
              tgt_cell_local(idim) = sum_d - 2*in_vec(idim)
           end do
 
-          ind_nbor    = 1 + (1+in_vec(1)) + nsubgridp2*(1+in_vec(2)) + nsubgridp2sq*(1+in_vec(3))
+          ind_nbor = 1 + (1+in_vec(1)) + nsubgridp2*(1+in_vec(2)) + nsubgridp2sq*(1+in_vec(3))
           tgt_oct_idx = nbor(ind_nbor, oct_idx)
           if (tgt_oct_idx > ngridmax) cycle
 
