@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(git checkout *)",
-      "Bash(grep -n \"type global_t\\\\|::t\\\\b\\\\|:: t\\\\b\\\\|real.*::.*t$\\\\|dtnew\" amr/amr_commons.f90)",
-      "Bash(rg -n \"subgrid_conserved_2_primitive\" --type-add 'fort:*.{f90,F90,cuf}' -tfort)"
-    ]
-  }
-}
