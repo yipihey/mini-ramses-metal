@@ -220,12 +220,6 @@ subroutine init_amr(r,g,m,type)
      allocate(bnew(1:twotondim,1:6,1:m%ngridmax+m%ncachemax))
      bold=0d0
      bnew=0d0
-     ! NOTE: bold/bnew are the ONLY MHD device allocations. The cube
-     ! mhd_integrator_kernel keeps its whole working set (corner states, face-B
-     ! slopes) in kernel shared memory -- the former mhd_corner_scratch /
-     ! mhd_dbf_scratch global scratch arrays (~174 KB per oct of the integrated
-     ! level) no longer exist (see the B1 budget block in gpu/gpu_hydro.cuf).
-     ! Allocated when MHD=1 at compile time only.
 #endif
 #ifdef GRAV
      allocate(rho(1:twotondim,1:m%ngridmax+m%ncachemax))
