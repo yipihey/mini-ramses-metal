@@ -117,9 +117,9 @@ subroutine jeans_length_refine(r,uu,bb,factG,size_cell,n_jeans,ok)
   end do
 #endif
 #ifdef MHD
-  etherm=etherm-0125d0*(bb(1)+bb(4))**2
-  etherm=etherm-0125d0*(bb(2)+bb(5))**2
-  etherm=etherm-0125d0*(bb(3)+bb(6))**2
+  etherm=etherm-0.125d0*(bb(1)+bb(4))**2
+  etherm=etherm-0.125d0*(bb(2)+bb(5))**2
+  etherm=etherm-0.125d0*(bb(3)+bb(6))**2
 #endif
 
   ! compute the temperature

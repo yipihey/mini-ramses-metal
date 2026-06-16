@@ -5,25 +5,284 @@ module cooling_device
   use cudafor
   implicit none
 
+  ! -----------------------------------------------------------------------
+  ! Device-side copies of cooling_module::cooling_table.
+  ! Populated by gpu_upload_cooling_table; must be re-uploaded whenever
+  ! set_table is called (cosmological runs: once per coarse step).
+  ! -----------------------------------------------------------------------
+  integer,  device :: n1_d, n2_d
+  real(dp), device :: dlog_nH_d, dlog_T2_d
+
+  real(dp), device, allocatable :: nH_tbl_d(:)            ! log10(nH) axis [n1]
+  real(dp), device, allocatable :: T2_tbl_d(:)            ! log10(T2) axis [n2]
+  real(dp), device, allocatable :: cool_d(:,:)            ! [n1,n2]
+  real(dp), device, allocatable :: heat_d(:,:)
+  real(dp), device, allocatable :: cool_com_d(:,:)
+  real(dp), device, allocatable :: heat_com_d(:,:)
+  real(dp), device, allocatable :: metal_d(:,:)
+  real(dp), device, allocatable :: cool_prime_d(:,:)
+  real(dp), device, allocatable :: heat_prime_d(:,:)
+  real(dp), device, allocatable :: cool_com_prime_d(:,:)
+  real(dp), device, allocatable :: heat_com_prime_d(:,:)
+  real(dp), device, allocatable :: metal_prime_d(:,:)
+
+  ! Host-side flag: has the table been copied to the device yet?
+  ! gpu_cooling uses this to upload the table lazily (only once for
+  ! non-cosmological runs). Cosmological runs reset it via a fresh
+  ! gpu_upload_cooling_table call after each set_table (see r_cooling_fine).
+  logical, save :: table_uploaded = .false.
+
 contains
 
   ! =========================================================================
+  subroutine gpu_upload_cooling_table(c)
+  ! =========================================================================
+  ! Copy the host cooling table to the device module arrays above.
+  ! Call once after the initial set_table and after every subsequent
+  ! set_table call (cosmological runs update the table each coarse step).
+  ! =========================================================================
+    use cooling_module, only: cooling_t
+    implicit none
+    type(cooling_t), intent(in) :: c
+    integer  :: n1, n2
+
+    n1 = c%table%n1
+    n2 = c%table%n2
+
+    ! (Re-)allocate device arrays when dimensions change
+    if (allocated(cool_d)) then
+       if (size(cool_d, 1) /= n1 .or. size(cool_d, 2) /= n2) then
+          deallocate(nH_tbl_d, T2_tbl_d)
+          deallocate(cool_d, heat_d, cool_com_d, heat_com_d, metal_d)
+          deallocate(cool_prime_d, heat_prime_d, &
+               &     cool_com_prime_d, heat_com_prime_d, metal_prime_d)
+       end if
+    end if
+
+    if (.not. allocated(cool_d)) then
+       allocate(nH_tbl_d(n1), T2_tbl_d(n2))
+       allocate(cool_d(n1,n2), heat_d(n1,n2))
+       allocate(cool_com_d(n1,n2), heat_com_d(n1,n2), metal_d(n1,n2))
+       allocate(cool_prime_d(n1,n2), heat_prime_d(n1,n2))
+       allocate(cool_com_prime_d(n1,n2), heat_com_prime_d(n1,n2))
+       allocate(metal_prime_d(n1,n2))
+    end if
+
+    ! Axis spacing (log-space, uniform by construction)
+    n1_d      = n1
+    n2_d      = n2
+    dlog_nH_d = dble(n1 - 1) / (c%table%nH(n1) - c%table%nH(1))
+    dlog_T2_d = dble(n2 - 1) / (c%table%T2(n2) - c%table%T2(1))
+
+    ! Upload axes and all rate arrays
+    nH_tbl_d         = c%table%nH
+    T2_tbl_d         = c%table%T2
+    cool_d           = c%table%cool
+    heat_d           = c%table%heat
+    cool_com_d       = c%table%cool_com
+    heat_com_d       = c%table%heat_com
+    metal_d          = c%table%metal
+    cool_prime_d     = c%table%cool_prime
+    heat_prime_d     = c%table%heat_prime
+    cool_com_prime_d = c%table%cool_com_prime
+    heat_com_prime_d = c%table%heat_com_prime
+    metal_prime_d    = c%table%metal_prime
+
+    table_uploaded = .true.
+
+  end subroutine gpu_upload_cooling_table
+
+  ! =========================================================================
+  attributes(device) subroutine solve_cooling_gpu( &
+       & nH_cell, T2_cell, Zsolar_cell, boost_cell, dt, X_frac, delta_T2_cell)
+  ! =========================================================================
+  ! Single-cell equilibrium cooling ODE integrator.
+  ! Device-side port of cooling_module::solve_cooling.
+  !
+  ! Each GPU thread owns exactly one cell and runs its own independent
+  ! subcycled implicit loop to completion; there is no inter-thread
+  ! coordination and no active-cell list (the CPU while(n>0) worklist is
+  ! replaced by a simple do while(time < time_max) per thread).
+  !
+  ! nH_cell      : H number density [H/cc]
+  ! T2_cell      : T/mu [K] already reduced by EOS floor (caller's job)
+  ! Zsolar_cell  : metallicity in solar units
+  ! boost_cell   : self-shielding factor (1 = no shielding)
+  ! dt           : cooling timestep [s]
+  ! X_frac       : hydrogen mass fraction (c%X on the host)
+  ! delta_T2_cell: output T/mu change [K]
+  ! =========================================================================
+    implicit none
+    real(dp), value,  intent(in)  :: nH_cell, T2_cell, Zsolar_cell, boost_cell, dt, X_frac
+    real(dp),         intent(out) :: delta_T2_cell
+
+    ! kB in CGS: Boltzmann constant [erg/K]
+    real(dp), parameter :: kB_cgs    = 1.380649d-16
+    real(dp), parameter :: varmax    = 4.0d0
+    real(dp), parameter :: T2_max_fix = 1.0d9
+
+    real(dp) :: h, h2, h3, precoeff, logT2max
+    real(dp) :: facH, facT, w1H, w2H
+    real(dp) :: tau, tau_ini, tau_old
+    real(dp) :: time, time_old, time_max, wmax
+    real(dp) :: fa, fb, fprimea, fprimeb, al, be, ga
+    real(dp) :: cool, heat, cool_com, heat_com, metal
+    real(dp) :: cool_prime, heat_prime, cool_com_prime, heat_com_prime, metal_prime
+    real(dp) :: lambda, lambda_prime, wcool
+    real(dp) :: yy, yy2, yy3
+    integer  :: i_nH, i_T2, iter
+
+    ! --- Derived axis constants ---
+    h         = 1.0d0 / dlog_T2_d
+    h2        = h * h
+    h3        = h2 * h
+    precoeff  = 2.0d0 * X_frac / (3.0d0 * kB_cgs)
+    logT2max  = log10(T2_max_fix)
+
+    ! --- Density table index: fixed for this cell throughout the ODE ---
+    facH = MIN(MAX(log10(nH_cell / boost_cell), nH_tbl_d(1)), nH_tbl_d(n1_d))
+    i_nH = MIN(MAX(int((facH - nH_tbl_d(1)) * dlog_nH_d) + 1, 1), n1_d - 1)
+    w1H  = (nH_tbl_d(i_nH + 1) - facH) * dlog_nH_d
+    w2H  = (facH   - nH_tbl_d(i_nH)  ) * dlog_nH_d
+
+    ! --- ODE initial state ---
+    tau      = T2_cell
+    tau_ini  = T2_cell
+    time_max = dt * precoeff * nH_cell
+    time     = 0.0d0
+    wmax     = 1.0d0 / time_max
+    ! Defaults for the edge case where the loop body never executes (dt ~ 0)
+    tau_old  = tau
+    time_old = 0.0d0
+
+    ! -----------------------------------------------------------------------
+    ! Subcycled implicit step
+    ! -----------------------------------------------------------------------
+    iter = 0
+    do while (time < time_max)
+
+       iter = iter + 1
+       if (iter > 500) exit   ! bail-out; device cannot STOP
+
+       facT = log10(tau)
+
+       if (facT <= logT2max) then
+
+          i_T2 = MIN(MAX(int((facT - T2_tbl_d(1)) * dlog_T2_d) + 1, 1), n2_d - 1)
+          yy   = facT - T2_tbl_d(i_T2)
+          yy2  = yy * yy
+          yy3  = yy2 * yy
+
+          ! cool
+          fa      = cool_d(i_nH,i_T2  )*w1H + cool_d(i_nH+1,i_T2  )*w2H
+          fb      = cool_d(i_nH,i_T2+1)*w1H + cool_d(i_nH+1,i_T2+1)*w2H
+          fprimea = cool_prime_d(i_nH,i_T2  )*w1H + cool_prime_d(i_nH+1,i_T2  )*w2H
+          fprimeb = cool_prime_d(i_nH,i_T2+1)*w1H + cool_prime_d(i_nH+1,i_T2+1)*w2H
+          al = fprimea
+          be = 3.0d0*(fb-fa)/h2 - (2.0d0*fprimea+fprimeb)/h
+          ga = (fprimea+fprimeb)/h2 - 2.0d0*(fb-fa)/h3
+          cool       = 10.0d0**(fa + al*yy + be*yy2 + ga*yy3)
+          cool_prime = cool/tau * (al + 2.0d0*be*yy + 3.0d0*ga*yy2)
+
+          ! heat
+          fa      = heat_d(i_nH,i_T2  )*w1H + heat_d(i_nH+1,i_T2  )*w2H
+          fb      = heat_d(i_nH,i_T2+1)*w1H + heat_d(i_nH+1,i_T2+1)*w2H
+          fprimea = heat_prime_d(i_nH,i_T2  )*w1H + heat_prime_d(i_nH+1,i_T2  )*w2H
+          fprimeb = heat_prime_d(i_nH,i_T2+1)*w1H + heat_prime_d(i_nH+1,i_T2+1)*w2H
+          al = fprimea
+          be = 3.0d0*(fb-fa)/h2 - (2.0d0*fprimea+fprimeb)/h
+          ga = (fprimea+fprimeb)/h2 - 2.0d0*(fb-fa)/h3
+          heat       = 10.0d0**(fa + al*yy + be*yy2 + ga*yy3)
+          heat_prime = heat/tau * (al + 2.0d0*be*yy + 3.0d0*ga*yy2)
+
+          ! cool_com
+          fa      = cool_com_d(i_nH,i_T2  )*w1H + cool_com_d(i_nH+1,i_T2  )*w2H
+          fb      = cool_com_d(i_nH,i_T2+1)*w1H + cool_com_d(i_nH+1,i_T2+1)*w2H
+          fprimea = cool_com_prime_d(i_nH,i_T2  )*w1H + cool_com_prime_d(i_nH+1,i_T2  )*w2H
+          fprimeb = cool_com_prime_d(i_nH,i_T2+1)*w1H + cool_com_prime_d(i_nH+1,i_T2+1)*w2H
+          al = fprimea
+          be = 3.0d0*(fb-fa)/h2 - (2.0d0*fprimea+fprimeb)/h
+          ga = (fprimea+fprimeb)/h2 - 2.0d0*(fb-fa)/h3
+          cool_com       = 10.0d0**(fa + al*yy + be*yy2 + ga*yy3)
+          cool_com_prime = cool_com/tau * (al + 2.0d0*be*yy + 3.0d0*ga*yy2)
+
+          ! heat_com
+          fa      = heat_com_d(i_nH,i_T2  )*w1H + heat_com_d(i_nH+1,i_T2  )*w2H
+          fb      = heat_com_d(i_nH,i_T2+1)*w1H + heat_com_d(i_nH+1,i_T2+1)*w2H
+          fprimea = heat_com_prime_d(i_nH,i_T2  )*w1H + heat_com_prime_d(i_nH+1,i_T2  )*w2H
+          fprimeb = heat_com_prime_d(i_nH,i_T2+1)*w1H + heat_com_prime_d(i_nH+1,i_T2+1)*w2H
+          al = fprimea
+          be = 3.0d0*(fb-fa)/h2 - (2.0d0*fprimea+fprimeb)/h
+          ga = (fprimea+fprimeb)/h2 - 2.0d0*(fb-fa)/h3
+          heat_com       = 10.0d0**(fa + al*yy + be*yy2 + ga*yy3)
+          heat_com_prime = heat_com/tau * (al + 2.0d0*be*yy + 3.0d0*ga*yy2)
+
+          ! metal
+          fa      = metal_d(i_nH,i_T2  )*w1H + metal_d(i_nH+1,i_T2  )*w2H
+          fb      = metal_d(i_nH,i_T2+1)*w1H + metal_d(i_nH+1,i_T2+1)*w2H
+          fprimea = metal_prime_d(i_nH,i_T2  )*w1H + metal_prime_d(i_nH+1,i_T2  )*w2H
+          fprimeb = metal_prime_d(i_nH,i_T2+1)*w1H + metal_prime_d(i_nH+1,i_T2+1)*w2H
+          al = fprimea
+          be = 3.0d0*(fb-fa)/h2 - (2.0d0*fprimea+fprimeb)/h
+          ga = (fprimea+fprimeb)/h2 - 2.0d0*(fb-fa)/h3
+          metal       = 10.0d0**(fa + al*yy + be*yy2 + ga*yy3)
+          metal_prime = metal/tau * (al + 2.0d0*be*yy + 3.0d0*ga*yy2)
+
+          ! Net cooling rate and temperature derivative
+          lambda       = cool + Zsolar_cell*metal - heat &
+               &       + (cool_com - heat_com) / nH_cell
+          lambda_prime = cool_prime + Zsolar_cell*metal_prime - heat_prime &
+               &       + (cool_com_prime - heat_com_prime) / nH_cell
+
+       else
+          ! Bremsstrahlung above table range
+          lambda       = 1.42d-27 * sqrt(tau) * 1.1d0
+          lambda_prime = lambda / (2.0d0 * tau)
+       end if
+
+       ! Adaptive step size
+       wcool = MAX(ABS(lambda)/tau*varmax, wmax, -lambda_prime*varmax)
+
+       ! Advance: save previous state for final exact-time interpolation
+       tau_old  = tau
+       time_old = time
+       tau  = tau * (1.0d0 + lambda_prime/wcool - lambda/tau/wcool) &
+                  / (1.0d0 + lambda_prime/wcool)
+       time = time + 1.0d0 / wcool
+
+    end do
+
+    ! Interpolate to exact end time between the two bracketing steps
+    if (time > time_old) then
+       tau = tau     * (time_max - time_old) / (time - time_old) &
+           + tau_old * (time     - time_max) / (time - time_old)
+    end if
+
+    delta_T2_cell = tau - tau_ini
+
+  end subroutine solve_cooling_gpu
+
+  ! =========================================================================
   attributes(global) subroutine cooling_kernel(uold, grid, head_idx, num_octs, &
-       & gamma, smallr, smallc2, dt, &
-       & eos_type, eos_T2, eos_nH, eos_index, scale_T2, scale_nH)
+       & gamma, smallr, smallc2, dt, eos_type, eos_T2, eos_nH, eos_index, &
+       & scale_T2, scale_nH, cooling, metal, imetal, z_ave, self_shielding, &
+       & X_frac, T2max)
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
-    integer(kind=4), intent(in), value :: head_idx
-    integer(kind=4), intent(in), value :: num_octs
-    real(kind=dp), value :: gamma, smallr, smallc2
+    integer(kind=4), intent(in), value :: head_idx, num_octs
+    real(kind=8), value :: gamma, smallc2
     real(kind=8), value :: eos_T2, eos_nH, eos_index
     real(kind=8), value :: dt, scale_T2, scale_nH
     integer(kind=4), value :: eos_type
+    logical, value :: cooling, metal, self_shielding
+    integer(kind=4), value :: imetal
+    real(kind=8), value :: z_ave, X_frac, T2max, smallr
 
     integer :: cell_idx, oct_idx, block_idx
-    real(kind=dp) :: density, energy, kinetic, poverrho, temperature, nH
-    real(kind=dp) :: velocity_x, velocity_y, velocity_z, T2min
-    logical :: ok_leaf
+    real(kind=8) :: density, energy, kinetic, poverrho, temperature, nH
+    real(kind=8) :: velocity_x, velocity_y, velocity_z, T2min
+    real(kind=8) :: Zsolar, boost, T2_therm, delta_T2
+    real(kind=8), parameter :: T2_min_fix = 1.0d-2
 
     block_idx = blockIdx%x - 1
 
@@ -35,7 +294,10 @@ contains
     ! Compute the cell idx
     cell_idx = threadIdx%x
 
-    ! Get cell physical variables
+    ! Only leaf cells are cooled (the CPU cooling_fine processes leaves only).
+    if (grid(oct_idx)%refined(cell_idx)) return
+
+    ! Get cell physical variables (density floored at smallr, as on the CPU)
     density     = max(uold(cell_idx, 1, oct_idx), smallr)
     velocity_x  = uold(cell_idx, 2, oct_idx) / density
     velocity_y  = uold(cell_idx, 3, oct_idx) / density
@@ -62,22 +324,41 @@ contains
        endif
     endif
 
-    ! Set gas temperature to T2min
-    temperature = T2min
+    ! Net equilibrium cooling at constant nH (table-based ODE solve).
+    if (cooling) then
 
-    ! Convert back to conservative variables
-    energy = temperature / scale_T2 / (gamma - 1.0d0) + kinetic
+       ! Metallicity in solar units
+       if (metal) then
+          Zsolar = uold(cell_idx, imetal, oct_idx) / density / 0.02d0
+       else
+          Zsolar = z_ave
+       end if
 
-    ! Leaf cell
-    ok_leaf = .not. grid(oct_idx)%refined(cell_idx)
+       ! Radiation self-shielding factor
+       if (self_shielding) then
+          boost = MAX(exp(-nH / 0.01d0), 1.0d-20)
+       else
+          boost = 1.0d0
+       end if
 
-    ! Update unew in main memory only for leaf cells
-    if (ok_leaf) then
-       uold(cell_idx, 5, oct_idx) = real(density * energy, kind=dp)
-    endif
+       ! Thermal temperature above the polytrope floor, clamped to the table
+       T2_therm = MIN(MAX(temperature - T2min, T2_min_fix), T2max)
+
+       call solve_cooling_gpu(nH, T2_therm, Zsolar, boost, dt, X_frac, delta_T2)
+
+    else
+       ! No cooling: behaviour reduces to the EOS temperature floor below.
+       T2_therm = 0.0d0
+       delta_T2 = 0.0d0
+    end if
+
+    ! Convert back to conservative variables and update uold.
+    ! When cooling=.false., T2_therm=delta_T2=0 so this reduces to the
+    ! original floor behaviour: energy = T2min/scale_T2/(gamma-1) + kinetic.
+    energy = (T2_therm + delta_T2 + T2min) / scale_T2 / (gamma - 1.0d0) + kinetic
+    uold(cell_idx, 5, oct_idx) = real(density * energy, kind=dp)
 
   end subroutine cooling_kernel
-  ! =========================================================================~
+  ! =========================================================================
 
 end module cooling_device
-

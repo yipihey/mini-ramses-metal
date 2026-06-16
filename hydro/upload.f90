@@ -230,7 +230,7 @@ subroutine upload_fine(s,ilevel)
            emag=0.0d0
 #ifdef MHD
            do idim=1,3
-              emag=emag+0.125d0*(m%bold(ind,idim,ioct)+m%bold(ind,idim+3,ioct))
+              emag=emag+0.125d0*(m%bold(ind,idim,ioct)+m%bold(ind,idim+3,ioct))**2
            end do
 #endif
            erad=0.0d0
@@ -249,7 +249,7 @@ subroutine upload_fine(s,ilevel)
         emag=0.0d0
 #ifdef MHD
         do idim=1,3
-           emag=emag+0.125d0*(m%bold(icell,idim,igrid)+m%bold(icell,idim+3,igrid))
+           emag=emag+0.125d0*(m%bold(icell,idim,igrid)+m%bold(icell,idim+3,igrid))**2
         end do
 #endif
         erad=0.0d0
