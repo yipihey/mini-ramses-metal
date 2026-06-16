@@ -449,7 +449,7 @@ contains
     if (num_octs > 0) then
        call nvtxStartRange("GPU cooling", color=0)!green
        call cooling_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>( &
-            & uold, grid, head_idx, num_octs,                                              &
+            & uold, bold, grid, head_idx, num_octs,                                        &
             & gamma, smallr, smallc2, dtcool, sim%r%eos_type, sim%r%eos_T2,                &
             & nH_eos, sim%r%eos_index, scale_T2, scale_nH,                                 &
             & sim%r%cooling, sim%r%metal, sim%r%imetal, sim%r%z_ave,                       &
@@ -514,7 +514,7 @@ contains
    call nvtxStartRange("Count Star Formation Sites", color=3)!blue
    ! Array flag1 contains the number of new stars formed per AMR cell
    ! Array prefix_sum = 1 if we have a SF site and 0 otherwise.
-   call count_site_kernel<<<num_blocks, num_threads>>>(grid, uold, flag1, prefix_sum, &
+   call count_site_kernel<<<num_blocks, num_threads>>>(grid, uold, bold, flag1, prefix_sum, &
         & head_idx, num_octs, ilevel, d0, dx, vol, factG, mstar, &
         & sim%r%ivar_refine, sim%r%var_cut_refine, sim%g%dtnew(ilevel), sim%g%texp, &
         & gamma, smallr, smallc2, sim%r%sf_model, sim%r%eps_star, sim%r%sgs_turb, sim%r%iturb)
@@ -1124,7 +1124,7 @@ contains
 
     if(num_octs > 0)then
        call nvtxStartRange("GPU user_flag", color=2)!yellow
-       call poisson_flag_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(flag1, nref, uold, &
+       call poisson_flag_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(flag1, nref, uold, bold, &
             & head_idx, num_octs, gamma, smallr, smallc2, mass_sph, m_refine, jeans_refine, factG, dx)
        call nvtxEndRange()
     endif
