@@ -232,21 +232,10 @@ recursive subroutine r_newdt_part(pst,ilevel,input_size,output,output_size)
      output%vmax=0.0d0
      output%ekin=0.0d0
 #ifdef _CUDA
-     if(pst%s%m%data_on_device)then
-        if(pst%s%r%part)then
-           if(pst%s%p%type/=PART_TYPE)then
-              write(*,*)'r_newdt_part: GPU path supports DM PART_TYPE only.'
-              call abort
-           endif
-           call gpu_newdt_part(pst%s, ilevel, output%vmax, output%ekin)
-        endif
-        if(pst%s%r%star .or. pst%s%r%sink .or. pst%s%r%tree .or. &
-           pst%s%r%trac .or. pst%s%r%dust)then
-           write(*,*)'r_newdt_part: star/sink/tree/trac/dust not supported on GPU.'
-           call abort
-        endif
-        return
+     if(pst%s%r%part)then
+        call gpu_newdt_part(pst%s, ilevel, output%vmax, output%ekin)
      endif
+     return
 #endif
      if(pst%s%r%part)then
         call newdt_part(pst%s%r,pst%s%g,pst%s%p   ,ilevel,output%ekin,output%vmax)

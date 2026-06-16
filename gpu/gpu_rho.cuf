@@ -371,17 +371,20 @@ contains
   ! =========================================================================~
 
   ! =========================================================================
-  attributes(global) subroutine deposit_rho(unew, rho, grid, nbor, &
-       & head_idx, num_octs, dx, vol_loc, ngridmax)
+  attributes(global) subroutine deposit_rho(uold, unew, rho, nref, grid, nbor, &
+       & head_idx, num_octs, dx, vol_loc, m_refine, mass_sph, var_cut_refine, ivar_refine, ngridmax)
+    type(oct), device :: grid(*)
+    real(kind=dp), device :: uold(1:twotondim, 1:nvar, *)
     real(kind=dp), device :: unew(1:twotondim, 1:nvar, *)
     real(kind=dp), device :: rho(1:twotondim, *)
-    type(oct), device :: grid(*)
+    real(kind=dp), device :: nref(1:twotondim, *)
     integer(kind=4), device :: nbor(1:subgridsize, *)
-    integer(kind=4), intent(in), value :: head_idx, num_octs, ngridmax
-    real(kind=8), intent(in), value :: dx, vol_loc
 
-    real(kind=dp) :: monopole, deposit
-    real(kind=8) :: x_com(3), dg(3), dd(3), vol_cic(8)
+    integer(kind=4), intent(in), value :: head_idx, num_octs, ngridmax, ivar_refine
+    real(kind=dp), intent(in), value :: dx, vol_loc, m_refine, mass_sph, var_cut_refine
+
+    real(kind=dp) :: monopole, deposit, mask
+    real(kind=dp) :: x_com(3), dg(3), dd(3), vol_cic(8)
     integer :: key_cic(3, 8), ig(3), id(3)
     integer :: oct_idx, cell_idx, idim, ind
     integer :: sum_d, in_vec(3), tgt_cell_local(3)
@@ -399,8 +402,29 @@ contains
     if (.not. grid(oct_idx)%refined(cell_idx)) then
 
        ! Leaf cell: COM is at cell centre, full weight deposits onto self
+
+       ! Update mass density
        deposit = monopole / vol_loc
        info = atomicadd(rho(cell_idx, oct_idx), deposit)
+
+       ! Update number density for refinement map
+       if (m_refine >= 0) then
+          deposit = monopole / mass_sph
+          info = atomicadd(nref(cell_idx, oct_idx), deposit)
+       endif
+
+!!$       ! Update particle density for refinement map
+!!$       if (m_refine >= 0) then
+!!$          deposit = monopole / mass_sph
+!!$          if (ivar_refine > 0) then
+!!$             mask = uold(cell_idx, ivar_refine, oct_idx) / uold(cell_idx, 1, oct_idx)
+!!$             if (mask > var_cut_refine) then
+!!$                info = atomicadd(nref(cell_idx, oct_idx), deposit)
+!!$             endif
+!!$          else
+!!$             info = atomicadd(nref(cell_idx, oct_idx), deposit)
+!!$          endif
+!!$       endif
 
     else
 
@@ -438,8 +462,30 @@ contains
           if (tgt_oct_idx > ngridmax) cycle
 
           tgt_cell_idx = 1 + tgt_cell_local(1) + 2*tgt_cell_local(2) + 4*tgt_cell_local(3)
+
+          ! Update mass density
           deposit = monopole * vol_cic(ind) / vol_loc
           info = atomicadd(rho(tgt_cell_idx, tgt_oct_idx), deposit)
+
+          ! Update number density for refinement map
+          if (m_refine >= 0) then
+             deposit = monopole * vol_cic(ind) / mass_sph
+             info = atomicadd(nref(tgt_cell_idx, tgt_oct_idx), deposit)
+          endif
+
+!!$          ! Update particle density for refinement map
+!!$          if (m_refine >= 0) then
+!!$             deposit = monopole * vol_cic(ind) / mass_sph
+!!$             if (ivar_refine > 0) then
+!!$                mask = uold(tgt_cell_idx, ivar_refine, tgt_oct_idx) / uold(tgt_cell_idx, 1, tgt_oct_idx)
+!!$                if (mask > var_cut_refine) then
+!!$                   info = atomicadd(nref(tgt_cell_idx, tgt_oct_idx), deposit)
+!!$                endif
+!!$             else
+!!$                info = atomicadd(nref(tgt_cell_idx, tgt_oct_idx), deposit)
+!!$             endif
+!!$          endif
+
        end do
 
     end if

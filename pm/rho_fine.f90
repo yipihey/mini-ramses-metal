@@ -673,15 +673,6 @@ recursive subroutine r_cic_part(pst,input_array,input_size)
 #ifdef _CUDA
      if(pst%s%m%data_on_device)then
         if(pst%s%r%part)then
-           if(pst%s%p%type/=PART_TYPE)then
-              write(*,*)'ERROR: r_cic_part: DM PART_TYPE only.'
-              call abort
-           endif
-           if(pst%s%r%part_mass_deposition_scheme/=1)then
-              write(*,'(A,I0,A)')'ERROR: r_cic_part: CIC only (scheme ', &
-                   & pst%s%r%part_mass_deposition_scheme,').'
-              call abort
-           endif
            if(pst%s%r%part_dep_algo==2)then
               call gpu_cic_part_medium(pst%s, ilevel, rtype)
            else if(pst%s%r%part_dep_algo==3)then
@@ -689,10 +680,6 @@ recursive subroutine r_cic_part(pst,input_array,input_size)
            else
               call gpu_cic_part_large(pst%s, ilevel, rtype)
            endif
-        endif
-        if(pst%s%r%star.or.pst%s%r%sink)then
-           write(*,*)'ERROR: r_cic_part: star/sink not supported on GPU.'
-           call abort
         endif
         return
      endif
