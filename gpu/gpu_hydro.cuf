@@ -1102,6 +1102,15 @@ contains
   ! ==========================================================================
 
   ! =========================================================================
+  !> @brief
+  !> Convert a subgrid of conserved variables to primitive variables in shared memory
+  !>
+  !> @param[in] head_idx : The head index of the octs at the current AMR level
+  !> @param[in] block_idx : The CUDA block index of the calling thread
+  !> @param[in] thread_idx : The index of calling thread within its block
+  !> @param[in] gamma : The adiabatic index
+  !> @param[out] local_subgrid : The local subgrid in shared memory to write the primitive variables to
+  !>
   !> Convert conserved subgrid to primitives; MHD fills face-B and scalars.
   attributes(device) subroutine subgrid_conserved_2_primitive(grid, uold, bold, f, constant_gravity, nbor, &
 #if NVAR>5+NENER
@@ -1147,31 +1156,26 @@ contains
 
     work_size = 2*nsubgrid+4
 
-    ! LEXICOGRAPHIC work decode (i fastest). The shared subgrids are unpadded
-    ! Lay out work items for coalesced shared-memory stores.
     do work_idx = thread_idx, work_size**3 - 1, blockDim%x
 
-       ! Destination lattice coordinates within the 6x6x6 subgrid
-       call index_1Dto3D(work_idx, work_size, work_size, i, j, k)
-
-       ! Which oct of the 3x3x3 stencil, and the cell's position bits in it
-       i_subgrid_idx = i/2
-       j_subgrid_idx = j/2
-       k_subgrid_idx = k/2
-       ib = i - 2*i_subgrid_idx
-       jb = j - 2*j_subgrid_idx
-       kb = k - 2*k_subgrid_idx
+       ! Compute the subgrid_indices index, i.e. determine the oct to load
+       call index_1Dto3D(work_idx/8, work_size/2, work_size/2, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx)
 
        ! Get subgrid index
        subgrid_idx = head_idx + block_idx
 
-       ! Get neighbour index (same formula the old decode produced:
-       ! ind_nbor = 1 + isub + 3*jsub + 9*ksub)
-       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
+       ! Get neighbour index
+       ind_nbor = work_idx/8 + 1
        source_idx = nbor(ind_nbor, subgrid_idx)
 
-       ! Morton cell index within the source oct
-       cell_idx = 1 + ib + 2*jb + 4*kb
+       ! Now that we have the index to the oct we need to figure out which cell within it to load
+       cell_idx = mod(work_idx, 8) + 1
+
+       ! Lastly, we need to figure out where in the subgrid the cell we will load goes
+       call index_1Dto3D(cell_idx - 1, 2, 2, ib, jb, kb)
+       i = ib + 2*i_subgrid_idx
+       j = jb + 2*j_subgrid_idx
+       k = kb + 2*k_subgrid_idx
 
 #ifdef MHD
        ! Six face-B components from bold.
