@@ -118,9 +118,6 @@ contains
     real(kind=dp) :: gamma, smallr, smallc2, dx, courant_factor
     real(kind=8), device, dimension(5) :: d_data !mass, ekin, eint, emag, dt
     real(kind=8), dimension(5) :: h_data
-#ifdef MHD
-    character(len=32) :: nvtx_lbl
-#endif
 
     courant_factor = sim%r%courant_factor
     gamma = sim%r%gamma
@@ -137,12 +134,7 @@ contains
     num_octs = sim%m%noct(ilevel)
     num_threads = 256
     num_blocks = (num_octs * twotondim + num_threads - 1 ) / num_threads
-#ifdef MHD
-    write(nvtx_lbl, '("GPU MHD cmpdt L",I0)') ilevel
-    call nvtxStartRange(trim(nvtx_lbl), color=0)!green
-#else
     call nvtxStartRange("GPU cmpdt", color=0)!green
-#endif
     call cmpdt_kernel<<<num_blocks, num_threads>>>(grid, uold, bold, f, &
         & constant_gravity, head_idx, num_octs, d_data, dx, gamma, &
         & smallr, smallc2, courant_factor, sim%r%induction)
@@ -177,21 +169,13 @@ contains
 
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
-#ifdef MHD
-    character(len=32) :: nvtx_lbl
-#endif
 
     head_idx = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
     threadsX_per_block = 8
     threadsY_per_block = 16
     num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
-#ifdef MHD
-    write(nvtx_lbl, '("GPU MHD Set_uold L",I0)') ilevel
-    call nvtxStartRange(trim(nvtx_lbl), color=0)!green
-#else
     call nvtxStartRange("GPU Set_uold", color=0)!green
-#endif
     call set_uold_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, unew, bold, bnew, head_idx, num_octs)
     call GPU_Error_Check(__FILE__, __LINE__)
     call nvtxEndRange()
@@ -214,21 +198,13 @@ contains
 
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
-#ifdef MHD
-    character(len=32) :: nvtx_lbl
-#endif
 
     head_idx = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
     threadsX_per_block = 8
     threadsY_per_block = 16
     num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
-#ifdef MHD
-    write(nvtx_lbl, '("GPU MHD Set_unew L",I0)') ilevel
-    call nvtxStartRange(trim(nvtx_lbl), color=0)!green
-#else
     call nvtxStartRange("GPU Set_unew", color=0)!green
-#endif
     call set_unew_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, unew, bold, bnew, head_idx, num_octs)
     call GPU_Error_Check(__FILE__, __LINE__)
     call nvtxEndRange()
@@ -333,9 +309,6 @@ contains
     real(dp) :: dt, dx, gamma, smallr, smallc2, switch_llf_dmin, switch_llf_pmin
     integer :: slope, riemann, slope_mag, riemann2d
     logical :: induction
-#ifdef MHD
-    character(len=32) :: nvtx_lbl
-#endif
 
     if(sim%r%verbose.and.sim%g%myid==1)write(*,'("   Entering gpu_godunov for level ",I2)')ilevel
 
@@ -356,12 +329,7 @@ contains
     num_subgrids = sim%m%noct(ilevel) / nsubgridtondim
     num_blocks = num_subgrids
 
-#ifdef MHD
-    write(nvtx_lbl, '("GPU MHD Godunov L",I0)') ilevel
-    call nvtxStartRange(trim(nvtx_lbl), color=0)!green
-#else
     call nvtxStartRange("GPU Godunov", color=0)!green
-#endif
 #ifdef PAPER
     threads_per_block = (2*nsubgrid + 4)**2
     threads_per_block = ((threads_per_block + 31) / 32) * 32
@@ -403,9 +371,6 @@ contains
     integer(kind=4) :: num_threads, num_blocks
     real(kind=dp) :: gamma, smallr, smallc2
     logical :: internal_energy
-#ifdef MHD
-    character(len=32) :: nvtx_lbl
-#endif
 
     internal_energy = (sim%r%interpol_var == 1)
     gamma   = sim%r%gamma
@@ -418,12 +383,7 @@ contains
     num_blocks = (num_octs + num_threads - 1) / num_threads
 
     if (num_octs > 0) then
-#ifdef MHD
-       write(nvtx_lbl, '("GPU MHD upload L",I0)') ilevel
-       call nvtxStartRange(trim(nvtx_lbl), color=0)!green
-#else
        call nvtxStartRange("GPU upload", color=0)!green
-#endif
        call upload_kernel<<<num_blocks, num_threads>>>(grid, father, uold, bold, head_idx, num_octs, &
             & internal_energy, gamma, smallr, smallc2)
        call nvtxEndRange()
@@ -616,7 +576,7 @@ contains
     integer(kind=4) :: threadsX_per_block, threadsY_per_block
     integer(kind=4) :: new_ifree, old_ifree, new_head, new_tail, new_noct
     integer(kind=4) :: ilev, ind, ibit, ibucket, skip_bit, noct_level
-    ! MHD prolongation parameters.
+    ! Interpolation parameters for prolongation.
     integer(kind=4) :: interpol_var, interpol_type
     real(kind=dp) :: smallr_d
 
