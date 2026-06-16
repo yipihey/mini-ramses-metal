@@ -109,60 +109,60 @@ cmake_print_variables(COMPILER NDIM NVAR NENER NION NRTGRP UNITS INIT HYDRO GRAV
 # Preprocessor defines
 # =============================================================================
 set(defines
-    -DNDIM=${NDIM}
-    -DNVAR=${NVAR}
-    -DNVECTOR=${NVECTOR}
-    -DNPRE=${NPRE}
-    -DNHILBERT=${NHILBERT}
+    NDIM=${NDIM}
+    NVAR=${NVAR}
+    NVECTOR=${NVECTOR}
+    NPRE=${NPRE}
+    NHILBERT=${NHILBERT}
 )
 
 if(NENER GREATER 0)
-    list(APPEND defines -DNENER=${NENER})
+    list(APPEND defines NENER=${NENER})
 endif()
 if(NION GREATER 0)
-    list(APPEND defines -DNION=${NION})
+    list(APPEND defines NION=${NION})
 endif()
 if(NOT UNITS STREQUAL "")
-    list(APPEND defines -DUNITS=${UNITS})
+    list(APPEND defines UNITS=${UNITS})
 endif()
 if(NOT INIT STREQUAL "")
-    list(APPEND defines -DINIT=${INIT})
+    list(APPEND defines INIT=${INIT})
 endif()
 if(HYDRO)
-    list(APPEND defines -DHYDRO)
+    list(APPEND defines HYDRO)
 endif()
 if(GRAV)
-    list(APPEND defines -DGRAV)
+    list(APPEND defines GRAV)
 endif()
 if(MHD)
-    list(APPEND defines -DMHD)
+    list(APPEND defines MHD)
 endif()
 if(RT)
-    list(APPEND defines -DRT -DNRTGRP=${NRTGRP})
+    list(APPEND defines RT NRTGRP=${NRTGRP})
 endif()
 if(RTZ)
-    list(APPEND defines -DRTZ
-        -DN_HYDROGEN_IONS=${N_HYDROGEN_IONS}
-        -DN_H2=${N_H2}
-        -DN_HELIUM_IONS=${N_HELIUM_IONS}
-        -DN_CARBON_IONS=${N_CARBON_IONS}
-        -DN_NITROGEN_IONS=${N_NITROGEN_IONS}
-        -DN_OXYGEN_IONS=${N_OXYGEN_IONS}
-        -DN_NEON_IONS=${N_NEON_IONS}
-        -DN_MAGNESIUM_IONS=${N_MAGNESIUM_IONS}
-        -DN_SILICON_IONS=${N_SILICON_IONS}
-        -DN_SULFUR_IONS=${N_SULFUR_IONS}
-        -DN_IRON_IONS=${N_IRON_IONS}
+    list(APPEND defines RTZ
+        N_HYDROGEN_IONS=${N_HYDROGEN_IONS}
+        N_H2=${N_H2}
+        N_HELIUM_IONS=${N_HELIUM_IONS}
+        N_CARBON_IONS=${N_CARBON_IONS}
+        N_NITROGEN_IONS=${N_NITROGEN_IONS}
+        N_OXYGEN_IONS=${N_OXYGEN_IONS}
+        N_NEON_IONS=${N_NEON_IONS}
+        N_MAGNESIUM_IONS=${N_MAGNESIUM_IONS}
+        N_SILICON_IONS=${N_SILICON_IONS}
+        N_SULFUR_IONS=${N_SULFUR_IONS}
+        N_IRON_IONS=${N_IRON_IONS}
     )
 endif()
 if(TURB)
-    list(APPEND defines -DTURB)
+    list(APPEND defines TURB)
 endif()
 if(TRCFLX)
-    list(APPEND defines -DTRCFLX)
+    list(APPEND defines TRCFLX)
 endif()
 if(NOT MPI)
-    list(APPEND defines -DWITHOUTMPI)
+    list(APPEND defines WITHOUTMPI)
 endif()
 
 # =============================================================================
@@ -186,7 +186,7 @@ endif()
 # Compiler flags
 # =============================================================================
 if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
-    set(fort_flags -cpp ${defines} -ffree-line-length-none -fimplicit-none -frecord-marker=4)
+    set(fort_flags -cpp -ffree-line-length-none -fimplicit-none -frecord-marker=4)
     if(CMAKE_Fortran_COMPILER_VERSION VERSION_GREATER_EQUAL 10)
         list(APPEND fort_flags -fallow-argument-mismatch)
     endif()
@@ -203,7 +203,7 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
     endif()
 
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
-    set(fort_flags -cpp ${defines} -recursive -fp-model source)
+    set(fort_flags -cpp -recursive -fp-model source)
     if(DEBUG)
         list(APPEND fort_flags
             -warn all -O0 -g -traceback -check bounds
@@ -213,20 +213,20 @@ elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     endif()
 
 elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
-    list(APPEND defines -DCUB_SORT_PART -DCUB_SORT_REFINE -DCUB_SCAN_REFINE)
+    list(APPEND defines CUB_SORT_PART CUB_SORT_REFINE CUB_SCAN_REFINE)
     if(NOT CUB_SORT_PART)
-        list(REMOVE_ITEM defines -DCUB_SORT_PART)
+        list(REMOVE_ITEM defines CUB_SORT_PART)
     endif()
     if(NOT CUB_SORT_REFINE)
-        list(REMOVE_ITEM defines -DCUB_SORT_REFINE)
+        list(REMOVE_ITEM defines CUB_SORT_REFINE)
     endif()
     if(NOT CUB_SCAN_REFINE)
-        list(REMOVE_ITEM defines -DCUB_SCAN_REFINE)
+        list(REMOVE_ITEM defines CUB_SCAN_REFINE)
     endif()
     if(PAPER)
-        list(APPEND defines -DPAPER)
+        list(APPEND defines PAPER)
     endif()
-    set(fort_flags -cpp ${defines} -gpu=${CUDA_ARCH},fastmath -cuda -cudalib=nvtx,curand -Mfreeform)
+    set(fort_flags -cpp -gpu=${CUDA_ARCH},fastmath -cuda -cudalib=nvtx,curand -Mfreeform)
     if(DEBUG)
         list(APPEND fort_flags
             -O0 -traceback -g
@@ -246,11 +246,13 @@ elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
     target_link_options(${EXEC} PRIVATE ${nvhpc_link_flags})
 
 elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "Cray")
-    set(fort_flags -e ZR ${defines})
+    set(fort_flags -e ZR)
 endif()
 
+target_compile_definitions(${EXEC} PRIVATE ${defines})
 target_compile_options(${EXEC} PRIVATE
     $<$<COMPILE_LANGUAGE:Fortran>:${fort_flags}>)
+set_target_properties(${EXEC} PROPERTIES Fortran_PREPROCESS ON)
 
 # =============================================================================
 # Generated source files (git info, build command, patch)
