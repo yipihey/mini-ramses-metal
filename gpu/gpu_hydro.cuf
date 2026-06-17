@@ -29,7 +29,6 @@ module hydro_device
   !> @brief
   !> Contains a 3 x 3 x 3 subgrid of primitive variables. Intended to act as a subgrid
   !> for interface states and fluxes. Note that it is zero indexed to make 1D to 3D
-  !> indexing easier
   !> indexing easier. Under MHD the interface states additionally carry the
   !> magnetic field (Bx, By, Bz). Passive scalars are present whenever the
   !> conserved state has slots beyond the hydro/radiation baseline.
@@ -80,7 +79,6 @@ module hydro_device
   end type subgrid_2x2x3cell_primitive
 
   !> @brief
-  !> A simple type for holding the conserved variables of a cell
   !> A simple type for holding the conserved variables of a cell.
   !> Under MHD it also carries the cell-centred magnetic field.
   type, public :: conserved_t
@@ -97,7 +95,6 @@ module hydro_device
   end type conserved_t
 
   !> @brief
-  !> A simple type for holding the primitive variables of a cell
   !> A simple type for holding the primitive variables of a cell.
   !> Under MHD it also carries the cell-centred magnetic field.
   type, public :: primitive_t
@@ -382,10 +379,6 @@ contains
     slopes_x%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i - 1, j, k), cell%pressure,   local_subgrid%pressure  (i + 1, j, k), slope)
 #ifdef MHD
     ! Transverse B slopes; normal-B slopes unused (face-predicted).
-    
-    
-    
-    
     slopes_x%Bx         = 0.0_dp
     slopes_x%By         = 0.5_dp * slope_moncen(Byc_xm, Byc, Byc_xp, slope)
     slopes_x%Bz         = 0.5_dp * slope_moncen(Bzc_xm, Bzc, Bzc_xp, slope)
@@ -1366,10 +1359,6 @@ contains
     logical :: okp_x, okm_x, oka_x, okp_y, okm_y, oka_y, okp_z, okm_z, oka_z
 
     ! Edge E recomputed inline (no edge_e shared buffer).
-    
-    
-    
-    
 #endif
 
     ! Compute the size of the section of the subgrid to operate on
@@ -1515,8 +1504,6 @@ contains
        cell%pressure   = cell%pressure   + dtdx * source_term%pressure
 #ifdef MHD
        ! Predicted face-B mean for interface writes.
-       
-       
        r = cell%density
        u = cell%velocity_x
        v = cell%velocity_y
@@ -1776,7 +1763,6 @@ contains
        end if
 #endif
 #if NVAR>5+NENER
-
        ! Uses the ORIGINAL cell velocities (re-read from local_subgrid once,
        ! hoisted out of the scalar loop), not predicted.
        ! Passive-scalar slopes from compute_tvd_slopes.
@@ -2430,7 +2416,6 @@ contains
        unew(cell_idx, 5, oct_idx) = unew(cell_idx, 5, oct_idx) + update_term%energy
 
 #if NVAR>5+NENER
-       ! ---- Passive scalars: unew(5+nener+n) += scalar-flux diff --------------------
        do n = 1, nscalar
           supd = (fluxes_x%scalar(i,j,k,n) - fluxes_x%scalar(i+1,j,k,n)) * dtdx &
                & + (fluxes_y%scalar(i,j,k,n) - fluxes_y%scalar(i,j+1,k,n)) * dtdx &
@@ -2528,7 +2513,9 @@ contains
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
 #if NVAR>5+NENER
-       do n=1,nscalar; fs(n)=0_dp; end do
+       do n = 1, nscalar
+          fs(n) = 0_dp
+       end do
 #endif
        do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
           do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
@@ -2538,7 +2525,9 @@ contains
              flux%momentum_z = flux%momentum_z - fluxes_x%velocity_z(0, j, k) * coarse_flux_scale
              flux%energy     = flux%energy     - fluxes_x%pressure  (0, j, k) * coarse_flux_scale
 #if NVAR>5+NENER
-             do n=1,nscalar; fs(n) = fs(n) - fluxes_x%scalar(0,j,k,n)*coarse_flux_scale; end do
+             do n = 1, nscalar
+                fs(n) = fs(n) - fluxes_x%scalar(0,j,k,n)*coarse_flux_scale
+             end do
 #endif
           end do
        end do
@@ -2558,7 +2547,9 @@ contains
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
 #if NVAR>5+NENER
-          do n=1,nscalar; info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n)); end do
+          do n = 1, nscalar
+             info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n))
+          end do
 #endif
        endif
 
@@ -2578,7 +2569,9 @@ contains
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
 #if NVAR>5+NENER
-       do n=1,nscalar; fs(n)=0_dp; end do
+       do n = 1, nscalar
+          fs(n) = 0_dp
+       end do
 #endif
        do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
           do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
@@ -2588,7 +2581,9 @@ contains
              flux%momentum_z = flux%momentum_z + fluxes_x%velocity_z(2*nsubgrid, j, k) * coarse_flux_scale
              flux%energy     = flux%energy     + fluxes_x%pressure  (2*nsubgrid, j, k) * coarse_flux_scale
 #if NVAR>5+NENER
-             do n=1,nscalar; fs(n) = fs(n) + fluxes_x%scalar(2*nsubgrid,j,k,n)*coarse_flux_scale; end do
+             do n = 1, nscalar
+                fs(n) = fs(n) + fluxes_x%scalar(2*nsubgrid,j,k,n)*coarse_flux_scale
+             end do
 #endif
           end do
        end do
@@ -2608,7 +2603,9 @@ contains
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
 #if NVAR>5+NENER
-          do n=1,nscalar; info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n)); end do
+          do n = 1, nscalar
+             info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n))
+          end do
 #endif
        endif
 
@@ -2632,7 +2629,9 @@ contains
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
 #if NVAR>5+NENER
-       do n=1,nscalar; fs(n)=0_dp; end do
+       do n = 1, nscalar
+          fs(n) = 0_dp
+       end do
 #endif
        do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
           do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
@@ -2642,7 +2641,9 @@ contains
              flux%momentum_z = flux%momentum_z - fluxes_y%velocity_z(i, 0, k) * coarse_flux_scale
              flux%energy     = flux%energy     - fluxes_y%pressure  (i, 0, k) * coarse_flux_scale
 #if NVAR>5+NENER
-             do n=1,nscalar; fs(n) = fs(n) - fluxes_y%scalar(i,0,k,n)*coarse_flux_scale; end do
+             do n = 1, nscalar
+                fs(n) = fs(n) - fluxes_y%scalar(i,0,k,n)*coarse_flux_scale
+             end do
 #endif
           end do
        end do
@@ -2662,7 +2663,9 @@ contains
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
 #if NVAR>5+NENER
-          do n=1,nscalar; info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n)); end do
+          do n = 1, nscalar
+             info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n))
+          end do
 #endif
        endif
 
@@ -2682,7 +2685,9 @@ contains
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
 #if NVAR>5+NENER
-       do n=1,nscalar; fs(n)=0_dp; end do
+       do n = 1, nscalar
+          fs(n) = 0_dp
+       end do
 #endif
        do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
           do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
@@ -2692,7 +2697,9 @@ contains
              flux%momentum_z = flux%momentum_z + fluxes_y%velocity_z(i, 2*nsubgrid, k) * coarse_flux_scale
              flux%energy     = flux%energy     + fluxes_y%pressure  (i, 2*nsubgrid, k) * coarse_flux_scale
 #if NVAR>5+NENER
-             do n=1,nscalar; fs(n) = fs(n) + fluxes_y%scalar(i,2*nsubgrid,k,n)*coarse_flux_scale; end do
+             do n = 1, nscalar
+                fs(n) = fs(n) + fluxes_y%scalar(i,2*nsubgrid,k,n)*coarse_flux_scale
+             end do
 #endif
           end do
        end do
@@ -2712,7 +2719,9 @@ contains
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
 #if NVAR>5+NENER
-          do n=1,nscalar; info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n)); end do
+          do n = 1, nscalar
+             info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n))
+          end do
 #endif
        endif
 
@@ -2736,7 +2745,9 @@ contains
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
 #if NVAR>5+NENER
-       do n=1,nscalar; fs(n)=0_dp; end do
+       do n = 1, nscalar
+          fs(n) = 0_dp
+       end do
 #endif
        do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
           do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
@@ -2746,7 +2757,9 @@ contains
              flux%momentum_z = flux%momentum_z - fluxes_z%velocity_z(i, j, 0) * coarse_flux_scale
              flux%energy     = flux%energy     - fluxes_z%pressure  (i, j, 0) * coarse_flux_scale
 #if NVAR>5+NENER
-             do n=1,nscalar; fs(n) = fs(n) - fluxes_z%scalar(i,j,0,n)*coarse_flux_scale; end do
+             do n = 1, nscalar
+                fs(n) = fs(n) - fluxes_z%scalar(i,j,0,n)*coarse_flux_scale
+             end do
 #endif
           end do
        end do
@@ -2766,7 +2779,9 @@ contains
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
 #if NVAR>5+NENER
-          do n=1,nscalar; info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n)); end do
+          do n = 1, nscalar
+             info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n))
+          end do
 #endif
        endif
 
@@ -2786,7 +2801,9 @@ contains
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
 #if NVAR>5+NENER
-       do n=1,nscalar; fs(n)=0_dp; end do
+       do n = 1, nscalar
+          fs(n) = 0_dp
+       end do
 #endif
        do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
           do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
@@ -2796,7 +2813,9 @@ contains
              flux%momentum_z = flux%momentum_z + fluxes_z%velocity_z(i, j, 2*nsubgrid) * coarse_flux_scale
              flux%energy     = flux%energy     + fluxes_z%pressure  (i, j, 2*nsubgrid) * coarse_flux_scale
 #if NVAR>5+NENER
-             do n=1,nscalar; fs(n) = fs(n) + fluxes_z%scalar(i,j,2*nsubgrid,n)*coarse_flux_scale; end do
+             do n = 1, nscalar
+                fs(n) = fs(n) + fluxes_z%scalar(i,j,2*nsubgrid,n)*coarse_flux_scale
+             end do
 #endif
           end do
        end do
@@ -2816,7 +2835,9 @@ contains
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
 #if NVAR>5+NENER
-          do n=1,nscalar; info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n)); end do
+          do n = 1, nscalar
+             info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n))
+          end do
 #endif
        endif
 
@@ -2960,7 +2981,6 @@ contains
 
   ! =========================================================================
 #ifdef MHD
-
   ! Transverse TVD slope on face-centred B (3-point limiter).
   attributes(device) function face_b_tvd_slope(bm, b0, bp, slope_mag) result(db)
     real(kind=dp), value :: bm, b0, bp
@@ -3824,11 +3844,8 @@ contains
     integer :: block_idx ! The index of this block, corresponds to the oct to load
     integer :: cell_idx ! The index of the cell within the block
     integer :: oct_idx ! The index of the oct  within the block
-#ifdef MHD
-    integer :: ib ! Face-B component index (MHD)
-#endif
-#if NVAR>5+NENER
-    integer :: ivar ! Passive-scalar conserved slot
+#if defined MHD || NVAR>5+NENER
+    integer :: ivar
 #endif
 
     block_idx = blockIdx%x - 1
@@ -3849,8 +3866,8 @@ contains
 
     ! Copy bnew to bold.
 #ifdef MHD
-    do ib = 1, 6
-       bold(cell_idx, ib, oct_idx) = bnew(cell_idx, ib, oct_idx)
+    do ivar = 1, 6
+       bold(cell_idx, ivar, oct_idx) = bnew(cell_idx, ivar, oct_idx)
     end do
 #endif
 #if NVAR>5+NENER
@@ -3875,11 +3892,8 @@ contains
     integer :: block_idx ! The index of this block, corresponds to the oct to load
     integer :: cell_idx ! The index of the cell within the block
     integer :: oct_idx ! The index of the oct  within the block
-#ifdef MHD
-    integer :: ib ! Face-B component index (MHD)
-#endif
-#if NVAR>5+NENER
-    integer :: ivar ! Passive-scalar conserved slot
+#if defined MHD || NVAR>5+NENER
+    integer :: ivar
 #endif
 
     block_idx = blockIdx%x - 1
@@ -3900,8 +3914,8 @@ contains
 
     ! Copy bold to bnew.
 #ifdef MHD
-    do ib = 1, 6
-       bnew(cell_idx, ib, oct_idx) = bold(cell_idx, ib, oct_idx)
+    do ivar = 1, 6
+       bnew(cell_idx, ivar, oct_idx) = bold(cell_idx, ivar, oct_idx)
     end do
 #endif
 #if NVAR>5+NENER
