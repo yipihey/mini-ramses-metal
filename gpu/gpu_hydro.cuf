@@ -3350,11 +3350,9 @@ contains
     integer :: thread_idx ! The index of this thread within the block
 #ifdef MHD
     real(kind=dp) :: smallc
-#endif
-    dtdx = dt/dx
-#ifdef MHD
     smallc = sqrt(smallc2)
 #endif
+    dtdx = dt / dx
 
     ! compute the various indices. Note the conversion to zero based indexing
     block_idx = blockIdx%x - 1
