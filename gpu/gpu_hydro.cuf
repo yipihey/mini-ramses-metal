@@ -210,6 +210,9 @@ contains
     momentum_squared = magnitude_squared(conserved%momentum_x, conserved%momentum_y, conserved%momentum_z)
     density = max(conserved%density, smallr)
     internal_energy = conserved%energy - 0.5_dp*momentum_squared/density
+#ifdef MHD
+    internal_energy = internal_energy - compute_emag(conserved%Bx, conserved%By, conserved%Bz)
+#endif
     pressure = max((gamma - 1.0_dp)*internal_energy, density*smallp)
     return
   end function compute_pressure
@@ -231,6 +234,9 @@ contains
 
     velocity_squared = magnitude_squared(primitive%velocity_x, primitive%velocity_y, primitive%velocity_z)
     energy = (primitive%pressure/(gamma - 1.0_dp)) + 0.5_dp*primitive%density*velocity_squared
+#ifdef MHD
+    energy = energy + compute_emag(primitive%Bx, primitive%By, primitive%Bz)
+#endif
     return
   end function compute_energy
   ! ==========================================================================
@@ -427,48 +433,23 @@ contains
   !>
   !> @param[in] conserved : The conserved variables
   !> @param[in] gamma : The adiabatic index
-#ifdef MHD
-#endif
   !> @return
   !> A primitive_t object with the primitive variables in a cell
-#ifdef MHD
-  attributes(device) function conserved_2_primitive(conserved, gamma, bxl, bxr, byl, byr, &
-       & bzl, bzr, smallr, smallc2) result(primitive)
-#else
   attributes(device) function conserved_2_primitive(conserved, gamma, smallr, smallc2) result(primitive)
-#endif
     type(conserved_t), intent(in) :: conserved
-#ifdef MHD
     real(kind=dp), value :: gamma, smallr, smallc2
-    real(kind=dp), value :: bxl, bxr, byl, byr, bzl, bzr
-#else
-    real(kind=dp), value :: gamma, smallr, smallc2
-#endif
     type(primitive_t) :: primitive
+
+    primitive%density    = max(conserved%density, smallr)
+    primitive%velocity_x = conserved%momentum_x / primitive%density
+    primitive%velocity_y = conserved%momentum_y / primitive%density
+    primitive%velocity_z = conserved%momentum_z / primitive%density
 #ifdef MHD
-    real(kind=dp) :: momentum_squared, emag, eint, smalle
-
-    primitive%density    = max(conserved%density, smallr)
-    primitive%velocity_x = conserved%momentum_x / primitive%density
-    primitive%velocity_y = conserved%momentum_y / primitive%density
-    primitive%velocity_z = conserved%momentum_z / primitive%density
-
-    primitive%Bx = 0.5_dp * (bxl + bxr)
-    primitive%By = 0.5_dp * (byl + byr)
-    primitive%Bz = 0.5_dp * (bzl + bzr)
-
-    momentum_squared = magnitude_squared(conserved%momentum_x, conserved%momentum_y, conserved%momentum_z)
-    emag = compute_emag(primitive%Bx, primitive%By, primitive%Bz)
-    smalle = smallc2/gamma/(gamma - 1.0_dp)
-    eint = max(conserved%energy - 0.5_dp*momentum_squared/primitive%density - emag, smalle*primitive%density)
-    primitive%pressure = (gamma - 1.0_dp) * eint
-#else
-    primitive%density    = max(conserved%density, smallr)
-    primitive%velocity_x = conserved%momentum_x / primitive%density
-    primitive%velocity_y = conserved%momentum_y / primitive%density
-    primitive%velocity_z = conserved%momentum_z / primitive%density
-    primitive%pressure   = compute_pressure(conserved, gamma, smallr, smallc2)
+    primitive%Bx = conserved%Bx
+    primitive%By = conserved%By
+    primitive%Bz = conserved%Bz
 #endif
+    primitive%pressure   = compute_pressure(conserved, gamma, smallr, smallc2)
     return
   end function conserved_2_primitive
   ! ==========================================================================
@@ -486,23 +467,16 @@ contains
     type(primitive_t), intent(in) :: primitive
     real(kind=dp), value :: gamma
     type(conserved_t) :: conserved
-#ifdef MHD
-    real(kind=dp) :: velocity_squared, emag
-#endif
 
     conserved%density    = primitive%density
     conserved%momentum_x = primitive%velocity_x * primitive%density
     conserved%momentum_y = primitive%velocity_y * primitive%density
     conserved%momentum_z = primitive%velocity_z * primitive%density
+    conserved%energy     = compute_energy(primitive, gamma)
 #ifdef MHD
-    velocity_squared = magnitude_squared(primitive%velocity_x, primitive%velocity_y, primitive%velocity_z)
-    emag = compute_emag(primitive%Bx, primitive%By, primitive%Bz)
-    conserved%energy = (primitive%pressure/(gamma - 1.0_dp)) + 0.5_dp*primitive%density*velocity_squared + emag
     conserved%Bx = primitive%Bx
     conserved%By = primitive%By
     conserved%Bz = primitive%Bz
-#else
-    conserved%energy     = compute_energy(primitive, gamma)
 #endif
     return
   end function primitive_2_conserved
@@ -3631,16 +3605,14 @@ contains
     cons_mid%momentum_z = uold(cell_idx, 4, oct_idx)
     cons_mid%energy     = uold(cell_idx, 5, oct_idx)
 #ifdef MHD
-    prim_mid = conserved_2_primitive(cons_mid, gamma, &
-         & bold(cell_idx,1,oct_idx), bold(cell_idx,4,oct_idx), &
-         & bold(cell_idx,2,oct_idx), bold(cell_idx,5,oct_idx), &
-         & bold(cell_idx,3,oct_idx), bold(cell_idx,6,oct_idx), smallr, smallc2)
-    bc_mid(1) = 0.5_dp*(bold(cell_idx,1,oct_idx)+bold(cell_idx,4,oct_idx))
-    bc_mid(2) = 0.5_dp*(bold(cell_idx,2,oct_idx)+bold(cell_idx,5,oct_idx))
-    bc_mid(3) = 0.5_dp*(bold(cell_idx,3,oct_idx)+bold(cell_idx,6,oct_idx))
-#else
-    prim_mid = conserved_2_primitive(cons_mid, gamma, smallr, smallc2)
+    cons_mid%Bx = 0.5_dp*(bold(cell_idx,1,oct_idx)+bold(cell_idx,4,oct_idx))
+    cons_mid%By = 0.5_dp*(bold(cell_idx,2,oct_idx)+bold(cell_idx,5,oct_idx))
+    cons_mid%Bz = 0.5_dp*(bold(cell_idx,3,oct_idx)+bold(cell_idx,6,oct_idx))
+    bc_mid(1) = cons_mid%Bx
+    bc_mid(2) = cons_mid%By
+    bc_mid(3) = cons_mid%Bz
 #endif
+    prim_mid = conserved_2_primitive(cons_mid, gamma, smallr, smallc2)
 
     ! Loop over dimensions
     do idim = 1, ndim
@@ -3668,16 +3640,14 @@ contains
        cons_lft%momentum_z = uold(icell, 4, source_idx)
        cons_lft%energy     = uold(icell, 5, source_idx)
 #ifdef MHD
-       prim_lft = conserved_2_primitive(cons_lft, gamma, &
-            & bold(icell,1,source_idx), bold(icell,4,source_idx), &
-            & bold(icell,2,source_idx), bold(icell,5,source_idx), &
-            & bold(icell,3,source_idx), bold(icell,6,source_idx), smallr, smallc2)
-       bc_lft(1) = 0.5_dp*(bold(icell,1,source_idx)+bold(icell,4,source_idx))
-       bc_lft(2) = 0.5_dp*(bold(icell,2,source_idx)+bold(icell,5,source_idx))
-       bc_lft(3) = 0.5_dp*(bold(icell,3,source_idx)+bold(icell,6,source_idx))
-#else
-       prim_lft = conserved_2_primitive(cons_lft, gamma, smallr, smallc2)
+       cons_lft%Bx = 0.5_dp*(bold(icell,1,source_idx)+bold(icell,4,source_idx))
+       cons_lft%By = 0.5_dp*(bold(icell,2,source_idx)+bold(icell,5,source_idx))
+       cons_lft%Bz = 0.5_dp*(bold(icell,3,source_idx)+bold(icell,6,source_idx))
+       bc_lft(1) = cons_lft%Bx
+       bc_lft(2) = cons_lft%By
+       bc_lft(3) = cons_lft%Bz
 #endif
+       prim_lft = conserved_2_primitive(cons_lft, gamma, smallr, smallc2)
 
        ! Right cell
        icell = hhh(cell_idx, 2 * (idim-1) + 2)
@@ -3689,16 +3659,14 @@ contains
        cons_rgt%momentum_z = uold(icell, 4, source_idx)
        cons_rgt%energy     = uold(icell, 5, source_idx)
 #ifdef MHD
-       prim_rgt = conserved_2_primitive(cons_rgt, gamma, &
-            & bold(icell,1,source_idx), bold(icell,4,source_idx), &
-            & bold(icell,2,source_idx), bold(icell,5,source_idx), &
-            & bold(icell,3,source_idx), bold(icell,6,source_idx), smallr, smallc2)
-       bc_rgt(1) = 0.5_dp*(bold(icell,1,source_idx)+bold(icell,4,source_idx))
-       bc_rgt(2) = 0.5_dp*(bold(icell,2,source_idx)+bold(icell,5,source_idx))
-       bc_rgt(3) = 0.5_dp*(bold(icell,3,source_idx)+bold(icell,6,source_idx))
-#else
-       prim_rgt = conserved_2_primitive(cons_rgt, gamma, smallr, smallc2)
+       cons_rgt%Bx = 0.5_dp*(bold(icell,1,source_idx)+bold(icell,4,source_idx))
+       cons_rgt%By = 0.5_dp*(bold(icell,2,source_idx)+bold(icell,5,source_idx))
+       cons_rgt%Bz = 0.5_dp*(bold(icell,3,source_idx)+bold(icell,6,source_idx))
+       bc_rgt(1) = cons_rgt%Bx
+       bc_rgt(2) = cons_rgt%By
+       bc_rgt(3) = cons_rgt%Bz
 #endif
+       prim_rgt = conserved_2_primitive(cons_rgt, gamma, smallr, smallc2)
 
        ! Check refinement criteria
        call hydro_crit(prim_lft, prim_mid, prim_rgt, ok, err_grad_d, err_grad_p, floor_d, floor_p)
@@ -4214,10 +4182,10 @@ contains
 #ifdef MHD
              ! MHD: cell-centred B + emag-subtracted gas pressure (,
              ! speed per direction; sound speed (|v_d|+smallc) under induction.
-             primitive = conserved_2_primitive(conserved, gamma, &
-                  & bold(cell_idx,1,oct_idx), bold(cell_idx,4,oct_idx), &
-                  & bold(cell_idx,2,oct_idx), bold(cell_idx,5,oct_idx), &
-                  & bold(cell_idx,3,oct_idx), bold(cell_idx,6,oct_idx), smallr, smallc2)
+             conserved%Bx = 0.5_dp*(bold(cell_idx,1,oct_idx)+bold(cell_idx,4,oct_idx))
+             conserved%By = 0.5_dp*(bold(cell_idx,2,oct_idx)+bold(cell_idx,5,oct_idx))
+             conserved%Bz = 0.5_dp*(bold(cell_idx,3,oct_idx)+bold(cell_idx,6,oct_idx))
+             primitive = conserved_2_primitive(conserved, gamma, smallr, smallc2)
              pp = max(primitive%pressure, primitive%density*smallc2/gamma)
              b2sq = compute_bsquared(primitive%Bx, primitive%By, primitive%Bz)
              emag_loc = 0.5d0*b2sq*vol_loc
