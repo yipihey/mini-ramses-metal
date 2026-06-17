@@ -410,7 +410,7 @@ contains
     integer(kind=4) :: threadsX_per_block, threadsY_per_block, num_blocks
     real(kind=8) :: scale_nH, scale_T2, scale_l, scale_d, scale_t, scale_v
     real(kind=8) :: dtcool, nH_eos, nCOM
-    real(kind=dp) :: gamma, smallr, smallc2
+    real(kind=8) :: gamma, smallr, smallc2
 
     gamma = sim%r%gamma
     smallr = sim%r%smallr
