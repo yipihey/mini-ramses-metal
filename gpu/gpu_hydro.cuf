@@ -3348,9 +3348,11 @@ contains
     real(kind=dp) :: dtdx
     integer :: block_idx  ! The index of this block, corresponds to the subgrid to load
     integer :: thread_idx ! The index of this thread within the block
-    dtdx = dt/dx
 #ifdef MHD
     real(kind=dp) :: smallc
+#endif
+    dtdx = dt/dx
+#ifdef MHD
     smallc = sqrt(smallc2)
 #endif
 
