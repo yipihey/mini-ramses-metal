@@ -1116,7 +1116,6 @@ contains
     real(kind=dp) :: invD
 #ifdef MHD
     integer :: source_idx_face
-    real(kind=dp) :: Ekin, emag, eint, smalle, Bxc, Byc, Bzc, rho
     real(kind=dp) :: b0(1:6)
 #endif
 
@@ -1172,39 +1171,24 @@ contains
           bf%bz(i,j,k) = 0.5_dp*(b0(3) + bold(cell_idx + 4*(1 - 2*kb), 6, source_idx_face))
        endif
 
-       ! Cell-centred B from opposing face pair.
-       Bxc = 0.5_dp*(b0(1) + b0(4))
-       Byc = 0.5_dp*(b0(2) + b0(5))
-       Bzc = 0.5_dp*(b0(3) + b0(6))
+#endif
 
-       ! Convert to primitives with MHD energy correction.
-       ! Inline primitive conversion with floors.
-       
-       rho  = max(uold(cell_idx, 1, source_idx), smallr)
-       invD = 1.0_dp / rho
-       primitive%density    = rho
-       primitive%velocity_x = uold(cell_idx, 2, source_idx) * invD
-       primitive%velocity_y = uold(cell_idx, 3, source_idx) * invD
-       primitive%velocity_z = uold(cell_idx, 4, source_idx) * invD
-       Ekin = 0.5_dp*( uold(cell_idx,2,source_idx)*primitive%velocity_x + &
-            &          uold(cell_idx,3,source_idx)*primitive%velocity_y + &
-            &          uold(cell_idx,4,source_idx)*primitive%velocity_z )
-       emag = 0.5_dp*( Bxc*Bxc + (Byc*Byc + Bzc*Bzc) )
-       smalle = smallc2/gamma/(gamma - 1.0_dp)
-       eint = max(uold(cell_idx,5,source_idx) - Ekin - emag, smalle*rho)
-       primitive%pressure = (gamma - 1.0_dp)*eint
-#else
        ! Load the cell
        conserved%density    = uold(cell_idx, 1, source_idx)
        conserved%momentum_x = uold(cell_idx, 2, source_idx)
        conserved%momentum_y = uold(cell_idx, 3, source_idx)
        conserved%momentum_z = uold(cell_idx, 4, source_idx)
        conserved%energy     = uold(cell_idx, 5, source_idx)
+#ifdef MHD
+       ! Cell-centred B from the opposing face pair.
+       conserved%Bx = 0.5_dp*(b0(1) + b0(4))
+       conserved%By = 0.5_dp*(b0(2) + b0(5))
+       conserved%Bz = 0.5_dp*(b0(3) + b0(6))
+#endif
 
        ! Convert to primitive variables
        primitive = conserved_2_primitive(conserved, gamma, smallr, smallc2)
        invD = 1.0_dp / primitive%density
-#endif
 
        ! Gravity predictor step
 #ifdef GRAV
