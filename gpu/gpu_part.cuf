@@ -1576,7 +1576,7 @@ subroutine gpu_cic_star_large(sim, ilevel, rtype)
   ! ilevel (the host's "mesh spacing at level ilevel"); the parent oct spans
   ! 2*dx_loc. vol_loc = dx_loc**ndim is the level-ilevel cell volume used to
   ! convert mass to density. skip(:) recentres positions on this rank's tile.
-  dx_loc  = sim%r%boxlen/2**ilevel
+  dx_loc = sim%r%boxlen/2**ilevel
   vol_loc = dx_loc**ndim
   skip1 = sim%m%skip(1)
   skip2 = sim%m%skip(2)
@@ -2118,6 +2118,7 @@ attributes(global) subroutine fill_contrib_part_small(sortp_d, xp_d, mp_d, contr
         contrib_d(g) = real(w, kind=dp)
      end if
   else ! baryon number density
+     mp_i = mp_d(ipart)
      if (mass_cut_refine > 0.0d0) then
         contrib_d(g) = real(mp_i * w / mass_sph, kind=dp)
      end if
@@ -2359,7 +2360,7 @@ subroutine gpu_cic_star_small(sim, ilevel, rtype)
      num_blocks  = (sim%star%npart + num_threads - 1) / num_threads
      q_d = 0.0_dp
      call nvtxStartRange("gpu_cic_star_small:multipole", color=4)
-     call multipole_q_kernel<<<num_blocks, num_threads>>>(xp, mp, q_d, &
+     call multipole_q_kernel<<<num_blocks, num_threads>>>(star_xp, star_mp, q_d, &
           & 1, sim%star%npart, int(sim%r%nstarmax,8))
      call nvtxEndRange()
      q_h = q_d
@@ -2375,12 +2376,13 @@ subroutine gpu_cic_star_small(sim, ilevel, rtype)
 
   if (num_parts <= 0) return
 
-  dx_loc  = sim%r%boxlen/2**ilevel
+  dx_loc = sim%r%boxlen/2**ilevel
   vol_loc = dx_loc**ndim
   dx_inv  = 1.0_dp/dx_loc
   skip1 = sim%m%skip(1)
   skip2 = sim%m%skip(2)
   skip3 = sim%m%skip(3)
+  mass_sph = sim%r%mass_sph
 
   nblk = 256
   blk  = (num_parts + nblk - 1) / nblk
