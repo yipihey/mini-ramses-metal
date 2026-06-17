@@ -40,8 +40,10 @@ module gpu_runner
 
   !> Arrays to hold the star particle variables on the device
   real(kind=dp),   device, allocatable, dimension(:,:) :: star_xp, star_vp
-  real(kind=dp),   device, allocatable, dimension(:)   :: star_mp, star_tp, star_zp
+  real(kind=dp),   device, allocatable, dimension(:)   :: star_mp, star_phip
+  real(kind=dp),   device, allocatable, dimension(:)   :: star_tp, star_zp
   integer(kind=4), device, allocatable, dimension(:)   :: star_levelp
+  integer(kind=4), device, allocatable, dimension(:)   :: star_sortp
   integer(i8b),    device, allocatable, dimension(:)   :: star_idp
 
   !> xp_swap/isp_swap/idp_swap: gather/scatter scratch and other tasks.
@@ -411,21 +413,17 @@ contains
     ! Conversion factor from user units to cgs units
     call units(sim%r,sim%g,scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
 
-    ! Ensure the equilibrium cooling table lives on the device before the
-    ! kernel runs. For non-cosmological runs the table never changes, so this
-    ! happens exactly once (guarded by table_uploaded). Cosmological runs
-    ! refresh the table each coarse step in r_cooling_fine.
+    ! Ensure the equilibrium cooling table lives on the device
     if (sim%r%cooling .and. .not. table_uploaded) then
        call gpu_upload_cooling_table(sim%cool)
     end if
 
     ! Reference density for the isothermal/polytropic EOS floor [H/cc].
-    ! Cosmological runs raise it to at least the virial overdensity (200x the
-    ! mean baryon density, ~1/aexp^3), matching the CPU cooling_fine.
     nH_eos = sim%r%eos_nH
+
+    ! This is used only for cosmological runs
     if (sim%r%cosmo) then
-       nCOM   = 200.0d0*sim%g%omega_b*rhoc*(sim%g%h0/100)**2 &
-              & /sim%g%aexp**3*sim%cool%X/mH
+       nCOM = 200.0d0*sim%g%omega_b*rhoc*(sim%g%h0/100)**2/sim%g%aexp**3*sim%cool%X/mH
        nH_eos = max(nCOM, nH_eos)
     end if
 
@@ -446,7 +444,6 @@ contains
             & nH_eos, sim%r%eos_index, scale_T2, scale_nH,                                 &
             & sim%r%cooling, sim%r%metal, sim%r%imetal, sim%r%z_ave,                       &
             & sim%r%self_shielding, sim%cool%X, sim%r%T2max)
-
        call nvtxEndRange()
     end if
 

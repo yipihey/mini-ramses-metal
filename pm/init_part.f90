@@ -178,6 +178,7 @@ subroutine init_star(r,g,m,p)
   allocate(star_mp(1:r%nstarmax))
   allocate(star_tp(1:r%nstarmax))
   allocate(star_zp(1:r%nstarmax))
+  allocate(star_sortp(1:r%nstarmax))
   allocate(star_levelp(1:r%nstarmax))
   if (r%nlevelmax > r%levelmin) allocate(star_idp(1:r%nstarmax))
 #ifdef OUTPUT_PARTICLE_POTENTIAL

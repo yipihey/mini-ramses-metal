@@ -2,6 +2,7 @@ module rho_fine_module
 #ifdef _CUDA
   use gpu_runner, only: gpu_multipole_leaf, gpu_multipole_split, gpu_reset_rho, gpu_cic_multipole, gpu_cic_multipole2
   use part_device, only: gpu_split_part, gpu_sort_part, gpu_cic_part_large, gpu_cic_part_medium, gpu_cic_part_small
+  use part_device, only: gpu_split_star, gpu_sort_star, gpu_cic_star_large, gpu_cic_star_medium, gpu_cic_star_small
 #endif
 contains
 !###############################################
@@ -681,6 +682,15 @@ recursive subroutine r_cic_part(pst,input_array,input_size)
               call gpu_cic_part_large(pst%s, ilevel, rtype)
            endif
         endif
+        if(pst%s%r%star)then
+           if(pst%s%r%star_dep_algo==2)then
+              call gpu_cic_star_medium(pst%s, ilevel, rtype)
+           else if(pst%s%r%star_dep_algo==3)then
+              call gpu_cic_star_small(pst%s, ilevel, rtype)
+           else
+              call gpu_cic_star_large(pst%s, ilevel, rtype)
+           endif
+        endif
         return
      endif
 #endif
@@ -1218,10 +1228,7 @@ recursive subroutine r_split_part(pst,ilevel,input_size)
 #ifdef _CUDA
      if(pst%s%m%data_on_device)then
         if(pst%s%r%part)call gpu_split_part(pst%s, ilevel)
-        if(pst%s%r%star.or.pst%s%r%sink.or.pst%s%r%tree.or.pst%s%r%trac)then
-           write(*,*)'ERROR: r_split_part: non-DM not supported on GPU.'
-           call abort
-        endif
+        if(pst%s%r%star)call gpu_split_star(pst%s, ilevel)
         return
      endif
 #endif
@@ -1976,10 +1983,7 @@ recursive subroutine r_sort_part(pst,ilevel,input_size)
 #ifdef _CUDA
      if(pst%s%m%data_on_device)then
         if(pst%s%r%part)call gpu_sort_part(pst%s, ilevel)
-        if(pst%s%r%star.or.pst%s%r%sink.or.pst%s%r%tree.or.pst%s%r%trac)then
-           write(*,*)'ERROR: r_sort_part: non-DM not supported on GPU.'
-           call abort
-        endif
+        if(pst%s%r%star)call gpu_sort_star(pst%s, ilevel)
         return
      endif
 #endif

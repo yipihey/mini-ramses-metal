@@ -1,7 +1,7 @@
 module move_fine_module
   use rho_fine_module, only: cic_weight, cic_index, tsc_weight, tsc_index, pcs_weight, pcs_index
 #ifdef _CUDA
-  use part_device, only: gpu_kick_drift_part
+  use part_device, only: gpu_kick_drift_part, gpu_kick_drift_star
 #endif
   use rng
   implicit none
@@ -42,9 +42,6 @@ recursive subroutine r_kick_drift_part(pst,input_array,input_size,output_array,o
   use mdl_module
   use ramses_commons, only: pst_t
   use mdl_parameters
-#ifdef _CUDA
-  use pm_parameters, only: PART_TYPE
-#endif
   implicit none
   type(pst_t)::pst
   integer,VALUE::input_size
@@ -63,13 +60,16 @@ recursive subroutine r_kick_drift_part(pst,input_array,input_size,output_array,o
   else
      ilevel=input_array(1)
      action_part=input_array(2)
+     ! Force interpolation for various components (part, star, sink, tree...)
+     ! based on their respective deposition schemes (CIC 1, TSC 2 or PCS 3)
 #ifdef _CUDA
      if(pst%s%r%part)then
         call gpu_kick_drift_part(pst%s, ilevel, action_part)
      endif
+     if(pst%s%r%star)then
+        call gpu_kick_drift_star(pst%s, ilevel, action_part)
+     endif
 #else
-     ! Force interpolation for various components (DM particles, star, sink, tree)
-     ! based on their respective deposition schemes (CIC 1, TSC 2 or PCS 3)
      if(pst%s%r%part)then
         if(pst%s%r%part_force_interpolation_scheme==1)then
            call cic_kick_drift_part(pst%s,pst%s%p   ,ilevel,action_part)
