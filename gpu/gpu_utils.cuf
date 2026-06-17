@@ -26,14 +26,8 @@ module gpu_utils
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_y
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_z
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: pressure
-#ifdef MHD
-     ! Byte-packed on the inner lattice to save shared memory in the MHD kernel,
-     ! which carries many more shared buffers (face-B, EMF and corner subgrids).
-     ! Only indices 1:2*nsubgrid+2 are ever read (see zero_fine_emf/zero_euler_fluxes).
+     ! Byte-packed inner lattice (1:2*nsubgrid+2); only that range is read/stored.
      logical(kind=1), dimension(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2) :: refined
-#else
-     logical      , dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: refined
-#endif
   end type subgrid_6x6x6cell_primitive
 
   !> @brief

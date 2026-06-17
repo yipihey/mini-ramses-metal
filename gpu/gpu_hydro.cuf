@@ -1237,16 +1237,11 @@ contains
           scalar_sub(i, j, k, n) = uold(cell_idx, 5+nener+n, source_idx) * invD
        end do
 #endif
-#ifdef MHD
        ! Store refinement flags.
        if (i >= 1 .and. i <= 2*nsubgrid+2 .and. j >= 1 .and. j <= 2*nsubgrid+2 &
             & .and. k >= 1 .and. k <= 2*nsubgrid+2) then
           local_subgrid%refined(i, j, k) = grid(source_idx)%refined(cell_idx)
        endif
-#else
-       ! Store refinement map
-       local_subgrid%refined   (i, j, k) = grid(source_idx)%refined(cell_idx)
-#endif
 
     end do
 
