@@ -113,8 +113,8 @@ contains
   ! delta_T2_cell: output T/mu change [K]
   ! =========================================================================
     implicit none
-    real(dp), value,  intent(in)  :: nH_cell, T2_cell, Zsolar_cell, boost_cell, dt, X_frac
-    real(dp),         intent(out) :: delta_T2_cell
+    real(kind=8), value,  intent(in)  :: nH_cell, T2_cell, Zsolar_cell, boost_cell, dt, X_frac
+    real(kind=8),         intent(out) :: delta_T2_cell
 
     ! kB in CGS: Boltzmann constant [erg/K]
     real(dp), parameter :: kB_cgs    = 1.380649d-16
