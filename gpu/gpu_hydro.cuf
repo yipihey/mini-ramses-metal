@@ -3925,8 +3925,6 @@ contains
     real(kind=8), intent(in), value :: dt
 
     integer :: block_idx, cell_idx, oct_idx
-    type(primitive_t) :: prim
-    type(conserved_t) :: cons
     real(kind=dp) :: rho, mx, my, mz, ener
 
     block_idx = blockIdx%x - 1
@@ -3939,59 +3937,26 @@ contains
     ! Compute the cell idx
     cell_idx = threadIdx%x
 
-#ifdef MHD
-       ! Apply gravity on conserved variables; magnetic energy stays in total E.
-       rho = max(uold(cell_idx, 1, oct_idx), smallr)
-       mx  = uold(cell_idx, 2, oct_idx)
-       my  = uold(cell_idx, 3, oct_idx)
-       mz  = uold(cell_idx, 4, oct_idx)
-       ener = uold(cell_idx, 5, oct_idx) - 0.5_dp*(mx*mx + my*my + mz*mz)/rho
+    ! Apply gravity on conserved variables; internal (and magnetic) energy stays in total E.
+    rho = max(uold(cell_idx, 1, oct_idx), smallr)
+    mx  = uold(cell_idx, 2, oct_idx)
+    my  = uold(cell_idx, 3, oct_idx)
+    mz  = uold(cell_idx, 4, oct_idx)
+    ener = uold(cell_idx, 5, oct_idx) - 0.5_dp*(mx*mx + my*my + mz*mz)/rho
 #ifdef GRAV
-       mx = mx + rho*f(cell_idx, 1, oct_idx)*dt
-       my = my + rho*f(cell_idx, 2, oct_idx)*dt
-       mz = mz + rho*f(cell_idx, 3, oct_idx)*dt
+    mx = mx + rho*f(cell_idx, 1, oct_idx)*dt
+    my = my + rho*f(cell_idx, 2, oct_idx)*dt
+    mz = mz + rho*f(cell_idx, 3, oct_idx)*dt
 #else
-       mx = mx + rho*constant_gravity(1)*dt
-       my = my + rho*constant_gravity(2)*dt
-       mz = mz + rho*constant_gravity(3)*dt
+    mx = mx + rho*constant_gravity(1)*dt
+    my = my + rho*constant_gravity(2)*dt
+    mz = mz + rho*constant_gravity(3)*dt
 #endif
-       ener = ener + 0.5_dp*(mx*mx + my*my + mz*mz)/rho
-       uold(cell_idx, 2, oct_idx) = mx
-       uold(cell_idx, 3, oct_idx) = my
-       uold(cell_idx, 4, oct_idx) = mz
-       uold(cell_idx, 5, oct_idx) = ener
-#else
-       ! Collect conservative variables
-       cons%density    = uold(cell_idx, 1, oct_idx)
-       cons%momentum_x = uold(cell_idx, 2, oct_idx)
-       cons%momentum_y = uold(cell_idx, 3, oct_idx)
-       cons%momentum_z = uold(cell_idx, 4, oct_idx)
-       cons%energy     = uold(cell_idx, 5, oct_idx)
-
-       ! Convert to primitive
-       prim = conserved_2_primitive(cons, gamma, smallr, smallc2)
-
-       ! Update velocity
-#ifdef GRAV
-       prim%velocity_x = prim%velocity_x + f(cell_idx, 1, oct_idx) * dt
-       prim%velocity_y = prim%velocity_y + f(cell_idx, 2, oct_idx) * dt
-       prim%velocity_z = prim%velocity_z + f(cell_idx, 3, oct_idx) * dt
-#else
-       prim%velocity_x = prim%velocity_x + constant_gravity(1) * dt
-       prim%velocity_y = prim%velocity_y + constant_gravity(2) * dt
-       prim%velocity_z = prim%velocity_z + constant_gravity(3) * dt
-#endif
-
-       ! Convert back to conservative
-       cons = primitive_2_conserved(prim, gamma)
-
-       ! Save to main memory
-       uold(cell_idx, 1, oct_idx) = cons%density
-       uold(cell_idx, 2, oct_idx) = cons%momentum_x
-       uold(cell_idx, 3, oct_idx) = cons%momentum_y
-       uold(cell_idx, 4, oct_idx) = cons%momentum_z
-       uold(cell_idx, 5, oct_idx) = cons%energy
-#endif
+    ener = ener + 0.5_dp*(mx*mx + my*my + mz*mz)/rho
+    uold(cell_idx, 2, oct_idx) = mx
+    uold(cell_idx, 3, oct_idx) = my
+    uold(cell_idx, 4, oct_idx) = mz
+    uold(cell_idx, 5, oct_idx) = ener
 
   end subroutine sync_hydro
   ! =========================================================================
@@ -4008,11 +3973,7 @@ contains
     real(kind=8), intent(in), value :: dt
 
     integer :: block_idx, cell_idx, oct_idx
-    ! real(kind=8) :: rho_old, rho_new
-    real(kind=dp) :: rho_old_new_ratio_dt
     real(kind=dp) :: d, mx, my, mz, e_prim, fact
-    type(primitive_t) :: prim
-    type(conserved_t) :: cons
 
     block_idx = blockIdx%x - 1
 
@@ -4024,64 +3985,26 @@ contains
     ! Compute the cell idx
     cell_idx = threadIdx%x
 
-#ifdef MHD
-       ! Apply gravity on unew; face-B unchanged.
-       d  = max(unew(cell_idx, 1, oct_idx), smallr)
-       mx = unew(cell_idx, 2, oct_idx)
-       my = unew(cell_idx, 3, oct_idx)
-       mz = unew(cell_idx, 4, oct_idx)
-       e_prim = unew(cell_idx, 5, oct_idx) - 0.5_dp*(mx*mx + my*my + mz*mz)/d
-       fact = max(uold(cell_idx, 1, oct_idx), smallr)/d * dt
+    ! Apply gravity on unew (conserved variables); internal/magnetic energy and face-B unchanged.
+    d  = max(unew(cell_idx, 1, oct_idx), smallr)
+    mx = unew(cell_idx, 2, oct_idx)
+    my = unew(cell_idx, 3, oct_idx)
+    mz = unew(cell_idx, 4, oct_idx)
+    e_prim = unew(cell_idx, 5, oct_idx) - 0.5_dp*(mx*mx + my*my + mz*mz)/d
+    fact = max(uold(cell_idx, 1, oct_idx), smallr)/d * dt
 #ifdef GRAV
-       mx = mx + d*f(cell_idx, 1, oct_idx)*fact
-       my = my + d*f(cell_idx, 2, oct_idx)*fact
-       mz = mz + d*f(cell_idx, 3, oct_idx)*fact
+    mx = mx + d*f(cell_idx, 1, oct_idx)*fact
+    my = my + d*f(cell_idx, 2, oct_idx)*fact
+    mz = mz + d*f(cell_idx, 3, oct_idx)*fact
 #else
-       mx = mx + d*constant_gravity(1)*fact
-       my = my + d*constant_gravity(2)*fact
-       mz = mz + d*constant_gravity(3)*fact
+    mx = mx + d*constant_gravity(1)*fact
+    my = my + d*constant_gravity(2)*fact
+    mz = mz + d*constant_gravity(3)*fact
 #endif
-       unew(cell_idx, 2, oct_idx) = mx
-       unew(cell_idx, 3, oct_idx) = my
-       unew(cell_idx, 4, oct_idx) = mz
-       unew(cell_idx, 5, oct_idx) = e_prim + 0.5_dp*(mx*mx + my*my + mz*mz)/d
-#else
-       ! Collect conservative variables
-       cons%density    = unew(cell_idx, 1, oct_idx)
-       cons%momentum_x = unew(cell_idx, 2, oct_idx)
-       cons%momentum_y = unew(cell_idx, 3, oct_idx)
-       cons%momentum_z = unew(cell_idx, 4, oct_idx)
-       cons%energy     = unew(cell_idx, 5, oct_idx)
-
-       ! Convert to primitive
-       prim = conserved_2_primitive(cons, gamma, smallr, smallc2)
-
-       ! Old and new densities
-       ! rho_old = uold(cell_idx, 1, oct_idx)
-       ! rho_new = unew(cell_idx, 1, oct_idx)
-       rho_old_new_ratio_dt = dt * uold(cell_idx, 1, oct_idx) / unew(cell_idx, 1, oct_idx)
-
-       ! Update velocity
-#ifdef GRAV
-       prim%velocity_x = prim%velocity_x + f(cell_idx, 1, oct_idx) * rho_old_new_ratio_dt
-       prim%velocity_y = prim%velocity_y + f(cell_idx, 2, oct_idx) * rho_old_new_ratio_dt
-       prim%velocity_z = prim%velocity_z + f(cell_idx, 3, oct_idx) * rho_old_new_ratio_dt
-#else
-       prim%velocity_x = prim%velocity_x + constant_gravity(1) * rho_old_new_ratio_dt
-       prim%velocity_y = prim%velocity_y + constant_gravity(2) * rho_old_new_ratio_dt
-       prim%velocity_z = prim%velocity_z + constant_gravity(3) * rho_old_new_ratio_dt
-#endif
-
-       ! Convert back to conservative
-       cons = primitive_2_conserved(prim, gamma)
-
-       ! Save to main memory
-       unew(cell_idx, 1, oct_idx) = cons%density
-       unew(cell_idx, 2, oct_idx) = cons%momentum_x
-       unew(cell_idx, 3, oct_idx) = cons%momentum_y
-       unew(cell_idx, 4, oct_idx) = cons%momentum_z
-       unew(cell_idx, 5, oct_idx) = cons%energy
-#endif
+    unew(cell_idx, 2, oct_idx) = mx
+    unew(cell_idx, 3, oct_idx) = my
+    unew(cell_idx, 4, oct_idx) = mz
+    unew(cell_idx, 5, oct_idx) = e_prim + 0.5_dp*(mx*mx + my*my + mz*mz)/d
 
   end subroutine grav_hydro
   ! =========================================================================
