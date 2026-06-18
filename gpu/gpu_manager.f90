@@ -61,7 +61,8 @@ recursive subroutine r_set_grid_device(pst)
         star_tp     = pst%s%star%tp
         star_zp     = pst%s%star%zp
         star_levelp = pst%s%star%levelp
-        star_idp    = pst%s%star%idp
+        star_sortp  = pst%s%star%sortp
+        if (allocated(star_idp)) star_idp = pst%s%star%idp
         call GPU_Error_Check(__FILE__, __LINE__)
         call nvtxEndRange()
      endif
@@ -172,7 +173,8 @@ subroutine gpu_to_host_part(pst)
   pst%s%star%tp     = star_tp
   pst%s%star%zp     = star_zp
   pst%s%star%levelp = star_levelp
-  pst%s%star%idp    = star_idp
+  pst%s%star%sortp  = star_sortp
+  if (allocated(star_idp)) pst%s%star%idp = star_idp
   call GPU_Error_Check(__FILE__, __LINE__)
   call nvtxEndRange()
 

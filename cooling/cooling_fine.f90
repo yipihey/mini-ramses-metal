@@ -36,10 +36,10 @@ recursive subroutine r_cooling_fine(pst,ilevel,input_size)
      if(pst%s%r%cooling.and.ilevel==pst%s%r%levelmin.and.pst%s%r%cosmo)then
         if(pst%s%g%myid==1)write(*,*)'Computing new cooling table'
         call set_table(pst%s%cool,dble(pst%s%g%aexp))
-     endif
 #ifdef _CUDA
-     call gpu_upload_cooling_table(pst%s%cool)
+        call gpu_upload_cooling_table(pst%s%cool)
 #endif
+     endif
 #endif
 
   endif
