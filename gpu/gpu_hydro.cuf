@@ -1025,7 +1025,6 @@ contains
     else if (riemann2d .eq. solver2d_hllf) then
        E = riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc)
     else
-       ! Unimplemented 2D solvers fall back to HLL.
        E = riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc)   ! fall back to 2D HLL
     endif
 
