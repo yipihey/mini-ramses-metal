@@ -412,7 +412,7 @@ contains
     integer(kind=4) :: threadsX_per_block, threadsY_per_block, num_blocks
     real(kind=8) :: scale_nH, scale_T2, scale_l, scale_d, scale_t, scale_v
     real(kind=8) :: dtcool, nH_eos, nCOM
-    real(kind=8) :: gamma, smallr, smallc2
+    real(kind=dp) :: gamma, smallr, smallc2
 
     gamma = sim%r%gamma
     smallr = sim%r%smallr
@@ -1085,8 +1085,10 @@ contains
     integer :: threadsX_per_block, threadsY_per_block, num_threads, num_blocks
     real(kind=dp) :: gamma, err_grad_d, err_grad_p, floor_d, floor_p
     real(kind=dp) :: smallr, smallc2
+#ifdef MHD
     real(kind=dp) :: err_grad_b2, floor_b2, err_grad_A, floor_A
     real(kind=dp) :: err_grad_B, floor_B, err_grad_C, floor_C
+#endif
     real(kind=dp) :: m_refine, jeans_refine, mass_sph, dx, factG
     integer(kind=8), device :: nflag_d
     integer(kind=8) :: nflag_h
@@ -1101,6 +1103,7 @@ contains
     err_grad_p = sim%r%err_grad_p
     floor_d = sim%r%floor_d
     floor_p = sim%r%floor_p
+#ifdef MHD
     err_grad_b2 = sim%r%err_grad_b2
     floor_b2 = sim%r%floor_b2
     err_grad_A = sim%r%err_grad_A
@@ -1109,6 +1112,7 @@ contains
     floor_B = sim%r%floor_B
     err_grad_C = sim%r%err_grad_C
     floor_C = sim%r%floor_C
+#endif
     mass_sph = sim%r%mass_sph
     m_refine = sim%r%m_refine(ilevel)
     jeans_refine = sim%r%jeans_refine(ilevel)
@@ -1135,8 +1139,10 @@ contains
        if(num_octs > 0)then
           call nvtxStartRange("GPU user_flag", color=2)!yellow
           call hydro_flag_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(flag1, grid, nbor, uold, bold, &
-               & head_idx, num_octs, gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p, &
-               & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C)
+#ifdef MHD
+               & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C, &
+#endif
+               & head_idx, num_octs, gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p)
           call nvtxEndRange()
        endif
     endif

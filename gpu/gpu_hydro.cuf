@@ -3541,8 +3541,10 @@ contains
 
   ! =========================================================================
   attributes(global) subroutine hydro_flag_kernel(flag1, grid, nbor, uold, bold, head_idx, num_octs, &
-       & gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p, &
-       & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C)
+#ifdef MHD
+       & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C, &
+#endif
+       & gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p)
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     ! Face-centred B; unused without MHD.
@@ -3554,12 +3556,12 @@ contains
     real(kind=dp), intent(in), value :: gamma, smallr, smallc2
     real(kind=dp), intent(in), value :: err_grad_d, floor_d
     real(kind=dp), intent(in), value :: err_grad_p, floor_p
-    ! MHD refinement thresholds (unused when namelist < 0).
+#ifdef MHD
     real(kind=dp), intent(in), value :: err_grad_b2, floor_b2
     real(kind=dp), intent(in), value :: err_grad_A, floor_A
     real(kind=dp), intent(in), value :: err_grad_B, floor_B
     real(kind=dp), intent(in), value :: err_grad_C, floor_C
-
+#endif
     integer :: cell_idx, oct_idx, block_idx, source_idx, subgrid_idx
     integer :: i, j, k, il, jl, kl, ir, jr, kr
     integer :: icell, inbor, idim, ind_nbor

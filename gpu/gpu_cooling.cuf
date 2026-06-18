@@ -10,21 +10,21 @@ module cooling_device
   ! Populated by gpu_upload_cooling_table; must be re-uploaded whenever
   ! set_table is called (cosmological runs: once per coarse step).
   ! -----------------------------------------------------------------------
-  integer,  device :: n1_d, n2_d
-  real(dp), device :: dlog_nH_d, dlog_T2_d
+  integer,      device :: n1_d, n2_d
+  real(kind=8), device :: dlog_nH_d, dlog_T2_d
 
-  real(dp), device, allocatable :: nH_tbl_d(:)            ! log10(nH) axis [n1]
-  real(dp), device, allocatable :: T2_tbl_d(:)            ! log10(T2) axis [n2]
-  real(dp), device, allocatable :: cool_d(:,:)            ! [n1,n2]
-  real(dp), device, allocatable :: heat_d(:,:)
-  real(dp), device, allocatable :: cool_com_d(:,:)
-  real(dp), device, allocatable :: heat_com_d(:,:)
-  real(dp), device, allocatable :: metal_d(:,:)
-  real(dp), device, allocatable :: cool_prime_d(:,:)
-  real(dp), device, allocatable :: heat_prime_d(:,:)
-  real(dp), device, allocatable :: cool_com_prime_d(:,:)
-  real(dp), device, allocatable :: heat_com_prime_d(:,:)
-  real(dp), device, allocatable :: metal_prime_d(:,:)
+  real(kind=8), device, allocatable :: nH_tbl_d(:)            ! log10(nH) axis [n1]
+  real(kind=8), device, allocatable :: T2_tbl_d(:)            ! log10(T2) axis [n2]
+  real(kind=8), device, allocatable :: cool_d(:,:)            ! [n1,n2]
+  real(kind=8), device, allocatable :: heat_d(:,:)
+  real(kind=8), device, allocatable :: cool_com_d(:,:)
+  real(kind=8), device, allocatable :: heat_com_d(:,:)
+  real(kind=8), device, allocatable :: metal_d(:,:)
+  real(kind=8), device, allocatable :: cool_prime_d(:,:)
+  real(kind=8), device, allocatable :: heat_prime_d(:,:)
+  real(kind=8), device, allocatable :: cool_com_prime_d(:,:)
+  real(kind=8), device, allocatable :: heat_com_prime_d(:,:)
+  real(kind=8), device, allocatable :: metal_prime_d(:,:)
 
   ! Host-side flag: has the table been copied to the device yet?
   ! gpu_cooling uses this to upload the table lazily (only once for
@@ -117,19 +117,19 @@ contains
     real(kind=8),         intent(out) :: delta_T2_cell
 
     ! kB in CGS: Boltzmann constant [erg/K]
-    real(dp), parameter :: kB_cgs    = 1.380649d-16
-    real(dp), parameter :: varmax    = 4.0d0
-    real(dp), parameter :: T2_max_fix = 1.0d9
+    real(kind=8), parameter :: kB_cgs    = 1.380649d-16
+    real(kind=8), parameter :: varmax    = 4.0d0
+    real(kind=8), parameter :: T2_max_fix = 1.0d9
 
-    real(dp) :: h, h2, h3, precoeff, logT2max
-    real(dp) :: facH, facT, w1H, w2H
-    real(dp) :: tau, tau_ini, tau_old
-    real(dp) :: time, time_old, time_max, wmax
-    real(dp) :: fa, fb, fprimea, fprimeb, al, be, ga
-    real(dp) :: cool, heat, cool_com, heat_com, metal
-    real(dp) :: cool_prime, heat_prime, cool_com_prime, heat_com_prime, metal_prime
-    real(dp) :: lambda, lambda_prime, wcool
-    real(dp) :: yy, yy2, yy3
+    real(kind=8) :: h, h2, h3, precoeff, logT2max
+    real(kind=8) :: facH, facT, w1H, w2H
+    real(kind=8) :: tau, tau_ini, tau_old
+    real(kind=8) :: time, time_old, time_max, wmax
+    real(kind=8) :: fa, fb, fprimea, fprimeb, al, be, ga
+    real(kind=8) :: cool, heat, cool_com, heat_com, metal
+    real(kind=8) :: cool_prime, heat_prime, cool_com_prime, heat_com_prime, metal_prime
+    real(kind=8) :: lambda, lambda_prime, wcool
+    real(kind=8) :: yy, yy2, yy3
     integer  :: i_nH, i_T2, iter
 
     ! --- Derived axis constants ---
@@ -270,14 +270,15 @@ contains
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: bold(1:twotondim,1:6,*)
+
     integer(kind=4), intent(in), value :: head_idx, num_octs
-    real(kind=8), value :: gamma, smallc2
+    real(kind=dp), value :: gamma, smallr, smallc2
     real(kind=8), value :: eos_T2, eos_nH, eos_index
     real(kind=8), value :: dt, scale_T2, scale_nH
     integer(kind=4), value :: eos_type
     logical, value :: cooling, metal, self_shielding
     integer(kind=4), value :: imetal
-    real(kind=8), value :: z_ave, X_frac, T2max, smallr
+    real(kind=8), value :: z_ave, X_frac, T2max
 
     integer :: cell_idx, oct_idx, block_idx, idim
     real(kind=8) :: density, energy, kinetic, poverrho, temperature, nH, emag
@@ -312,7 +313,7 @@ contains
     end do
 #endif
     poverrho    = (gamma - 1.0_dp) * (energy - kinetic - emag/density)
-    poverrho    = max(poverrho, smallc2 / gamma)
+    poverrho    = max(poverrho, real(smallc2 / gamma,kind=8))
     temperature = poverrho * scale_T2
     nH          = density * scale_nH
 
