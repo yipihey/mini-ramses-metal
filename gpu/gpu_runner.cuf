@@ -1260,10 +1260,11 @@ contains
        if(num_octs > 0)then
           call nvtxStartRange("GPU user_flag", color=2)!yellow
           call hydro_flag_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(flag1, grid, nbor, uold, bold, &
+               & head_idx, num_octs, &
 #ifdef MHD
                & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C, &
 #endif
-               & head_idx, num_octs, gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p)
+               & gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p)
           call nvtxEndRange()
        endif
     endif
