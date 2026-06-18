@@ -32,6 +32,9 @@ recursive subroutine r_set_grid_device(pst)
      if(pst%s%r%nlevelmax > pst%s%r%levelmin) flag1 = pst%s%m%flag1
 #ifdef HYDRO
      uold = pst%s%m%uold
+#ifdef MHD
+     bold = pst%s%m%bold
+#endif
 #endif
      call GPU_Error_Check(__FILE__, __LINE__)
      call nvtxEndRange()
@@ -119,6 +122,9 @@ recursive subroutine r_transfer_grid_host(pst)
      if(pst%s%r%nlevelmax > pst%s%r%levelmin) pst%s%m%flag1 = flag1
 #ifdef HYDRO
      pst%s%m%uold = uold
+#ifdef MHD
+     pst%s%m%bold = bold
+#endif
 #endif
 #ifdef GRAV
      pst%s%m%f = f

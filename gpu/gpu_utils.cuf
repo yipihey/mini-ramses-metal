@@ -26,7 +26,8 @@ module gpu_utils
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_y
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_z
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: pressure
-     logical      , dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: refined
+     ! Byte-packed inner lattice (1:2*nsubgrid+2); only that range is read/stored.
+     logical(kind=1), dimension(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2) :: refined
   end type subgrid_6x6x6cell_primitive
 
   !> @brief

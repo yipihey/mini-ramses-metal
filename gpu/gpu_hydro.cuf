@@ -22,17 +22,30 @@ module hydro_device
        &   0,0,1,1,0,0,1,1,&
        &   -1,-1,-1,-1,0,0,0,0,&
        &   0,0,0,0,1,1,1,1/),(/8,6/))
+#if NVAR>5+NENER
+  integer,parameter::nscalar=nvar-5-nener
+#endif
 
   !> @brief
   !> Contains a 3 x 3 x 3 subgrid of primitive variables. Intended to act as a subgrid
   !> for interface states and fluxes. Note that it is zero indexed to make 1D to 3D
-  !> indexing easier
+  !> indexing easier. Under MHD the interface states additionally carry the
+  !> magnetic field (Bx, By, Bz). Passive scalars are present whenever the
+  !> conserved state has slots beyond the hydro/radiation baseline.
   type, public :: subgrid_3x2x2cell_primitive
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: density
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_x
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_y
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_z
      real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: pressure
+#ifdef MHD
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: By
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: Bz
+#endif
+#if NVAR>5+NENER
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1, 1:nscalar) :: scalar
+#endif
   end type subgrid_3x2x2cell_primitive
   type, public :: subgrid_2x3x2cell_primitive
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: density
@@ -40,6 +53,14 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_y
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_z
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: pressure
+#ifdef MHD
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: By
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: Bz
+#endif
+#if NVAR>5+NENER
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:nscalar) :: scalar
+#endif 
   end type subgrid_2x3x2cell_primitive
   type, public :: subgrid_2x2x3cell_primitive
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: density
@@ -47,27 +68,104 @@ module hydro_device
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_y
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_z
      real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: pressure
+#ifdef MHD
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: By
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: Bz
+#endif
+#if NVAR>5+NENER
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:nscalar) :: scalar
+#endif
   end type subgrid_2x2x3cell_primitive
 
   !> @brief
-  !> A simple type for holding the conserved variables of a cell
+  !> A simple type for holding the conserved variables of a cell.
+  !> Under MHD it also carries the cell-centred magnetic field.
   type, public :: conserved_t
      real(kind=dp) :: density
      real(kind=dp) :: momentum_x
      real(kind=dp) :: momentum_y
      real(kind=dp) :: momentum_z
      real(kind=dp) :: energy
+#ifdef MHD
+     real(kind=dp) :: Bx
+     real(kind=dp) :: By
+     real(kind=dp) :: Bz
+#endif
   end type conserved_t
 
   !> @brief
-  !> A simple type for holding the primitive variables of a cell
+  !> A simple type for holding the primitive variables of a cell.
+  !> Under MHD it also carries the cell-centred magnetic field.
   type, public :: primitive_t
      real(kind=dp) :: density
      real(kind=dp) :: velocity_x
      real(kind=dp) :: velocity_y
      real(kind=dp) :: velocity_z
      real(kind=dp) :: pressure
+#ifdef MHD
+     real(kind=dp) :: Bx
+     real(kind=dp) :: By
+     real(kind=dp) :: Bz
+#endif
   end type primitive_t
+
+#ifdef MHD
+  ! Face-centred B subgrid.
+  type, public :: subgrid_face_b_t
+     real(kind=dp), dimension(1:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: bx
+     real(kind=dp), dimension(0:2*nsubgrid+3, 1:2*nsubgrid+3, 0:2*nsubgrid+3) :: by
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:2*nsubgrid+3) :: bz
+  end type subgrid_face_b_t
+
+  ! Edge-centred electric field subgrid.
+  type, public :: subgrid_edge_e_t
+     real(kind=dp), dimension(1:2*nsubgrid+2, 1:2*nsubgrid+3, 1:2*nsubgrid+3) :: Ex
+     real(kind=dp), dimension(1:2*nsubgrid+3, 1:2*nsubgrid+2, 1:2*nsubgrid+3) :: Ey
+     real(kind=dp), dimension(1:2*nsubgrid+3, 1:2*nsubgrid+3, 1:2*nsubgrid+2) :: Ez
+  end type subgrid_edge_e_t
+
+  ! Edge-parallel EMF subgrids.
+  type, public :: subgrid_2x3x3edge_primitive   ! edges parallel to x (emfx)
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid) :: edge_e
+  end type subgrid_2x3x3edge_primitive
+  type, public :: subgrid_3x2x3edge_primitive   ! edges parallel to y (emfy)
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid) :: edge_e
+  end type subgrid_3x2x3edge_primitive
+  type, public :: subgrid_3x3x2edge_primitive   ! edges parallel to z (emfz)
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1) :: edge_e
+  end type subgrid_3x3x2edge_primitive
+
+  ! Edge corner states for EMF solve.
+  type, public :: subgrid_2x3x3edge_corner   ! edges parallel to x (feed emfx)
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: density
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: velocity_y
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: velocity_z
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: pressure
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: By
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid, 1:4) :: Bz
+  end type subgrid_2x3x3edge_corner
+  type, public :: subgrid_3x2x3edge_corner   ! edges parallel to y (feed emfy)
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: density
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: velocity_x
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: velocity_z
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: pressure
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: By
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid, 1:4) :: Bz
+  end type subgrid_3x2x3edge_corner
+  type, public :: subgrid_3x3x2edge_corner   ! edges parallel to z (feed emfz)
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: density
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: velocity_x
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: velocity_y
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: pressure
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: Bx
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: By
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid, 0:2*nsubgrid-1, 1:4) :: Bz
+  end type subgrid_3x3x2edge_corner
+
+#endif
 
 contains
 
@@ -109,6 +207,9 @@ contains
     momentum_squared = magnitude_squared(conserved%momentum_x, conserved%momentum_y, conserved%momentum_z)
     density = max(conserved%density, smallr)
     internal_energy = conserved%energy - 0.5_dp*momentum_squared/density
+#ifdef MHD
+    internal_energy = internal_energy - compute_emag(conserved%Bx, conserved%By, conserved%Bz)
+#endif
     pressure = max((gamma - 1.0_dp)*internal_energy, density*smallp)
     return
   end function compute_pressure
@@ -130,6 +231,9 @@ contains
 
     velocity_squared = magnitude_squared(primitive%velocity_x, primitive%velocity_y, primitive%velocity_z)
     energy = (primitive%pressure/(gamma - 1.0_dp)) + 0.5_dp*primitive%density*velocity_squared
+#ifdef MHD
+    energy = energy + compute_emag(primitive%Bx, primitive%By, primitive%Bz)
+#endif
     return
   end function compute_energy
   ! ==========================================================================
@@ -201,7 +305,7 @@ contains
     slope_central = 0.5 * (slope_left + slope_right)
 
     ! Slope type factor, 0: 1st order, 1: minmod, 2: moncen
-    factor = real(slope, kind=8) 
+    factor = real(slope, kind=dp)
 
     if (slope_left*slope_right <= 0.0_dp) then
        slope_moncen = 0.0_dp
@@ -213,6 +317,106 @@ contains
        slope_moncen = max(factor * slope_minmod, slope_central)
     end if
   end function slope_moncen
+  ! ==========================================================================
+
+  ! ==========================================================================
+  !> Limited TVD slopes (half*dq) for hydro and transverse B.
+  attributes(device) subroutine compute_tvd_slopes(local_subgrid, i, j, k, slope, &
+#if NVAR>5+NENER
+       & scalar_sub, dscal_x, dscal_y, dscal_z, &
+#endif
+#ifdef MHD
+       & bf, &
+#endif
+       & slopes_x, slopes_y, slopes_z)
+    type(subgrid_6x6x6cell_primitive), intent(in) :: local_subgrid
+    integer, value :: i, j, k, slope
+    type(primitive_t), intent(out) :: slopes_x, slopes_y, slopes_z
+    type(primitive_t) :: cell
+#if NVAR>5+NENER
+    real(kind=dp), intent(in) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
+    real(kind=dp), intent(out) :: dscal_x(1:nscalar), dscal_y(1:nscalar), dscal_z(1:nscalar)
+    real(kind=dp) :: rscal
+    integer :: n
+#endif
+#ifdef MHD
+    type(subgrid_face_b_t), intent(in) :: bf
+    real(kind=dp) :: Bxc, Byc, Bzc
+    real(kind=dp) :: Byc_xm, Byc_xp, Bzc_xm, Bzc_xp
+    real(kind=dp) :: Bxc_ym, Bxc_yp, Bzc_ym, Bzc_yp
+    real(kind=dp) :: Bxc_zm, Bxc_zp, Byc_zm, Byc_zp
+#endif
+
+    ! Cell centered (middle) values
+    cell%density    = local_subgrid%density   (i, j, k)
+    cell%velocity_x = local_subgrid%velocity_x(i, j, k)
+    cell%velocity_y = local_subgrid%velocity_y(i, j, k)
+    cell%velocity_z = local_subgrid%velocity_z(i, j, k)
+    cell%pressure   = local_subgrid%pressure  (i, j, k)
+#ifdef MHD
+    ! Cell-centred B from face-B buffer.
+    Bxc    = 0.5_dp*(bf%bx(i  ,j,k) + bf%bx(i+1,j  ,k))
+    Byc    = 0.5_dp*(bf%by(i,j  ,k) + bf%by(i  ,j+1,k))
+    Bzc    = 0.5_dp*(bf%bz(i,j,k  ) + bf%bz(i  ,j,k+1))
+    Byc_xm = 0.5_dp*(bf%by(i-1,j,k) + bf%by(i-1,j+1,k))
+    Byc_xp = 0.5_dp*(bf%by(i+1,j,k) + bf%by(i+1,j+1,k))
+    Bzc_xm = 0.5_dp*(bf%bz(i-1,j,k) + bf%bz(i-1,j,k+1))
+    Bzc_xp = 0.5_dp*(bf%bz(i+1,j,k) + bf%bz(i+1,j,k+1))
+    Bxc_ym = 0.5_dp*(bf%bx(i,j-1,k) + bf%bx(i+1,j-1,k))
+    Bxc_yp = 0.5_dp*(bf%bx(i,j+1,k) + bf%bx(i+1,j+1,k))
+    Bzc_ym = 0.5_dp*(bf%bz(i,j-1,k) + bf%bz(i,j-1,k+1))
+    Bzc_yp = 0.5_dp*(bf%bz(i,j+1,k) + bf%bz(i,j+1,k+1))
+    Bxc_zm = 0.5_dp*(bf%bx(i,j,k-1) + bf%bx(i+1,j,k-1))
+    Bxc_zp = 0.5_dp*(bf%bx(i,j,k+1) + bf%bx(i+1,j,k+1))
+    Byc_zm = 0.5_dp*(bf%by(i,j,k-1) + bf%by(i,j+1,k-1))
+    Byc_zp = 0.5_dp*(bf%by(i,j,k+1) + bf%by(i,j+1,k+1))
+#endif
+
+    slopes_x%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i - 1, j, k), cell%density,    local_subgrid%density   (i + 1, j, k), slope)
+    slopes_x%velocity_x = 0.5_dp * slope_moncen(local_subgrid%velocity_x(i - 1, j, k), cell%velocity_x, local_subgrid%velocity_x(i + 1, j, k), slope)
+    slopes_x%velocity_y = 0.5_dp * slope_moncen(local_subgrid%velocity_y(i - 1, j, k), cell%velocity_y, local_subgrid%velocity_y(i + 1, j, k), slope)
+    slopes_x%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i - 1, j, k), cell%velocity_z, local_subgrid%velocity_z(i + 1, j, k), slope)
+    slopes_x%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i - 1, j, k), cell%pressure,   local_subgrid%pressure  (i + 1, j, k), slope)
+#ifdef MHD
+    ! Transverse B slopes; normal-B slopes unused (face-predicted).
+    slopes_x%Bx         = 0.0_dp
+    slopes_x%By         = 0.5_dp * slope_moncen(Byc_xm, Byc, Byc_xp, slope)
+    slopes_x%Bz         = 0.5_dp * slope_moncen(Bzc_xm, Bzc, Bzc_xp, slope)
+#endif
+
+    slopes_y%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i, j - 1, k), cell%density,    local_subgrid%density(   i, j + 1, k), slope)
+    slopes_y%velocity_x = 0.5_dp * slope_moncen(local_subgrid%velocity_x(i, j - 1, k), cell%velocity_x, local_subgrid%velocity_x(i, j + 1, k), slope)
+    slopes_y%velocity_y = 0.5_dp * slope_moncen(local_subgrid%velocity_y(i, j - 1, k), cell%velocity_y, local_subgrid%velocity_y(i, j + 1, k), slope)
+    slopes_y%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i, j - 1, k), cell%velocity_z, local_subgrid%velocity_z(i, j + 1, k), slope)
+    slopes_y%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i, j - 1, k), cell%pressure,   local_subgrid%pressure(  i, j + 1, k), slope)
+#ifdef MHD
+    slopes_y%Bx         = 0.5_dp * slope_moncen(Bxc_ym, Bxc, Bxc_yp, slope)
+    slopes_y%By         = 0.0_dp
+    slopes_y%Bz         = 0.5_dp * slope_moncen(Bzc_ym, Bzc, Bzc_yp, slope)
+#endif
+
+    slopes_z%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i, j, k - 1), cell%density,    local_subgrid%density   (i, j, k + 1), slope)
+    slopes_z%velocity_x = 0.5_dp * slope_moncen(local_subgrid%velocity_x(i, j, k - 1), cell%velocity_x, local_subgrid%velocity_x(i, j, k + 1), slope)
+    slopes_z%velocity_y = 0.5_dp * slope_moncen(local_subgrid%velocity_y(i, j, k - 1), cell%velocity_y, local_subgrid%velocity_y(i, j, k + 1), slope)
+    slopes_z%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i, j, k - 1), cell%velocity_z, local_subgrid%velocity_z(i, j, k + 1), slope)
+    slopes_z%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i, j, k - 1), cell%pressure,   local_subgrid%pressure  (i, j, k + 1), slope)
+#ifdef MHD
+    slopes_z%Bx         = 0.5_dp * slope_moncen(Bxc_zm, Bxc, Bxc_zp, slope)
+    slopes_z%By         = 0.5_dp * slope_moncen(Byc_zm, Byc, Byc_zp, slope)
+    slopes_z%Bz         = 0.0_dp
+
+#endif
+#if NVAR>5+NENER
+    ! Passive-scalar slopes (consumed by the scalar advection predictor, C1)
+    do n = 1, nscalar
+       rscal = scalar_sub(i,j,k,n)
+       dscal_x(n) = 0.5_dp*slope_moncen(scalar_sub(i-1,j,k,n), rscal, scalar_sub(i+1,j,k,n), slope)
+       dscal_y(n) = 0.5_dp*slope_moncen(scalar_sub(i,j-1,k,n), rscal, scalar_sub(i,j+1,k,n), slope)
+       dscal_z(n) = 0.5_dp*slope_moncen(scalar_sub(i,j,k-1,n), rscal, scalar_sub(i,j,k+1,n), slope)
+    end do
+#endif
+
+  end subroutine compute_tvd_slopes
   ! ==========================================================================
 
   ! ==========================================================================
@@ -233,6 +437,11 @@ contains
     primitive%velocity_x = conserved%momentum_x / primitive%density
     primitive%velocity_y = conserved%momentum_y / primitive%density
     primitive%velocity_z = conserved%momentum_z / primitive%density
+#ifdef MHD
+    primitive%Bx = conserved%Bx
+    primitive%By = conserved%By
+    primitive%Bz = conserved%Bz
+#endif
     primitive%pressure   = compute_pressure(conserved, gamma, smallr, smallc2)
     return
   end function conserved_2_primitive
@@ -257,9 +466,572 @@ contains
     conserved%momentum_y = primitive%velocity_y * primitive%density
     conserved%momentum_z = primitive%velocity_z * primitive%density
     conserved%energy     = compute_energy(primitive, gamma)
+#ifdef MHD
+    conserved%Bx = primitive%Bx
+    conserved%By = primitive%By
+    conserved%Bz = primitive%Bz
+#endif
     return
   end function primitive_2_conserved
   ! ==========================================================================
+
+#ifdef MHD
+
+  ! Squared magnitude of cell-centred B.
+  attributes(device) function compute_bsquared(Bx, By, Bz) result(bsquared)
+    real(kind=dp), value :: Bx, By, Bz
+    real(kind=dp) :: bsquared
+    bsquared = Bx**2 + (By**2 + Bz**2)
+    return
+  end function compute_bsquared
+
+  ! Magnetic energy density 0.5*|B|^2 from cell-centred B.
+  attributes(device) function compute_emag(Bx, By, Bz) result(emag)
+    real(kind=dp), value :: Bx, By, Bz
+    real(kind=dp) :: emag
+    emag = 0.5_dp * compute_bsquared(Bx, By, Bz)
+    return
+  end function compute_emag
+
+  ! 1D HLL MHD Riemann flux (x-normal; y/z via rotation in driver).
+  attributes(device) function hll_mhd_fluxes(left, right, gamma, smallr, smallc2) result(flux)
+    type(primitive_t), intent(in) :: left, right
+    real(kind=dp), value :: gamma, smallr, smallc2
+    type(conserved_t) :: flux
+    type(primitive_t) :: left_state, right_state
+    type(conserved_t) :: left_state_c, right_state_c, left_fluxes, right_fluxes
+    real(kind=dp) :: smallp
+    real(kind=dp) :: bx_mean
+    real(kind=dp) :: rl, rr, pl, pr, ul, ur, vl, vr, wl, wr
+    real(kind=dp) :: blx, bly, blz, brx, bry, brz
+    real(kind=dp) :: emagl, emagr, ptotl, ptotr, vdotbl, vdotbr
+    real(kind=dp) :: b2l, b2r, c2l, c2r, d2l, d2r, cfleft, cfright
+    real(kind=dp) :: speed_l, speed_r
+
+    smallp = smallc2 / gamma
+
+    left_state = left
+    right_state = right
+
+    ! Continuity of normal B across the interface.
+    bx_mean = 0.5_dp * (left_state%Bx + right_state%Bx)
+    left_state%Bx = bx_mean
+    right_state%Bx = bx_mean
+
+    left_state%density = max(left_state%density, smallr)
+    right_state%density = max(right_state%density, smallr)
+    left_state%pressure = max(left_state%pressure, smallp * left_state%density)
+    right_state%pressure = max(right_state%pressure, smallp * right_state%density)
+
+    rl = left_state%density
+    rr = right_state%density
+    ul = left_state%velocity_x
+    ur = right_state%velocity_x
+    vl = left_state%velocity_y
+    vr = right_state%velocity_y
+    wl = left_state%velocity_z
+    wr = right_state%velocity_z
+    pl = left_state%pressure
+    pr = right_state%pressure
+    blx = left_state%Bx
+    brx = right_state%Bx
+    bly = left_state%By
+    bry = right_state%By
+    blz = left_state%Bz
+    brz = right_state%Bz
+
+    left_state_c = primitive_2_conserved(left_state, gamma)
+    right_state_c = primitive_2_conserved(right_state, gamma)
+
+    emagl = compute_emag(blx, bly, blz)
+    emagr = compute_emag(brx, bry, brz)
+    ptotl = pl + emagl
+    ptotr = pr + emagr
+    vdotbl = blx * ul + bly * vl + blz * wl
+    vdotbr = brx * ur + bry * vr + brz * wr
+
+    ! MHD physical fluxes at left and right.
+    left_fluxes%density = rl * ul
+    left_fluxes%momentum_x = rl * ul * ul + ptotl - blx * blx
+    left_fluxes%momentum_y = rl * ul * vl - blx * bly
+    left_fluxes%momentum_z = rl * ul * wl - blx * blz
+    left_fluxes%energy = (left_state_c%energy + ptotl) * ul - blx * vdotbl
+    left_fluxes%Bx = 0.0_dp
+    left_fluxes%By = bly * ul - blx * vl
+    left_fluxes%Bz = blz * ul - blx * wl
+
+    right_fluxes%density = rr * ur
+    right_fluxes%momentum_x = rr * ur * ur + ptotr - brx * brx
+    right_fluxes%momentum_y = rr * ur * vr - brx * bry
+    right_fluxes%momentum_z = rr * ur * wr - brx * brz
+    right_fluxes%energy = (right_state_c%energy + ptotr) * ur - brx * vdotbr
+    right_fluxes%Bx = 0.0_dp
+    right_fluxes%By = bry * ur - brx * vr
+    right_fluxes%Bz = brz * ur - brx * wr
+
+    ! Fast magnetosonic wave speeds.
+    b2l = compute_bsquared(blx, bly, blz)
+    c2l = gamma * pl / rl
+    d2l = 0.5_dp * (b2l / rl + c2l)
+    cfleft = sqrt(d2l + sqrt(d2l**2 - c2l * blx * blx / rl))
+
+    b2r = compute_bsquared(brx, bry, brz)
+    c2r = gamma * pr / rr
+    d2r = 0.5_dp * (b2r / rr + c2r)
+    cfright = sqrt(d2r + sqrt(d2r**2 - c2r * brx * brx / rr))
+
+    speed_l = min(min(ul, ur) - max(cfleft, cfright), 0.0_dp)
+    speed_r = max(max(ul, ur) + max(cfleft, cfright), 0.0_dp)
+
+    ! HLL combination of left/right fluxes.
+    flux%density = hll_flux(speed_l, speed_r, left_fluxes%density, right_fluxes%density, &
+         & left_state_c%density, right_state_c%density)
+    flux%momentum_x = hll_flux(speed_l, speed_r, left_fluxes%momentum_x, right_fluxes%momentum_x, &
+         & left_state_c%momentum_x, right_state_c%momentum_x)
+    flux%momentum_y = hll_flux(speed_l, speed_r, left_fluxes%momentum_y, right_fluxes%momentum_y, &
+         & left_state_c%momentum_y, right_state_c%momentum_y)
+    flux%momentum_z = hll_flux(speed_l, speed_r, left_fluxes%momentum_z, right_fluxes%momentum_z, &
+         & left_state_c%momentum_z, right_state_c%momentum_z)
+    flux%energy = hll_flux(speed_l, speed_r, left_fluxes%energy, right_fluxes%energy, &
+         & left_state_c%energy, right_state_c%energy)
+    flux%Bx = hll_flux(speed_l, speed_r, left_fluxes%Bx, right_fluxes%Bx, &
+         & left_state_c%Bx, right_state_c%Bx)
+    flux%By = hll_flux(speed_l, speed_r, left_fluxes%By, right_fluxes%By, &
+         & left_state_c%By, right_state_c%By)
+    flux%Bz = hll_flux(speed_l, speed_r, left_fluxes%Bz, right_fluxes%Bz, &
+         & left_state_c%Bz, right_state_c%Bz)
+
+    return
+  end function hll_mhd_fluxes
+
+  ! 1D HLLD MHD Riemann flux (Miyoshi & Kusano; x-normal).
+  attributes(device) function hlld_mhd_fluxes(left, right, gamma, smallr, smallc2) result(flux)
+    type(primitive_t), intent(in) :: left, right
+    real(kind=dp), value :: gamma, smallr, smallc2
+    type(conserved_t) :: flux
+    type(primitive_t) :: ls, rs
+    real(kind=dp) :: smallp, entho, A, sgnm
+    real(kind=dp) :: rl, ul, vl, wl, Pl, Bl, Cl, ekinl, emagl, etotl, Ptotl, vdotBl
+    real(kind=dp) :: rr, ur, vr, wr, Pr, Br, Cr, ekinr, emagr, etotr, Ptotr, vdotBr
+    real(kind=dp) :: b2l, c2l, d2l, cfastl, b2r, c2r, d2r, cfastr, SL, SR, rcl, rcr, ustar, Ptotstar
+    real(kind=dp) :: rstarl, estar, el, vstarl, Bstarl, wstarl, Cstarl, vdotBstarl, etotstarl, sqrrstarl, calfvenl, SAL
+    real(kind=dp) :: rstarr, er, vstarr, Bstarr, wstarr, Cstarr, vdotBstarr, etotstarr, sqrrstarr, calfvenr, SAR
+    real(kind=dp) :: vstarstar, wstarstar, Bstarstar, Cstarstar, vdotBstarstar, etotstarstarl, etotstarstarr
+    real(kind=dp) :: ro, uo, vo, wo, Bo, Co, Ptoto, etoto, vdotBo
+
+    smallp = smallc2 / gamma
+    entho = 1.0_dp / (gamma - 1.0_dp)
+
+    ! Floor density and pressure.
+    ls = left; rs = right
+    ls%density  = max(ls%density,  smallr);  rs%density  = max(rs%density,  smallr)
+    ls%pressure = max(ls%pressure, smallp*ls%density)
+    rs%pressure = max(rs%pressure, smallp*rs%density)
+
+    ! Continuity of normal B across the interface.
+    A = 0.5_dp*(ls%Bx + rs%Bx)
+    sgnm = sign(1.0_dp, A)
+
+    ! Left state variables.
+    rl = ls%density; ul = ls%velocity_x; vl = ls%velocity_y; wl = ls%velocity_z
+    Pl = ls%pressure; Bl = ls%By; Cl = ls%Bz
+    ekinl = 0.5_dp*(ul*ul + vl*vl + wl*wl)*rl
+    emagl = 0.5_dp*(A*A + Bl*Bl + Cl*Cl)
+    etotl = Pl*entho + ekinl + emagl
+    Ptotl = Pl + emagl
+    vdotBl = ul*A + vl*Bl + wl*Cl
+
+    ! Right state variables.
+    rr = rs%density; ur = rs%velocity_x; vr = rs%velocity_y; wr = rs%velocity_z
+    Pr = rs%pressure; Br = rs%By; Cr = rs%Bz
+    ekinr = 0.5_dp*(ur*ur + vr*vr + wr*wr)*rr
+    emagr = 0.5_dp*(A*A + Br*Br + Cr*Cr)
+    etotr = Pr*entho + ekinr + emagr
+    Ptotr = Pr + emagr
+    vdotBr = ur*A + vr*Br + wr*Cr
+
+    ! Fast magnetosonic speeds (find_speed_fast) using the continuity-enforced A.
+    b2l = A*A + Bl*Bl + Cl*Cl; c2l = gamma*Pl/rl; d2l = 0.5_dp*(b2l/rl + c2l)
+    cfastl = sqrt(d2l + sqrt(d2l**2 - c2l*A*A/rl))
+    b2r = A*A + Br*Br + Cr*Cr; c2r = gamma*Pr/rr; d2r = 0.5_dp*(b2r/rr + c2r)
+    cfastr = sqrt(d2r + sqrt(d2r**2 - c2r*A*A/rr))
+
+    ! HLL wave speeds and star state.
+    SL = min(ul, ur) - max(cfastl, cfastr)
+    SR = max(ul, ur) + max(cfastl, cfastr)
+    rcl = rl*(ul - SL); rcr = rr*(SR - ur)
+    ustar    = (rcr*ur    + rcl*ul    + (Ptotl - Ptotr))      /(rcr + rcl)
+    Ptotstar = (rcr*Ptotl + rcl*Ptotr + rcl*rcr*(ul - ur))    /(rcr + rcl)
+
+    ! Left star region.
+    rstarl = rl*(SL - ul)/(SL - ustar)
+    estar  = rl*(SL - ul)*(SL - ustar) - A*A
+    el     = rl*(SL - ul)*(SL - ul   ) - A*A
+    if (abs(estar) < 1e-4_dp*A*A) then
+       vstarl = vl; Bstarl = Bl; wstarl = wl; Cstarl = Cl
+    else
+       vstarl = vl - A*Bl*(ustar - ul)/estar
+       Bstarl = Bl*el/estar
+       wstarl = wl - A*Cl*(ustar - ul)/estar
+       Cstarl = Cl*el/estar
+    endif
+    vdotBstarl = ustar*A + vstarl*Bstarl + wstarl*Cstarl
+    etotstarl = ((SL - ul)*etotl - Ptotl*ul + Ptotstar*ustar + A*(vdotBl - vdotBstarl))/(SL - ustar)
+    sqrrstarl = sqrt(rstarl); calfvenl = abs(A)/sqrrstarl; SAL = ustar - calfvenl
+
+    ! Right star region.
+    rstarr = rr*(SR - ur)/(SR - ustar)
+    estar  = rr*(SR - ur)*(SR - ustar) - A*A
+    er     = rr*(SR - ur)*(SR - ur   ) - A*A
+    if (abs(estar) < 1e-4_dp*A*A) then
+       vstarr = vr; Bstarr = Br; wstarr = wr; Cstarr = Cr
+    else
+       vstarr = vr - A*Br*(ustar - ur)/estar
+       Bstarr = Br*er/estar
+       wstarr = wr - A*Cr*(ustar - ur)/estar
+       Cstarr = Cr*er/estar
+    endif
+    vdotBstarr = ustar*A + vstarr*Bstarr + wstarr*Cstarr
+    etotstarr = ((SR - ur)*etotr - Ptotr*ur + Ptotstar*ustar + A*(vdotBr - vdotBstarr))/(SR - ustar)
+    sqrrstarr = sqrt(rstarr); calfvenr = abs(A)/sqrrstarr; SAR = ustar + calfvenr
+
+    ! Double-star region.
+    vstarstar = (sqrrstarl*vstarl + sqrrstarr*vstarr + sgnm*(Bstarr - Bstarl))/(sqrrstarl + sqrrstarr)
+    wstarstar = (sqrrstarl*wstarl + sqrrstarr*wstarr + sgnm*(Cstarr - Cstarl))/(sqrrstarl + sqrrstarr)
+    Bstarstar = (sqrrstarl*Bstarr + sqrrstarr*Bstarl + sgnm*sqrrstarl*sqrrstarr*(vstarr - vstarl))/(sqrrstarl + sqrrstarr)
+    Cstarstar = (sqrrstarl*Cstarr + sqrrstarr*Cstarl + sgnm*sqrrstarl*sqrrstarr*(wstarr - wstarl))/(sqrrstarl + sqrrstarr)
+    vdotBstarstar = ustar*A + vstarstar*Bstarstar + wstarstar*Cstarstar
+    etotstarstarl = etotstarl - sgnm*sqrrstarl*(vdotBstarl - vdotBstarstar)
+    etotstarstarr = etotstarr + sgnm*sqrrstarr*(vdotBstarr - vdotBstarstar)
+
+    ! Sample Riemann solution at x/t=0.
+    if (SL > 0.0_dp) then
+       ro = rl; uo = ul; vo = vl; wo = wl; Bo = Bl; Co = Cl; Ptoto = Ptotl; etoto = etotl; vdotBo = vdotBl
+    else if (SAL > 0.0_dp) then
+       ro = rstarl; uo = ustar; vo = vstarl; wo = wstarl; Bo = Bstarl; Co = Cstarl
+       Ptoto = Ptotstar; etoto = etotstarl; vdotBo = vdotBstarl
+    else if (ustar > 0.0_dp) then
+       ro = rstarl; uo = ustar; vo = vstarstar; wo = wstarstar; Bo = Bstarstar; Co = Cstarstar
+       Ptoto = Ptotstar; etoto = etotstarstarl; vdotBo = vdotBstarstar
+    else if (SAR > 0.0_dp) then
+       ro = rstarr; uo = ustar; vo = vstarstar; wo = wstarstar; Bo = Bstarstar; Co = Cstarstar
+       Ptoto = Ptotstar; etoto = etotstarstarr; vdotBo = vdotBstarstar
+    else if (SR > 0.0_dp) then
+       ro = rstarr; uo = ustar; vo = vstarr; wo = wstarr; Bo = Bstarr; Co = Cstarr
+       Ptoto = Ptotstar; etoto = etotstarr; vdotBo = vdotBstarr
+    else
+       ro = rr; uo = ur; vo = vr; wo = wr; Bo = Br; Co = Cr; Ptoto = Ptotr; etoto = etotr; vdotBo = vdotBr
+    endif
+
+    ! Godunov flux; Bx flux zero (CT).
+    flux%density    = ro*uo
+    flux%momentum_x = ro*uo*uo + Ptoto - A*A
+    flux%momentum_y = ro*uo*vo - A*Bo
+    flux%momentum_z = ro*uo*wo - A*Co
+    flux%energy     = (etoto + Ptoto)*uo - A*vdotBo
+    flux%Bx = 0.0_dp
+    flux%By = Bo*uo - A*vo
+    flux%Bz = Co*uo - A*wo
+
+    return
+  end function hlld_mhd_fluxes
+
+  ! 2D HLL edge EMF from four corner states.
+  attributes(device) function riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc) result(E)
+    type(primitive_t), intent(in) :: qLL, qLR, qRL, qRR
+    real(kind=dp), value :: gamma, smallr, smallc
+    real(kind=dp) :: E
+    type(primitive_t) :: stateLL, stateLR, stateRL, stateRR
+    real(kind=dp) :: smallp
+    real(kind=dp) :: ELL, ERL, ELR, ERR, SL, SR, SB, ST
+    real(kind=dp) :: cLLx, cRLx, cLRx, cRRx, cLLy, cRLy, cLRy, cRRy
+    real(kind=dp) :: uLL, uRL, uLR, uRR, vLL, vRL, vLR, vRR
+    real(kind=dp) :: b2LL, b2LR, b2RL, b2RR
+    real(kind=dp) :: c2LL, c2LR, c2RL, c2RR
+    real(kind=dp) :: d2LL, d2LR, d2RL, d2RR
+
+    smallp = smallc**2 / gamma
+
+    stateLL = qLL
+    stateLR = qLR
+    stateRL = qRL
+    stateRR = qRR
+
+    stateLL%density = max(stateLL%density, smallr)
+    stateLR%density = max(stateLR%density, smallr)
+    stateRL%density = max(stateRL%density, smallr)
+    stateRR%density = max(stateRR%density, smallr)
+    stateLL%pressure = max(stateLL%pressure, smallp * stateLL%density)
+    stateLR%pressure = max(stateLR%pressure, smallp * stateLR%density)
+    stateRL%pressure = max(stateRL%pressure, smallp * stateRL%density)
+    stateRR%pressure = max(stateRR%pressure, smallp * stateRR%density)
+
+    ! vx*by - vy*bx at the four edge centers.
+    ELL = stateLL%velocity_x * stateLL%By - stateLL%velocity_y * stateLL%Bx
+    ERL = stateRL%velocity_x * stateRL%By - stateRL%velocity_y * stateRL%Bx
+    ELR = stateLR%velocity_x * stateLR%By - stateLR%velocity_y * stateLR%Bx
+    ERR = stateRR%velocity_x * stateRR%By - stateRR%velocity_y * stateRR%Bx
+
+    ! Compute 4 fast magnetosonic velocities relative to x direction.
+    uLL = stateLL%velocity_x
+    uLR = stateLR%velocity_x
+    uRL = stateRL%velocity_x
+    uRR = stateRR%velocity_x
+
+    b2LL = compute_bsquared(stateLL%Bx, stateLL%By, stateLL%Bz)
+    c2LL = gamma * stateLL%pressure / stateLL%density
+    d2LL = 0.5_dp * (b2LL / stateLL%density + c2LL)
+    cLLx = sqrt(d2LL + sqrt(d2LL**2 - c2LL * stateLL%Bx * stateLL%Bx / stateLL%density))
+
+    b2LR = compute_bsquared(stateLR%Bx, stateLR%By, stateLR%Bz)
+    c2LR = gamma * stateLR%pressure / stateLR%density
+    d2LR = 0.5_dp * (b2LR / stateLR%density + c2LR)
+    cLRx = sqrt(d2LR + sqrt(d2LR**2 - c2LR * stateLR%Bx * stateLR%Bx / stateLR%density))
+
+    b2RL = compute_bsquared(stateRL%Bx, stateRL%By, stateRL%Bz)
+    c2RL = gamma * stateRL%pressure / stateRL%density
+    d2RL = 0.5_dp * (b2RL / stateRL%density + c2RL)
+    cRLx = sqrt(d2RL + sqrt(d2RL**2 - c2RL * stateRL%Bx * stateRL%Bx / stateRL%density))
+
+    b2RR = compute_bsquared(stateRR%Bx, stateRR%By, stateRR%Bz)
+    c2RR = gamma * stateRR%pressure / stateRR%density
+    d2RR = 0.5_dp * (b2RR / stateRR%density + c2RR)
+    cRRx = sqrt(d2RR + sqrt(d2RR**2 - c2RR * stateRR%Bx * stateRR%Bx / stateRR%density))
+
+    ! Compute 4 fast magnetosonic velocities relative to y direction.
+    vLL = stateLL%velocity_y
+    vLR = stateLR%velocity_y
+    vRL = stateRL%velocity_y
+    vRR = stateRR%velocity_y
+
+    cLLy = sqrt(d2LL + sqrt(d2LL**2 - c2LL * stateLL%By * stateLL%By / stateLL%density))
+    cLRy = sqrt(d2LR + sqrt(d2LR**2 - c2LR * stateLR%By * stateLR%By / stateLR%density))
+    cRLy = sqrt(d2RL + sqrt(d2RL**2 - c2RL * stateRL%By * stateRL%By / stateRL%density))
+    cRRy = sqrt(d2RR + sqrt(d2RR**2 - c2RR * stateRR%By * stateRR%By / stateRR%density))
+
+    SL = min(min(uLL, uLR, uRL, uRR) - max(cLLx, cLRx, cRLx, cRRx), 0.0_dp)
+    SR = max(max(uLL, uLR, uRL, uRR) + max(cLLx, cLRx, cRLx, cRRx), 0.0_dp)
+    SB = min(min(vLL, vLR, vRL, vRR) - max(cLLy, cLRy, cRLy, cRRy), 0.0_dp)
+    ST = max(max(vLL, vLR, vRL, vRR) + max(cLLy, cLRy, cRLy, cRRy), 0.0_dp)
+
+    E = (SL * SB * ERR - SL * ST * ERL - SR * SB * ELR + SR * ST * ELL) / (SR - SL) / (ST - SB) &
+         & - ST * SB / (ST - SB) * (stateRR%Bx - stateLL%Bx) &
+         & + SR * SL / (SR - SL) * (stateRR%By - stateLL%By)
+
+    return
+  end function riemann2d_hll_emf
+
+  ! 2D HLLD edge EMF in the rotated edge frame.
+  attributes(device) function riemann2d_hlld_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
+       & switch_llf_dmin, switch_llf_pmin) result(E)
+    type(primitive_t), intent(in) :: qLL, qLR, qRL, qRR
+    real(kind=dp), value :: gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
+    real(kind=dp) :: E
+    type(primitive_t) :: stateLL, stateLR, stateRL, stateRR
+    real(kind=dp) :: smallp
+    real(kind=dp) :: ELL, ERL, ELR, ERR, SL, SR, SB, ST, SAL, SAR, SAT, SAB
+    real(kind=dp) :: cfastLLx, cfastRLx, cfastLRx, cfastRRx
+    real(kind=dp) :: cfastLLy, cfastRLy, cfastLRy, cfastRRy
+    real(kind=dp) :: calfvenR, calfvenL, calfvenT, calfvenB
+    real(kind=dp) :: rLL, rLR, rRL, rRR, pLL, pLR, pRL, pRR
+    real(kind=dp) :: uLL, uLR, uRL, uRR, vLL, vLR, vRL, vRR
+    real(kind=dp) :: ALL, ALR, ARL, ARR, BLL, BLR, BRL, BRR, CLL, CLR, CRL, CRR
+    real(kind=dp) :: PtotLL, PtotLR, PtotRL, PtotRR
+    real(kind=dp) :: rcLLx, rcLRx, rcRLx, rcRRx, rcLLy, rcLRy, rcRLy, rcRRy
+    real(kind=dp) :: ustar, vstar
+    real(kind=dp) :: rstarLLx, rstarLRx, rstarRLx, rstarRRx
+    real(kind=dp) :: rstarLLy, rstarLRy, rstarRLy, rstarRRy
+    real(kind=dp) :: rstarLL, rstarLR, rstarRL, rstarRR
+    real(kind=dp) :: AstarLL, AstarLR, AstarRL, AstarRR
+    real(kind=dp) :: BstarLL, BstarLR, BstarRL, BstarRR
+    real(kind=dp) :: EstarLLx, EstarLRx, EstarRLx, EstarRRx
+    real(kind=dp) :: EstarLLy, EstarLRy, EstarRLy, EstarRRy
+    real(kind=dp) :: EstarLL, EstarLR, EstarRL, EstarRR
+    real(kind=dp) :: AstarT, AstarB, BstarR, BstarL
+    real(kind=dp) :: b2LL, b2LR, b2RL, b2RR
+    real(kind=dp) :: c2LL, c2LR, c2RL, c2RR
+    real(kind=dp) :: d2LL, d2LR, d2RL, d2RR
+    real(kind=dp) :: rmin, pmin, Smax
+    logical :: switch_to_llf
+
+    smallp = smallc**2 / gamma
+
+    stateLL = qLL
+    stateLR = qLR
+    stateRL = qRL
+    stateRR = qRR
+
+    stateLL%density = max(stateLL%density, smallr)
+    stateLR%density = max(stateLR%density, smallr)
+    stateRL%density = max(stateRL%density, smallr)
+    stateRR%density = max(stateRR%density, smallr)
+    stateLL%pressure = max(stateLL%pressure, smallp * stateLL%density)
+    stateLR%pressure = max(stateLR%pressure, smallp * stateLR%density)
+    stateRL%pressure = max(stateRL%pressure, smallp * stateRL%density)
+    stateRR%pressure = max(stateRR%pressure, smallp * stateRR%density)
+
+    rLL = stateLL%density; pLL = stateLL%pressure
+    uLL = stateLL%velocity_x; vLL = stateLL%velocity_y
+    ALL = stateLL%Bx; BLL = stateLL%By; CLL = stateLL%Bz
+    rLR = stateLR%density; pLR = stateLR%pressure
+    uLR = stateLR%velocity_x; vLR = stateLR%velocity_y
+    ALR = stateLR%Bx; BLR = stateLR%By; CLR = stateLR%Bz
+    rRL = stateRL%density; pRL = stateRL%pressure
+    uRL = stateRL%velocity_x; vRL = stateRL%velocity_y
+    ARL = stateRL%Bx; BRL = stateRL%By; CRL = stateRL%Bz
+    rRR = stateRR%density; pRR = stateRR%pressure
+    uRR = stateRR%velocity_x; vRR = stateRR%velocity_y
+    ARR = stateRR%Bx; BRR = stateRR%By; CRR = stateRR%Bz
+
+    b2LL = compute_bsquared(ALL, BLL, CLL); c2LL = gamma*pLL/rLL
+    d2LL = 0.5_dp*(b2LL/rLL + c2LL)
+    cfastLLx = sqrt(d2LL + sqrt(d2LL**2 - c2LL*ALL*ALL/rLL))
+    cfastLLy = sqrt(d2LL + sqrt(d2LL**2 - c2LL*BLL*BLL/rLL))
+    b2LR = compute_bsquared(ALR, BLR, CLR); c2LR = gamma*pLR/rLR
+    d2LR = 0.5_dp*(b2LR/rLR + c2LR)
+    cfastLRx = sqrt(d2LR + sqrt(d2LR**2 - c2LR*ALR*ALR/rLR))
+    cfastLRy = sqrt(d2LR + sqrt(d2LR**2 - c2LR*BLR*BLR/rLR))
+    b2RL = compute_bsquared(ARL, BRL, CRL); c2RL = gamma*pRL/rRL
+    d2RL = 0.5_dp*(b2RL/rRL + c2RL)
+    cfastRLx = sqrt(d2RL + sqrt(d2RL**2 - c2RL*ARL*ARL/rRL))
+    cfastRLy = sqrt(d2RL + sqrt(d2RL**2 - c2RL*BRL*BRL/rRL))
+    b2RR = compute_bsquared(ARR, BRR, CRR); c2RR = gamma*pRR/rRR
+    d2RR = 0.5_dp*(b2RR/rRR + c2RR)
+    cfastRRx = sqrt(d2RR + sqrt(d2RR**2 - c2RR*ARR*ARR/rRR))
+    cfastRRy = sqrt(d2RR + sqrt(d2RR**2 - c2RR*BRR*BRR/rRR))
+
+    SL = min(uLL, uLR, uRL, uRR) - max(cfastLLx, cfastLRx, cfastRLx, cfastRRx)
+    SR = max(uLL, uLR, uRL, uRR) + max(cfastLLx, cfastLRx, cfastRLx, cfastRRx)
+    SB = min(vLL, vLR, vRL, vRR) - max(cfastLLy, cfastLRy, cfastRLy, cfastRRy)
+    ST = max(vLL, vLR, vRL, vRR) + max(cfastLLy, cfastLRy, cfastRLy, cfastRRy)
+
+    ELL = uLL*BLL - vLL*ALL
+    ELR = uLR*BLR - vLR*ALR
+    ERL = uRL*BRL - vRL*ARL
+    ERR = uRR*BRR - vRR*ARR
+
+    switch_to_llf = .false.
+    rmin = min(rLL, rLR, rRL, rRR)
+    pmin = min(pLL, pLR, pRL, pRR)
+    if (switch_llf_dmin > 0.0_dp) switch_to_llf = rmin < switch_llf_dmin
+    if (switch_llf_pmin > 0.0_dp) switch_to_llf = pmin < switch_llf_pmin
+    if (switch_to_llf) then
+       Smax = max(abs(SR), abs(ST), abs(SL), abs(SB))
+       E = 0.25_dp*(ERR + ERL + ELR + ELL) &
+            & + 0.5_dp*Smax*(stateRR%Bx - stateLL%Bx) &
+            & - 0.5_dp*Smax*(stateRR%By - stateLL%By)
+       return
+    endif
+
+    PtotLL = pLL + 0.5_dp*(ALL*ALL + BLL*BLL + CLL*CLL)
+    PtotLR = pLR + 0.5_dp*(ALR*ALR + BLR*BLR + CLR*CLR)
+    PtotRL = pRL + 0.5_dp*(ARL*ARL + BRL*BRL + CRL*CRL)
+    PtotRR = pRR + 0.5_dp*(ARR*ARR + BRR*BRR + CRR*CRR)
+
+    rcLLx = rLL*(uLL - SL); rcRLx = rRL*(SR - uRL)
+    rcLRx = rLR*(uLR - SL); rcRRx = rRR*(SR - uRR)
+    rcLLy = rLL*(vLL - SB); rcLRy = rLR*(ST - vLR)
+    rcRLy = rRL*(vRL - SB); rcRRy = rRR*(ST - vRR)
+
+    ustar = (rcLLx*uLL + rcLRx*uLR + rcRLx*uRL + rcRRx*uRR &
+         & + (PtotLL - PtotRL + PtotLR - PtotRR))/(rcLLx + rcLRx + rcRLx + rcRRx)
+    vstar = (rcLLy*vLL + rcLRy*vLR + rcRLy*vRL + rcRRy*vRR &
+         & + (PtotLL - PtotLR + PtotRL - PtotRR))/(rcLLy + rcLRy + rcRLy + rcRRy)
+
+    rstarLLx = rLL*(SL - uLL)/(SL - ustar); BstarLL = BLL*(SL - uLL)/(SL - ustar)
+    rstarLLy = rLL*(SB - vLL)/(SB - vstar); AstarLL = ALL*(SB - vLL)/(SB - vstar)
+    rstarLL  = rLL*(SL - uLL)/(SL - ustar)*(SB - vLL)/(SB - vstar)
+    EstarLLx = ustar*BstarLL - vLL*ALL
+    EstarLLy = uLL*BLL - vstar*AstarLL
+    EstarLL  = ustar*BstarLL - vstar*AstarLL
+
+    rstarLRx = rLR*(SL - uLR)/(SL - ustar); BstarLR = BLR*(SL - uLR)/(SL - ustar)
+    rstarLRy = rLR*(ST - vLR)/(ST - vstar); AstarLR = ALR*(ST - vLR)/(ST - vstar)
+    rstarLR  = rLR*(SL - uLR)/(SL - ustar)*(ST - vLR)/(ST - vstar)
+    EstarLRx = ustar*BstarLR - vLR*ALR
+    EstarLRy = uLR*BLR - vstar*AstarLR
+    EstarLR  = ustar*BstarLR - vstar*AstarLR
+
+    rstarRLx = rRL*(SR - uRL)/(SR - ustar); BstarRL = BRL*(SR - uRL)/(SR - ustar)
+    rstarRLy = rRL*(SB - vRL)/(SB - vstar); AstarRL = ARL*(SB - vRL)/(SB - vstar)
+    rstarRL  = rRL*(SR - uRL)/(SR - ustar)*(SB - vRL)/(SB - vstar)
+    EstarRLx = ustar*BstarRL - vRL*ARL
+    EstarRLy = uRL*BRL - vstar*AstarRL
+    EstarRL  = ustar*BstarRL - vstar*AstarRL
+
+    rstarRRx = rRR*(SR - uRR)/(SR - ustar); BstarRR = BRR*(SR - uRR)/(SR - ustar)
+    rstarRRy = rRR*(ST - vRR)/(ST - vstar); AstarRR = ARR*(ST - vRR)/(ST - vstar)
+    rstarRR  = rRR*(SR - uRR)/(SR - ustar)*(ST - vRR)/(ST - vstar)
+    EstarRRx = ustar*BstarRR - vRR*ARR
+    EstarRRy = uRR*BRR - vstar*AstarRR
+    EstarRR  = ustar*BstarRR - vstar*AstarRR
+
+    calfvenL = max(abs(ALR)/sqrt(rstarLRx), abs(AstarLR)/sqrt(rstarLR), &
+         &         abs(ALL)/sqrt(rstarLLx), abs(AstarLL)/sqrt(rstarLL), smallc)
+    calfvenR = max(abs(ARR)/sqrt(rstarRRx), abs(AstarRR)/sqrt(rstarRR), &
+         &         abs(ARL)/sqrt(rstarRLx), abs(AstarRL)/sqrt(rstarRL), smallc)
+    calfvenB = max(abs(BLL)/sqrt(rstarLLy), abs(BstarLL)/sqrt(rstarLL), &
+         &         abs(BRL)/sqrt(rstarRLy), abs(BstarRL)/sqrt(rstarRL), smallc)
+    calfvenT = max(abs(BLR)/sqrt(rstarLRy), abs(BstarLR)/sqrt(rstarLR), &
+         &         abs(BRR)/sqrt(rstarRRy), abs(BstarRR)/sqrt(rstarRR), smallc)
+    SAL = min(ustar - calfvenL, 0.0_dp); SAR = max(ustar + calfvenR, 0.0_dp)
+    SAB = min(vstar - calfvenB, 0.0_dp); SAT = max(vstar + calfvenT, 0.0_dp)
+    AstarT = (SAR*AstarRR - SAL*AstarLR)/(SAR - SAL)
+    AstarB = (SAR*AstarRL - SAL*AstarLL)/(SAR - SAL)
+    BstarR = (SAT*BstarRR - SAB*BstarRL)/(SAT - SAB)
+    BstarL = (SAT*BstarLR - SAB*BstarLL)/(SAT - SAB)
+
+    if (SB > 0.0_dp) then
+       if (SL > 0.0_dp) then
+          E = ELL
+       else if (SR < 0.0_dp) then
+          E = ERL
+       else
+          E = (SAR*EstarLLx - SAL*EstarRLx + SAR*SAL*(BRL - BLL))/(SAR - SAL)
+       endif
+    else if (ST < 0.0_dp) then
+       if (SL > 0.0_dp) then
+          E = ELR
+       else if (SR < 0.0_dp) then
+          E = ERR
+       else
+          E = (SAR*EstarLRx - SAL*EstarRRx + SAR*SAL*(BRR - BLR))/(SAR - SAL)
+       endif
+    else if (SL > 0.0_dp) then
+       E = (SAT*EstarLLy - SAB*EstarLRy - SAT*SAB*(ALR - ALL))/(SAT - SAB)
+    else if (SR < 0.0_dp) then
+       E = (SAT*EstarRLy - SAB*EstarRRy - SAT*SAB*(ARR - ARL))/(SAT - SAB)
+    else
+       E = (SAL*SAB*EstarRR - SAL*SAT*EstarRL - SAR*SAB*EstarLR + SAR*SAT*EstarLL) &
+            & /(SAR - SAL)/(SAT - SAB) &
+            & - SAT*SAB/(SAT - SAB)*(AstarT - AstarB) &
+            & + SAR*SAL/(SAR - SAL)*(BstarR - BstarL)
+    endif
+
+    return
+  end function riemann2d_hlld_emf
+
+  ! Dispatch 2D MHD EMF solver (HLLD, HLLF, else HLL).
+  attributes(device) function riemann2d_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
+       & switch_llf_dmin, switch_llf_pmin, riemann2d) result(E)
+    type(primitive_t), intent(in) :: qLL, qLR, qRL, qRR
+    real(kind=dp), value :: gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
+    integer, value :: riemann2d
+    real(kind=dp) :: E
+
+    if (riemann2d .eq. solver2d_hlld) then
+       E = riemann2d_hlld_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
+            & switch_llf_dmin, switch_llf_pmin)
+    else if (riemann2d .eq. solver2d_hllf) then
+       E = riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc)
+    else
+       ! Unimplemented 2D solvers fall back to HLL.
+       E = riemann2d_hll_emf(qLL, qLR, qRL, qRR, gamma, smallr, smallc)   ! fall back to 2D HLL
+    endif
+
+    return
+  end function riemann2d_emf
+#endif
 
   ! ==========================================================================
   !> @brief
@@ -306,25 +1078,46 @@ contains
   !> @param[in] gamma : The adiabatic index
   !> @param[out] local_subgrid : The local subgrid in shared memory to write the primitive variables to
   !>
-  attributes(device) subroutine subgrid_conserved_2_primitive(grid, uold, f, constant_gravity, nbor, &
+  !> Convert conserved subgrid to primitives; MHD fills face-B and scalars.
+  attributes(device) subroutine subgrid_conserved_2_primitive(grid, uold, bold, f, constant_gravity, nbor, &
+#if NVAR>5+NENER
+       & scalar_sub, &
+#endif
+#ifdef MHD
+       & bf, &
+#endif
        & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*) ! Unused without MHD
     integer(kind=4), device :: nbor(1:subgridsize,*)
     integer(kind=4), value :: head_idx
     integer(kind=4), value :: block_idx, thread_idx
     real(kind=dp), value :: gamma, smallr, smallc2
     real(kind=dp), value :: dt
     type(subgrid_6x6x6cell_primitive), intent(inout) :: local_subgrid
+#if NVAR>5+NENER
+    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
+    integer :: n
+#endif
+#ifdef MHD
+    type(subgrid_face_b_t), intent(inout) :: bf
+#endif
 
     type(conserved_t) :: conserved ! object to hold the conserved variables
     type(primitive_t) :: primitive ! object to hold the primitive variables
     integer :: work_idx, ind_nbor
     integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
+    integer :: ib, jb, kb ! cell position bits within its oct (0 or 1 per axis)
     integer :: cell_idx, source_idx, subgrid_idx
     integer :: work_size
+    real(kind=dp) :: invD
+#ifdef MHD
+    integer :: source_idx_face
+    real(kind=dp) :: b0(1:6)
+#endif
 
     work_size = 2*nsubgrid+4
 
@@ -340,14 +1133,45 @@ contains
        ind_nbor = work_idx/8 + 1
        source_idx = nbor(ind_nbor, subgrid_idx)
 
-       ! Now that we have the index to the oct we need to figure out which cell within it to load 
+       ! Now that we have the index to the oct we need to figure out which cell within it to load
        cell_idx = mod(work_idx, 8) + 1
 
        ! Lastly, we need to figure out where in the subgrid the cell we will load goes
-       call index_1Dto3D(cell_idx - 1, 2, 2, i, j, k)
-       i = i + 2*i_subgrid_idx
-       j = j + 2*j_subgrid_idx
-       k = k + 2*k_subgrid_idx
+       call index_1Dto3D(cell_idx - 1, 2, 2, ib, jb, kb)
+       i = ib + 2*i_subgrid_idx
+       j = jb + 2*j_subgrid_idx
+       k = kb + 2*k_subgrid_idx
+
+#ifdef MHD
+       ! Six face-B components from bold.
+       b0(1) = bold(cell_idx, 1, source_idx)
+       b0(2) = bold(cell_idx, 2, source_idx)
+       b0(3) = bold(cell_idx, 3, source_idx)
+       b0(4) = bold(cell_idx, 4, source_idx)
+       b0(5) = bold(cell_idx, 5, source_idx)
+       b0(6) = bold(cell_idx, 6, source_idx)
+
+       ! Face-continuous low faces: average with low-d neighbour across each face.
+       ! Low-x face of this cell:
+       if (i >= 1) then
+          source_idx_face = source_idx
+          if (ib == 0) source_idx_face = nbor(ind_nbor - 1, subgrid_idx)
+          bf%bx(i,j,k) = 0.5_dp*(b0(1) + bold(cell_idx + 1 - 2*ib, 4, source_idx_face))
+       endif
+       ! Low-y face of this cell:
+       if (j >= 1) then
+          source_idx_face = source_idx
+          if (jb == 0) source_idx_face = nbor(ind_nbor - nsubgridp2, subgrid_idx)
+          bf%by(i,j,k) = 0.5_dp*(b0(2) + bold(cell_idx + 2*(1 - 2*jb), 5, source_idx_face))
+       endif
+       ! Low-z face of this cell:
+       if (k >= 1) then
+          source_idx_face = source_idx
+          if (kb == 0) source_idx_face = nbor(ind_nbor - nsubgridp2sq, subgrid_idx)
+          bf%bz(i,j,k) = 0.5_dp*(b0(3) + bold(cell_idx + 4*(1 - 2*kb), 6, source_idx_face))
+       endif
+
+#endif
 
        ! Load the cell
        conserved%density    = uold(cell_idx, 1, source_idx)
@@ -355,9 +1179,16 @@ contains
        conserved%momentum_y = uold(cell_idx, 3, source_idx)
        conserved%momentum_z = uold(cell_idx, 4, source_idx)
        conserved%energy     = uold(cell_idx, 5, source_idx)
+#ifdef MHD
+       ! Cell-centred B from the opposing face pair.
+       conserved%Bx = 0.5_dp*(b0(1) + b0(4))
+       conserved%By = 0.5_dp*(b0(2) + b0(5))
+       conserved%Bz = 0.5_dp*(b0(3) + b0(6))
+#endif
 
        ! Convert to primitive variables
        primitive = conserved_2_primitive(conserved, gamma, smallr, smallc2)
+       invD = 1.0_dp / primitive%density
 
        ! Gravity predictor step
 #ifdef GRAV
@@ -376,15 +1207,69 @@ contains
        local_subgrid%velocity_y(i, j, k) = primitive%velocity_y
        local_subgrid%velocity_z(i, j, k) = primitive%velocity_z
        local_subgrid%pressure  (i, j, k) = primitive%pressure
-
-       ! Store refinement map
-       local_subgrid%refined   (i, j, k) = grid(source_idx)%refined(cell_idx)
+#if NVAR>5+NENER
+       ! Passive scalars q(ie+nener+n) = uold(5+nener+n)/rho
+       ! Passive scalars from conserved slots.
+       do n = 1, nscalar
+          scalar_sub(i, j, k, n) = uold(cell_idx, 5+nener+n, source_idx) * invD
+       end do
+#endif
+       ! Store refinement flags.
+       if (i >= 1 .and. i <= 2*nsubgrid+2 .and. j >= 1 .and. j <= 2*nsubgrid+2 &
+            & .and. k >= 1 .and. k <= 2*nsubgrid+2) then
+          local_subgrid%refined(i, j, k) = grid(source_idx)%refined(cell_idx)
+       endif
 
     end do
 
     call syncthreads()
 
   end subroutine subgrid_conserved_2_primitive
+
+#ifdef MHD
+  ! x-edge electric field from velocities and face-B.
+  attributes(device) function edge_e_x(ls, bf, i, j, k) result(E)
+    type(subgrid_6x6x6cell_primitive), intent(in) :: ls
+    type(subgrid_face_b_t), intent(in) :: bf
+    integer, value :: i, j, k
+    real(kind=dp) :: E, vv, ww, Bb, Cc
+    vv = 0.25_dp*( ls%velocity_y(i,j-1,k-1) + ls%velocity_y(i,j-1,k) + &
+         &         ls%velocity_y(i,j  ,k-1) + ls%velocity_y(i,j  ,k) )
+    ww = 0.25_dp*( ls%velocity_z(i,j-1,k-1) + ls%velocity_z(i,j-1,k) + &
+         &         ls%velocity_z(i,j  ,k-1) + ls%velocity_z(i,j  ,k) )
+    Bb = 0.5_dp*( bf%by(i,j  ,k-1) + bf%by(i,j  ,k) )
+    Cc = 0.5_dp*( bf%bz(i,j-1,k  ) + bf%bz(i,j  ,k) )
+    E = vv*Cc - ww*Bb
+  end function edge_e_x
+
+  attributes(device) function edge_e_y(ls, bf, i, j, k) result(E)
+    type(subgrid_6x6x6cell_primitive), intent(in) :: ls
+    type(subgrid_face_b_t), intent(in) :: bf
+    integer, value :: i, j, k
+    real(kind=dp) :: E, uu, ww, Aa, Cc
+    uu = 0.25_dp*( ls%velocity_x(i-1,j,k-1) + ls%velocity_x(i-1,j,k) + &
+         &         ls%velocity_x(i  ,j,k-1) + ls%velocity_x(i  ,j,k) )
+    ww = 0.25_dp*( ls%velocity_z(i-1,j,k-1) + ls%velocity_z(i-1,j,k) + &
+         &         ls%velocity_z(i  ,j,k-1) + ls%velocity_z(i  ,j,k) )
+    Aa = 0.5_dp*( bf%bx(i  ,j,k-1) + bf%bx(i,j,k) )
+    Cc = 0.5_dp*( bf%bz(i-1,j,k  ) + bf%bz(i,j,k) )
+    E = ww*Aa - uu*Cc
+  end function edge_e_y
+
+  attributes(device) function edge_e_z(ls, bf, i, j, k) result(E)
+    type(subgrid_6x6x6cell_primitive), intent(in) :: ls
+    type(subgrid_face_b_t), intent(in) :: bf
+    integer, value :: i, j, k
+    real(kind=dp) :: E, uu, vv, Aa, Bb
+    uu = 0.25_dp*( ls%velocity_x(i-1,j-1,k) + ls%velocity_x(i-1,j,k) + &
+         &         ls%velocity_x(i  ,j-1,k) + ls%velocity_x(i  ,j,k) )
+    vv = 0.25_dp*( ls%velocity_y(i-1,j-1,k) + ls%velocity_y(i-1,j,k) + &
+         &         ls%velocity_y(i  ,j-1,k) + ls%velocity_y(i  ,j,k) )
+    Aa = 0.5_dp*( bf%bx(i,j-1,k) + bf%bx(i,j,k) )
+    Bb = 0.5_dp*( bf%by(i-1,j,k) + bf%by(i,j,k) )
+    E = uu*Bb - vv*Aa
+  end function edge_e_z
+#endif
   ! =========================================================================
 
   ! =========================================================================
@@ -402,7 +1287,15 @@ contains
   !> @param[in] right_interfaces_y : The right side interfaces normal to y
   !> @param[in] right_interfaces_z : The right side interfaces normal to z
   !>
+  !> MHD: constrained-transport face-B predictor when compiled with MHD.
   attributes(device) subroutine trace_3d(local_subgrid, thread_idx, &
+#if NVAR>5+NENER
+       & scalar_sub, &
+#endif
+#ifdef MHD
+       & bf, corner_x, corner_y, corner_z, &
+       & smallc, slope_mag, induction, &
+#endif
        & left_interfaces_x, right_interfaces_x,left_interfaces_y, right_interfaces_y, &
        & left_interfaces_z, right_interfaces_z, gamma, smallr, smallc2, dtdx, slope)
     type(subgrid_6x6x6cell_primitive), intent(inout) :: local_subgrid ! The subgrid that this block is working on in shared memory
@@ -421,6 +1314,36 @@ contains
     integer :: work_idx   ! Loop index for unit of work
     integer :: i, j, k    ! Cell indices
     integer :: work_size
+#if NVAR>5+NENER
+    real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
+    real(kind=dp) :: dscal_x(1:nscalar), dscal_y(1:nscalar), dscal_z(1:nscalar)
+    real(kind=dp) :: rscal, srscal, uscal, vscal, wscal
+    real(kind=dp) :: dscalx, dscaly, dscalz
+    integer :: n
+#endif
+#ifdef MHD
+    type(subgrid_face_b_t), intent(in) :: bf
+    type(subgrid_2x3x3edge_corner), intent(inout) :: corner_x
+    type(subgrid_3x2x3edge_corner), intent(inout) :: corner_y
+    type(subgrid_3x3x2edge_corner), intent(inout) :: corner_z
+    real(kind=dp), value :: smallc
+    integer, value :: slope_mag
+    logical, value :: induction
+
+    real(kind=dp), parameter :: half = 0.5_dp
+    integer, parameter :: iqLL = 1, iqRL = 2, iqLR = 3, iqRR = 4
+    real(kind=dp) :: r, u, v, w, p, A, B, C
+    real(kind=dp) :: drx,dux,dvx,dwx,dpx, dry,duy,dvy,dwy,dpy, drz,duz,dvz,dwz,dpz
+    real(kind=dp) :: dBx,dCx, dAy,dCy, dAz,dBz
+    real(kind=dp) :: AL,AR,BL,BR,CL,CR
+    real(kind=dp) :: dALy,dARy,dALz,dARz,dBLx,dBRx,dBLz,dBRz,dCLx,dCRx,dCLy,dCRy
+    real(kind=dp) :: sAL0,sAR0,sBL0,sBR0,sCL0,sCR0
+    real(kind=dp) :: ELL,ELR,ERL,ERR,FLL,FLR,FRL,FRR,GLL,GLR,GRL,GRR
+    real(kind=dp) :: sr0, uu,vv,ww,Aa,Bb,Cc
+    logical :: okp_x, okm_x, oka_x, okp_y, okm_y, oka_y, okp_z, okm_z, oka_z
+
+    ! Edge E recomputed inline (no edge_e shared buffer).
+#endif
 
     ! Compute the size of the section of the subgrid to operate on
     work_size = 2*nsubgrid+2
@@ -435,31 +1358,96 @@ contains
        call index_1Dto3D(work_idx, work_size, work_size, i, j, k)
        i = i + 1; j = j + 1; k = k + 1
 
+#ifdef MHD
+       ! Face
+       AL = bf%bx(i  ,j  ,k  )
+       AR = bf%bx(i+1,j  ,k  )
+       BL = bf%by(i  ,j  ,k  )
+       BR = bf%by(i  ,j+1,k  )
+       CL = bf%bz(i  ,j  ,k  )
+       CR = bf%bz(i  ,j  ,k+1)
+
+       ! Cell
+       ! Replaces the formerly stored local_subgrid%Bx/By/Bz );
+       ! invariant, and free: AL..CR are already in registers. Must be taken
+       ! BEFORE the curl predictor advances AL..CR below.
+       A = half*(AL+AR)
+       B = half*(BL+BR)
+       C = half*(CL+CR)
+
+       ! TVD slopes on face-B from the shared bf buffer.
+       dALy = half*face_b_tvd_slope(bf%bx(i  ,j-1,k), bf%bx(i  ,j,k), bf%bx(i  ,j+1,k), slope_mag)
+       dARy = half*face_b_tvd_slope(bf%bx(i+1,j-1,k), bf%bx(i+1,j,k), bf%bx(i+1,j+1,k), slope_mag)
+       dALz = half*face_b_tvd_slope(bf%bx(i  ,j,k-1), bf%bx(i  ,j,k), bf%bx(i  ,j,k+1), slope_mag)
+       dARz = half*face_b_tvd_slope(bf%bx(i+1,j,k-1), bf%bx(i+1,j,k), bf%bx(i+1,j,k+1), slope_mag)
+       dBLx = half*face_b_tvd_slope(bf%by(i-1,j  ,k), bf%by(i,j  ,k), bf%by(i+1,j  ,k), slope_mag)
+       dBRx = half*face_b_tvd_slope(bf%by(i-1,j+1,k), bf%by(i,j+1,k), bf%by(i+1,j+1,k), slope_mag)
+       dBLz = half*face_b_tvd_slope(bf%by(i,j  ,k-1), bf%by(i,j  ,k), bf%by(i,j  ,k+1), slope_mag)
+       dBRz = half*face_b_tvd_slope(bf%by(i,j+1,k-1), bf%by(i,j+1,k), bf%by(i,j+1,k+1), slope_mag)
+       dCLx = half*face_b_tvd_slope(bf%bz(i-1,j,k  ), bf%bz(i,j,k  ), bf%bz(i+1,j,k  ), slope_mag)
+       dCRx = half*face_b_tvd_slope(bf%bz(i-1,j,k+1), bf%bz(i,j,k+1), bf%bz(i+1,j,k+1), slope_mag)
+       dCLy = half*face_b_tvd_slope(bf%bz(i,j-1,k  ), bf%bz(i,j,k  ), bf%bz(i,j+1,k  ), slope_mag)
+       dCRy = half*face_b_tvd_slope(bf%bz(i,j-1,k+1), bf%bz(i,j,k+1), bf%bz(i,j+1,k+1), slope_mag)
+
+       ! Edge electric fields from inline edge_e_{x,y,z}.
+       ELL = edge_e_x(local_subgrid, bf, i  , j  , k  ); ELR = edge_e_x(local_subgrid, bf, i  , j  , k+1)
+       ERL = edge_e_x(local_subgrid, bf, i  , j+1, k  ); ERR = edge_e_x(local_subgrid, bf, i  , j+1, k+1)
+       FLL = edge_e_y(local_subgrid, bf, i  , j  , k  ); FLR = edge_e_y(local_subgrid, bf, i  , j  , k+1)
+       FRL = edge_e_y(local_subgrid, bf, i+1, j  , k  ); FRR = edge_e_y(local_subgrid, bf, i+1, j  , k+1)
+       GLL = edge_e_z(local_subgrid, bf, i  , j  , k  ); GLR = edge_e_z(local_subgrid, bf, i  , j+1, k  )
+       GRL = edge_e_z(local_subgrid, bf, i+1, j  , k  ); GRR = edge_e_z(local_subgrid, bf, i+1, j+1, k  )
+
+       ! Face
+       sAL0 = + (GLR-GLL) - (FLR-FLL)
+       sAR0 = + (GRR-GRL) - (FRR-FRL)
+       sBL0 = - (GRL-GLL) + (ELR-ELL)
+       sBR0 = - (GRR-GLR) + (ERR-ERL)
+       sCL0 = + (FRL-FLL) - (ERL-ELL)
+       sCR0 = + (FRR-FLR) - (ERR-ELR)
+       AL = AL + sAL0*dtdx*half
+       AR = AR + sAR0*dtdx*half
+       BL = BL + sBL0*dtdx*half
+       BR = BR + sBR0*dtdx*half
+       CL = CL + sCL0*dtdx*half
+       CR = CR + sCR0*dtdx*half
+#endif
+
        ! Cell centered values
        cell%density    = local_subgrid%density   (i, j, k)
        cell%velocity_x = local_subgrid%velocity_x(i, j, k)
        cell%velocity_y = local_subgrid%velocity_y(i, j, k)
        cell%velocity_z = local_subgrid%velocity_z(i, j, k)
        cell%pressure   = local_subgrid%pressure  (i, j, k)
+#ifdef MHD
+       ! Pre-predictor cell scalars for trace.
+       
+       r = local_subgrid%density   (i,j,k)
+       u = local_subgrid%velocity_x(i,j,k)
+       v = local_subgrid%velocity_y(i,j,k)
+       w = local_subgrid%velocity_z(i,j,k)
+       p = local_subgrid%pressure  (i,j,k)
+#endif
 
        ! Compute the TVD Slopes
-       slopes_x%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i - 1, j, k), cell%density,    local_subgrid%density   (i + 1, j, k), slope)
-       slopes_x%velocity_x = 0.5_dp * slope_moncen(local_subgrid%velocity_x(i - 1, j, k), cell%velocity_x, local_subgrid%velocity_x(i + 1, j, k), slope)
-       slopes_x%velocity_y = 0.5_dp * slope_moncen(local_subgrid%velocity_y(i - 1, j, k), cell%velocity_y, local_subgrid%velocity_y(i + 1, j, k), slope)
-       slopes_x%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i - 1, j, k), cell%velocity_z, local_subgrid%velocity_z(i + 1, j, k), slope)
-       slopes_x%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i - 1, j, k), cell%pressure,   local_subgrid%pressure  (i + 1, j, k), slope)
-
-       slopes_y%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i, j - 1, k), cell%density,    local_subgrid%density(   i, j + 1, k), slope)
-       slopes_y%velocity_x = 0.5_dp * slope_moncen(local_subgrid%velocity_x(i, j - 1, k), cell%velocity_x, local_subgrid%velocity_x(i, j + 1, k), slope)
-       slopes_y%velocity_y = 0.5_dp * slope_moncen(local_subgrid%velocity_y(i, j - 1, k), cell%velocity_y, local_subgrid%velocity_y(i, j + 1, k), slope)
-       slopes_y%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i, j - 1, k), cell%velocity_z, local_subgrid%velocity_z(i, j + 1, k), slope)
-       slopes_y%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i, j - 1, k), cell%pressure,   local_subgrid%pressure(  i, j + 1, k), slope)
-
-       slopes_z%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i, j, k - 1), cell%density,    local_subgrid%density   (i, j, k + 1), slope)
-       slopes_z%velocity_x = 0.5_dp * slope_moncen(local_subgrid%velocity_x(i, j, k - 1), cell%velocity_x, local_subgrid%velocity_x(i, j, k + 1), slope)
-       slopes_z%velocity_y = 0.5_dp * slope_moncen(local_subgrid%velocity_y(i, j, k - 1), cell%velocity_y, local_subgrid%velocity_y(i, j, k + 1), slope)
-       slopes_z%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i, j, k - 1), cell%velocity_z, local_subgrid%velocity_z(i, j, k + 1), slope)
-       slopes_z%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i, j, k - 1), cell%pressure,   local_subgrid%pressure  (i, j, k + 1), slope)
+       call compute_tvd_slopes(local_subgrid, i, j, k, slope, &
+#if NVAR>5+NENER
+            & scalar_sub, dscal_x, dscal_y, dscal_z, &
+#endif
+#ifdef MHD
+            & bf, &
+#endif
+            & slopes_x, slopes_y, slopes_z)
+#ifdef MHD
+       ! Unpack transverse-B slopes for trace.
+       
+       drx = slopes_x%density;    dry = slopes_y%density;    drz = slopes_z%density
+       dux = slopes_x%velocity_x; duy = slopes_y%velocity_x; duz = slopes_z%velocity_x
+       dvx = slopes_x%velocity_y; dvy = slopes_y%velocity_y; dvz = slopes_z%velocity_y
+       dwx = slopes_x%velocity_z; dwy = slopes_y%velocity_z; dwz = slopes_z%velocity_z
+       dpx = slopes_x%pressure;   dpy = slopes_y%pressure;   dpz = slopes_z%pressure
+       dBx = slopes_x%By;         dAy = slopes_y%Bx;         dAz = slopes_z%Bx
+       dCx = slopes_x%Bz;         dCy = slopes_y%Bz;         dBz = slopes_z%By
+#endif
 
        ! Source terms
        source_term%density    = -cell%velocity_x * slopes_x%density    &
@@ -482,6 +1470,15 @@ contains
                                 -cell%velocity_y * slopes_y%pressure   &
                                 -cell%velocity_z * slopes_z%pressure   &
                                 - (slopes_x%velocity_x + slopes_y%velocity_y + slopes_z%velocity_z) * gamma * cell%pressure
+#ifdef MHD
+       ! Lorentz-force source terms.
+       source_term%velocity_x = source_term%velocity_x + (-(B*dBx+C*dCx)/r) + (B*dAy/r) + (C*dAz/r)
+       source_term%velocity_y = source_term%velocity_y + (A*dBx/r) + (-(A*dAy+C*dCy)/r) + (C*dBz/r)
+       source_term%velocity_z = source_term%velocity_z + (A*dCx/r) + (B*dCy/r) + (-(A*dAz+B*dBz)/r)
+       if (induction) then
+          source_term%velocity_x = 0.0_dp; source_term%velocity_y = 0.0_dp; source_term%velocity_z = 0.0_dp
+       end if
+#endif
 
        ! Cell-centered predicted states
        cell%density    = cell%density    + dtdx * source_term%density
@@ -489,6 +1486,17 @@ contains
        cell%velocity_y = cell%velocity_y + dtdx * source_term%velocity_y
        cell%velocity_z = cell%velocity_z + dtdx * source_term%velocity_z
        cell%pressure   = cell%pressure   + dtdx * source_term%pressure
+#ifdef MHD
+       ! Predicted face-B mean for interface writes.
+       r = cell%density
+       u = cell%velocity_x
+       v = cell%velocity_y
+       w = cell%velocity_z
+       p = cell%pressure
+       A = half*(AL+AR)
+       B = half*(BL+BR)
+       C = half*(CL+CR)
+#endif
 
        ! Compute and write out the interface states
 
@@ -502,6 +1510,11 @@ contains
           ! Fallback to first order
           if (right_interfaces_x%density (i-2, j-2, k-2) < smallr) right_interfaces_x%density (i-2, j-2, k-2) = local_subgrid%density (i, j, k)
           if (right_interfaces_x%pressure(i-2, j-2, k-2) < smallp) right_interfaces_x%pressure(i-2, j-2, k-2) = local_subgrid%pressure(i, j, k)
+#ifdef MHD
+          right_interfaces_x%Bx(i-2, j-2, k-2) = AL
+          right_interfaces_x%By(i-2, j-2, k-2) = B - dBx
+          right_interfaces_x%Bz(i-2, j-2, k-2) = C - dCx
+#endif
        end if
 
        ! The left state at i+1/2
@@ -514,6 +1527,11 @@ contains
           ! Fallback to first order
           if (left_interfaces_x%density (i-1, j-2, k-2) < smallr) left_interfaces_x%density (i-1, j-2, k-2) = local_subgrid%density (i, j, k)
           if (left_interfaces_x%pressure(i-1, j-2, k-2) < smallp) left_interfaces_x%pressure(i-1, j-2, k-2) = local_subgrid%pressure(i, j, k)
+#ifdef MHD
+          left_interfaces_x%Bx(i-1, j-2, k-2) = AR
+          left_interfaces_x%By(i-1, j-2, k-2) = B + dBx
+          left_interfaces_x%Bz(i-1, j-2, k-2) = C + dCx
+#endif
        end if
 
        ! The right state at j-1/2
@@ -526,6 +1544,11 @@ contains
           ! Fallback to first order
           if (right_interfaces_y%density (i-2, j-2, k-2) < smallr) right_interfaces_y%density (i-2, j-2, k-2) = local_subgrid%density (i, j, k)
           if (right_interfaces_y%pressure(i-2, j-2, k-2) < smallp) right_interfaces_y%pressure(i-2, j-2, k-2) = local_subgrid%pressure(i, j, k)
+#ifdef MHD
+          right_interfaces_y%Bx(i-2, j-2, k-2) = A - dAy
+          right_interfaces_y%By(i-2, j-2, k-2) = BL
+          right_interfaces_y%Bz(i-2, j-2, k-2) = C - dCy
+#endif
        end if
 
        ! The left state at j+1/2
@@ -538,6 +1561,11 @@ contains
           ! Fallback to first order
           if (left_interfaces_y%density (i-2, j-1, k-2) < smallr) left_interfaces_y%density (i-2, j-1, k-2) = local_subgrid%density (i, j, k)
           if (left_interfaces_y%pressure(i-2, j-1, k-2) < smallp) left_interfaces_y%pressure(i-2, j-1, k-2) = local_subgrid%pressure(i, j, k)
+#ifdef MHD
+          left_interfaces_y%Bx(i-2, j-1, k-2) = A + dAy
+          left_interfaces_y%By(i-2, j-1, k-2) = BR
+          left_interfaces_y%Bz(i-2, j-1, k-2) = C + dCy
+#endif
        end if
 
        ! The right state at k-1/2
@@ -550,6 +1578,11 @@ contains
           ! Fallback to first order
           if (right_interfaces_z%density (i-2, j-2, k-2) < smallr) right_interfaces_z%density (i-2, j-2, k-2) = local_subgrid%density (i, j, k)
           if (right_interfaces_z%pressure(i-2, j-2, k-2) < smallp) right_interfaces_z%pressure(i-2, j-2, k-2) = local_subgrid%pressure(i, j, k)
+#ifdef MHD
+          right_interfaces_z%Bx(i-2, j-2, k-2) = A - dAz
+          right_interfaces_z%By(i-2, j-2, k-2) = B - dBz
+          right_interfaces_z%Bz(i-2, j-2, k-2) = CL
+#endif
        end if
 
        ! The left state at k+1/2
@@ -562,7 +1595,185 @@ contains
           ! Fallback to first order
           if (left_interfaces_z%density (i-2, j-2, k-1) < smallr) left_interfaces_z%density (i-2, j-2, k-1) = local_subgrid%density (i, j, k)
           if (left_interfaces_z%pressure(i-2, j-2, k-1) < smallp) left_interfaces_z%pressure(i-2, j-2, k-1) = local_subgrid%pressure(i, j, k)
+#ifdef MHD
+          left_interfaces_z%Bx(i-2, j-2, k-1) = A + dAz
+          left_interfaces_z%By(i-2, j-2, k-1) = B + dBz
+          left_interfaces_z%Bz(i-2, j-2, k-1) = CR
+#endif
        end if
+
+#ifdef MHD
+       ! Store corner states into shared edge-corner buffers.
+       okp_x = i <= 2*nsubgrid+1; okm_x = i >= 2; oka_x = okm_x .and. okp_x
+       okp_y = j <= 2*nsubgrid+1; okm_y = j >= 2; oka_y = okm_y .and. okp_y
+       okp_z = k <= 2*nsubgrid+1; okm_z = k >= 2; oka_z = okm_z .and. okp_z
+
+       ! X edges: map cell corners into corner_x slots.
+       if (oka_x .and. okp_y .and. okp_z) then   ! qRT -> LL slot
+          corner_x%density(i-2,j-1,k-1,iqLL) = r + (+dry+drz)
+          corner_x%velocity_y(i-2,j-1,k-1,iqLL) = v + (+dvy+dvz)
+          corner_x%velocity_z(i-2,j-1,k-1,iqLL) = w + (+dwy+dwz)
+          corner_x%pressure(i-2,j-1,k-1,iqLL) = p + (+dpy+dpz)
+          corner_x%Bx(i-2,j-1,k-1,iqLL) = A + (+dAy+dAz)
+          corner_x%By(i-2,j-1,k-1,iqLL) = BR + (   +dBRz)
+          corner_x%Bz(i-2,j-1,k-1,iqLL) = CR + (+dCRy   )
+          if (corner_x%density(i-2,j-1,k-1,iqLL) < smallr) corner_x%density(i-2,j-1,k-1,iqLL) = r
+          if (corner_x%pressure(i-2,j-1,k-1,iqLL) < smallp) corner_x%pressure(i-2,j-1,k-1,iqLL) = p
+       end if
+       if (oka_x .and. okp_y .and. okm_z) then   ! qRB -> LR slot
+          corner_x%density(i-2,j-1,k-2,iqLR) = r + (+dry-drz)
+          corner_x%velocity_y(i-2,j-1,k-2,iqLR) = v + (+dvy-dvz)
+          corner_x%velocity_z(i-2,j-1,k-2,iqLR) = w + (+dwy-dwz)
+          corner_x%pressure(i-2,j-1,k-2,iqLR) = p + (+dpy-dpz)
+          corner_x%Bx(i-2,j-1,k-2,iqLR) = A + (+dAy-dAz)
+          corner_x%By(i-2,j-1,k-2,iqLR) = BR + (   -dBRz)
+          corner_x%Bz(i-2,j-1,k-2,iqLR) = CL + (+dCLy   )
+          if (corner_x%density(i-2,j-1,k-2,iqLR) < smallr) corner_x%density(i-2,j-1,k-2,iqLR) = r
+          if (corner_x%pressure(i-2,j-1,k-2,iqLR) < smallp) corner_x%pressure(i-2,j-1,k-2,iqLR) = p
+       end if
+       if (oka_x .and. okm_y .and. okp_z) then   ! qLT -> RL slot
+          corner_x%density(i-2,j-2,k-1,iqRL) = r + (-dry+drz)
+          corner_x%velocity_y(i-2,j-2,k-1,iqRL) = v + (-dvy+dvz)
+          corner_x%velocity_z(i-2,j-2,k-1,iqRL) = w + (-dwy+dwz)
+          corner_x%pressure(i-2,j-2,k-1,iqRL) = p + (-dpy+dpz)
+          corner_x%Bx(i-2,j-2,k-1,iqRL) = A + (-dAy+dAz)
+          corner_x%By(i-2,j-2,k-1,iqRL) = BL + (   +dBLz)
+          corner_x%Bz(i-2,j-2,k-1,iqRL) = CR + (-dCRy   )
+          if (corner_x%density(i-2,j-2,k-1,iqRL) < smallr) corner_x%density(i-2,j-2,k-1,iqRL) = r
+          if (corner_x%pressure(i-2,j-2,k-1,iqRL) < smallp) corner_x%pressure(i-2,j-2,k-1,iqRL) = p
+       end if
+       if (oka_x .and. okm_y .and. okm_z) then   ! qLB -> RR slot
+          corner_x%density(i-2,j-2,k-2,iqRR) = r + (-dry-drz)
+          corner_x%velocity_y(i-2,j-2,k-2,iqRR) = v + (-dvy-dvz)
+          corner_x%velocity_z(i-2,j-2,k-2,iqRR) = w + (-dwy-dwz)
+          corner_x%pressure(i-2,j-2,k-2,iqRR) = p + (-dpy-dpz)
+          corner_x%Bx(i-2,j-2,k-2,iqRR) = A + (-dAy-dAz)
+          corner_x%By(i-2,j-2,k-2,iqRR) = BL + (   -dBLz)
+          corner_x%Bz(i-2,j-2,k-2,iqRR) = CL + (-dCLy   )
+          if (corner_x%density(i-2,j-2,k-2,iqRR) < smallr) corner_x%density(i-2,j-2,k-2,iqRR) = r
+          if (corner_x%pressure(i-2,j-2,k-2,iqRR) < smallp) corner_x%pressure(i-2,j-2,k-2,iqRR) = p
+       end if
+
+       ! Y edges: permute corner letters into edge corner slots.
+       if (okp_x .and. oka_y .and. okp_z) then   ! qRT -> LL slot
+          corner_y%density(i-1,j-2,k-1,iqLL) = r + (+drx+drz)
+          corner_y%velocity_x(i-1,j-2,k-1,iqLL) = u + (+dux+duz)
+          corner_y%velocity_z(i-1,j-2,k-1,iqLL) = w + (+dwx+dwz)
+          corner_y%pressure(i-1,j-2,k-1,iqLL) = p + (+dpx+dpz)
+          corner_y%Bx(i-1,j-2,k-1,iqLL) = AR + (   +dARz)
+          corner_y%By(i-1,j-2,k-1,iqLL) = B + (+dBx+dBz)
+          corner_y%Bz(i-1,j-2,k-1,iqLL) = CR + (+dCRx   )
+          if (corner_y%density(i-1,j-2,k-1,iqLL) < smallr) corner_y%density(i-1,j-2,k-1,iqLL) = r
+          if (corner_y%pressure(i-1,j-2,k-1,iqLL) < smallp) corner_y%pressure(i-1,j-2,k-1,iqLL) = p
+       end if
+       if (okp_x .and. oka_y .and. okm_z) then   ! qRB -> RL slot
+          corner_y%density(i-1,j-2,k-2,iqRL) = r + (+drx-drz)
+          corner_y%velocity_x(i-1,j-2,k-2,iqRL) = u + (+dux-duz)
+          corner_y%velocity_z(i-1,j-2,k-2,iqRL) = w + (+dwx-dwz)
+          corner_y%pressure(i-1,j-2,k-2,iqRL) = p + (+dpx-dpz)
+          corner_y%Bx(i-1,j-2,k-2,iqRL) = AR + (   -dARz)
+          corner_y%By(i-1,j-2,k-2,iqRL) = B + (+dBx-dBz)
+          corner_y%Bz(i-1,j-2,k-2,iqRL) = CL + (+dCLx   )
+          if (corner_y%density(i-1,j-2,k-2,iqRL) < smallr) corner_y%density(i-1,j-2,k-2,iqRL) = r
+          if (corner_y%pressure(i-1,j-2,k-2,iqRL) < smallp) corner_y%pressure(i-1,j-2,k-2,iqRL) = p
+       end if
+       if (okm_x .and. oka_y .and. okp_z) then   ! qLT -> LR slot
+          corner_y%density(i-2,j-2,k-1,iqLR) = r + (-drx+drz)
+          corner_y%velocity_x(i-2,j-2,k-1,iqLR) = u + (-dux+duz)
+          corner_y%velocity_z(i-2,j-2,k-1,iqLR) = w + (-dwx+dwz)
+          corner_y%pressure(i-2,j-2,k-1,iqLR) = p + (-dpx+dpz)
+          corner_y%Bx(i-2,j-2,k-1,iqLR) = AL + (   +dALz)
+          corner_y%By(i-2,j-2,k-1,iqLR) = B + (-dBx+dBz)
+          corner_y%Bz(i-2,j-2,k-1,iqLR) = CR + (-dCRx   )
+          if (corner_y%density(i-2,j-2,k-1,iqLR) < smallr) corner_y%density(i-2,j-2,k-1,iqLR) = r
+          if (corner_y%pressure(i-2,j-2,k-1,iqLR) < smallp) corner_y%pressure(i-2,j-2,k-1,iqLR) = p
+       end if
+       if (okm_x .and. oka_y .and. okm_z) then   ! qLB -> RR slot
+          corner_y%density(i-2,j-2,k-2,iqRR) = r + (-drx-drz)
+          corner_y%velocity_x(i-2,j-2,k-2,iqRR) = u + (-dux-duz)
+          corner_y%velocity_z(i-2,j-2,k-2,iqRR) = w + (-dwx-dwz)
+          corner_y%pressure(i-2,j-2,k-2,iqRR) = p + (-dpx-dpz)
+          corner_y%Bx(i-2,j-2,k-2,iqRR) = AL + (   -dALz)
+          corner_y%By(i-2,j-2,k-2,iqRR) = B + (-dBx-dBz)
+          corner_y%Bz(i-2,j-2,k-2,iqRR) = CL + (-dCLx   )
+          if (corner_y%density(i-2,j-2,k-2,iqRR) < smallr) corner_y%density(i-2,j-2,k-2,iqRR) = r
+          if (corner_y%pressure(i-2,j-2,k-2,iqRR) < smallp) corner_y%pressure(i-2,j-2,k-2,iqRR) = p
+       end if
+
+       ! Z edges: map cell corners into corner_z slots.
+       if (okp_x .and. okp_y .and. oka_z) then   ! qRT -> LL slot
+          corner_z%density(i-1,j-1,k-2,iqLL) = r + (+drx+dry)
+          corner_z%velocity_x(i-1,j-1,k-2,iqLL) = u + (+dux+duy)
+          corner_z%velocity_y(i-1,j-1,k-2,iqLL) = v + (+dvx+dvy)
+          corner_z%pressure(i-1,j-1,k-2,iqLL) = p + (+dpx+dpy)
+          corner_z%Bx(i-1,j-1,k-2,iqLL) = AR + (   +dARy)
+          corner_z%By(i-1,j-1,k-2,iqLL) = BR + (+dBRx   )
+          corner_z%Bz(i-1,j-1,k-2,iqLL) = C + (+dCx+dCy)
+          if (corner_z%density(i-1,j-1,k-2,iqLL) < smallr) corner_z%density(i-1,j-1,k-2,iqLL) = r
+          if (corner_z%pressure(i-1,j-1,k-2,iqLL) < smallp) corner_z%pressure(i-1,j-1,k-2,iqLL) = p
+       end if
+       if (okp_x .and. okm_y .and. oka_z) then   ! qRB -> LR slot
+          corner_z%density(i-1,j-2,k-2,iqLR) = r + (+drx-dry)
+          corner_z%velocity_x(i-1,j-2,k-2,iqLR) = u + (+dux-duy)
+          corner_z%velocity_y(i-1,j-2,k-2,iqLR) = v + (+dvx-dvy)
+          corner_z%pressure(i-1,j-2,k-2,iqLR) = p + (+dpx-dpy)
+          corner_z%Bx(i-1,j-2,k-2,iqLR) = AR + (   -dARy)
+          corner_z%By(i-1,j-2,k-2,iqLR) = BL + (+dBLx   )
+          corner_z%Bz(i-1,j-2,k-2,iqLR) = C + (+dCx-dCy)
+          if (corner_z%density(i-1,j-2,k-2,iqLR) < smallr) corner_z%density(i-1,j-2,k-2,iqLR) = r
+          if (corner_z%pressure(i-1,j-2,k-2,iqLR) < smallp) corner_z%pressure(i-1,j-2,k-2,iqLR) = p
+       end if
+       if (okm_x .and. okp_y .and. oka_z) then   ! qLT -> RL slot
+          corner_z%density(i-2,j-1,k-2,iqRL) = r + (-drx+dry)
+          corner_z%velocity_x(i-2,j-1,k-2,iqRL) = u + (-dux+duy)
+          corner_z%velocity_y(i-2,j-1,k-2,iqRL) = v + (-dvx+dvy)
+          corner_z%pressure(i-2,j-1,k-2,iqRL) = p + (-dpx+dpy)
+          corner_z%Bx(i-2,j-1,k-2,iqRL) = AL + (   +dALy)
+          corner_z%By(i-2,j-1,k-2,iqRL) = BR + (-dBRx   )
+          corner_z%Bz(i-2,j-1,k-2,iqRL) = C + (-dCx+dCy)
+          if (corner_z%density(i-2,j-1,k-2,iqRL) < smallr) corner_z%density(i-2,j-1,k-2,iqRL) = r
+          if (corner_z%pressure(i-2,j-1,k-2,iqRL) < smallp) corner_z%pressure(i-2,j-1,k-2,iqRL) = p
+       end if
+       if (okm_x .and. okm_y .and. oka_z) then   ! qLB -> RR slot
+          corner_z%density(i-2,j-2,k-2,iqRR) = r + (-drx-dry)
+          corner_z%velocity_x(i-2,j-2,k-2,iqRR) = u + (-dux-duy)
+          corner_z%velocity_y(i-2,j-2,k-2,iqRR) = v + (-dvx-dvy)
+          corner_z%pressure(i-2,j-2,k-2,iqRR) = p + (-dpx-dpy)
+          corner_z%Bx(i-2,j-2,k-2,iqRR) = AL + (   -dALy)
+          corner_z%By(i-2,j-2,k-2,iqRR) = BL + (-dBLx   )
+          corner_z%Bz(i-2,j-2,k-2,iqRR) = C + (-dCx-dCy)
+          if (corner_z%density(i-2,j-2,k-2,iqRR) < smallr) corner_z%density(i-2,j-2,k-2,iqRR) = r
+          if (corner_z%pressure(i-2,j-2,k-2,iqRR) < smallp) corner_z%pressure(i-2,j-2,k-2,iqRR) = p
+       end if
+#endif
+#if NVAR>5+NENER
+       ! Uses the ORIGINAL cell velocities (re-read from local_subgrid once,
+       ! hoisted out of the scalar loop), not predicted.
+       ! Passive-scalar slopes from compute_tvd_slopes.
+       uscal = local_subgrid%velocity_x(i,j,k)
+       vscal = local_subgrid%velocity_y(i,j,k)
+       wscal = local_subgrid%velocity_z(i,j,k)
+       do n = 1, nscalar
+          rscal = scalar_sub(i,j,k,n)
+          dscalx = dscal_x(n)
+          dscaly = dscal_y(n)
+          dscalz = dscal_z(n)
+          srscal = -uscal*dscalx - vscal*dscaly - wscal*dscalz
+          rscal = rscal + srscal*dtdx
+          if (i > 1 .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) &
+               & right_interfaces_x%scalar(i-2,j-2,k-2,n) = rscal - dscalx
+          if (i < work_size .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) &
+               & left_interfaces_x%scalar(i-1,j-2,k-2,n) = rscal + dscalx
+          if ((i > 1 .and. i < work_size) .and. j > 1 .and. (k > 1 .and. k < work_size)) &
+               & right_interfaces_y%scalar(i-2,j-2,k-2,n) = rscal - dscaly
+          if ((i > 1 .and. i < work_size) .and. j < work_size .and. (k > 1 .and. k < work_size)) &
+               & left_interfaces_y%scalar(i-2,j-1,k-2,n) = rscal + dscaly
+          if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k > 1) &
+               & right_interfaces_z%scalar(i-2,j-2,k-2,n) = rscal - dscalz
+          if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k < work_size) &
+               & left_interfaces_z%scalar(i-2,j-2,k-1,n) = rscal + dscalz
+       end do
+#endif
     end do
 
     call syncthreads()
@@ -783,6 +1994,16 @@ contains
     integer, value :: riemann
     type(conserved_t) :: flux
 
+#ifdef MHD
+    if (riemann .eq. solver_hlld) then
+       flux = hlld_mhd_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2)
+    else if (riemann .eq. solver_hll) then
+       flux = hll_mhd_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2)
+    else
+       ! Unimplemented 1D solvers fall back to HLL.
+       flux = hll_mhd_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2)   ! fall back to HLL
+    endif
+#else
     if(riemann .eq. solver_llf)then
        flux = hll_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2, .true.)
     else if (riemann .eq. solver_hll) then
@@ -793,6 +2014,7 @@ contains
        ! Unsupported: LLF
        flux = hll_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2, .true.)
     endif
+#endif
 
   end function riemann_fluxes
   ! =========================================================================
@@ -810,6 +2032,7 @@ contains
   !> @param[in] gamma : The adiabatic index
   !> @param[in] thread_idx : The index of this thread
   !>
+  !> MHD: rotates B to the face-normal frame and adds MHD flux components.
   attributes(device) subroutine riemann_driver(left_interfaces_x, right_interfaces_x, left_interfaces_y, &
        & right_interfaces_y, left_interfaces_z, right_interfaces_z, thread_idx, &
        & gamma, smallr, smallc2, riemann)
@@ -822,6 +2045,12 @@ contains
     integer :: work_idx, interface_array_size, i, j, k
     type(primitive_t) :: left_interface, right_interface
     type(conserved_t) :: flux
+#if NVAR>5+NENER
+    real(kind=dp) :: SL, SR
+    real(kind=dp) :: sLin(1:nscalar), sRin(1:nscalar), fscal(1:nscalar)
+    real(kind=dp) :: rhoL, rhoR
+    integer :: n
+#endif
 
     interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
 
@@ -843,15 +2072,15 @@ contains
           right_interface%velocity_z = right_interfaces_x%velocity_z(i,j,k)
           right_interface%pressure   = right_interfaces_x%pressure(i,j,k)
 
-          ! Call the Riemann Solver
-          flux = riemann_fluxes(left_interface, right_interface, gamma, smallr, smallc2, riemann)
-
-          ! Unpack the fluxes into the interface state arrays
-          left_interfaces_x%density   (i,j,k) = flux%density
-          left_interfaces_x%velocity_x(i,j,k) = flux%momentum_x
-          left_interfaces_x%velocity_y(i,j,k) = flux%momentum_y
-          left_interfaces_x%velocity_z(i,j,k) = flux%momentum_z
-          left_interfaces_x%pressure  (i,j,k) = flux%energy
+#ifdef MHD
+          left_interface%Bx = left_interfaces_x%Bx(i,j,k); left_interface%By = left_interfaces_x%By(i,j,k); left_interface%Bz = left_interfaces_x%Bz(i,j,k)
+          right_interface%Bx = right_interfaces_x%Bx(i,j,k); right_interface%By = right_interfaces_x%By(i,j,k); right_interface%Bz = right_interfaces_x%Bz(i,j,k)
+#endif
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             sLin(n) = left_interfaces_x%scalar(i,j,k,n); sRin(n) = right_interfaces_x%scalar(i,j,k,n)
+          end do
+#endif
 
        else if (work_idx < 2 * interface_array_size) then ! Compute fluxes across the y interfaces
           ! Compute the indices in the interface state arrays
@@ -859,26 +2088,35 @@ contains
 
           ! Gather the interface states
           left_interface%density    = left_interfaces_y%density(i,j,k)
+          left_interface%pressure   = left_interfaces_y%pressure(i,j,k)
           left_interface%velocity_x = left_interfaces_y%velocity_y(i,j,k)
+#ifdef MHD
+          left_interface%velocity_y = left_interfaces_y%velocity_x(i,j,k)
+          left_interface%velocity_z = left_interfaces_y%velocity_z(i,j,k)
+          left_interface%Bx = left_interfaces_y%By(i,j,k); left_interface%By = left_interfaces_y%Bx(i,j,k); left_interface%Bz = left_interfaces_y%Bz(i,j,k)
+#else
           left_interface%velocity_y = left_interfaces_y%velocity_z(i,j,k)
           left_interface%velocity_z = left_interfaces_y%velocity_x(i,j,k)
-          left_interface%pressure   = left_interfaces_y%pressure(i,j,k)
+#endif
 
           right_interface%density    = right_interfaces_y%density(i,j,k)
+          right_interface%pressure   = right_interfaces_y%pressure(i,j,k)
           right_interface%velocity_x = right_interfaces_y%velocity_y(i,j,k)
+#ifdef MHD
+          right_interface%velocity_y = right_interfaces_y%velocity_x(i,j,k)
+          right_interface%velocity_z = right_interfaces_y%velocity_z(i,j,k)
+          right_interface%Bx = right_interfaces_y%By(i,j,k); right_interface%By = right_interfaces_y%Bx(i,j,k); right_interface%Bz = right_interfaces_y%Bz(i,j,k)
+#else
           right_interface%velocity_y = right_interfaces_y%velocity_z(i,j,k)
           right_interface%velocity_z = right_interfaces_y%velocity_x(i,j,k)
-          right_interface%pressure   = right_interfaces_y%pressure(i,j,k)
+#endif
 
-          ! Call the Riemann Solver
-          flux = riemann_fluxes(left_interface, right_interface, gamma, smallr, smallc2, riemann)
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             sLin(n) = left_interfaces_y%scalar(i,j,k,n); sRin(n) = right_interfaces_y%scalar(i,j,k,n)
+          end do
+#endif
 
-          ! Unpack the fluxes into the interface state arrays
-          left_interfaces_y%density   (i,j,k) = flux%density
-          left_interfaces_y%velocity_x(i,j,k) = flux%momentum_z
-          left_interfaces_y%velocity_y(i,j,k) = flux%momentum_x
-          left_interfaces_y%velocity_z(i,j,k) = flux%momentum_y
-          left_interfaces_y%pressure  (i,j,k) = flux%energy
        else ! Compute fluxes across the z interfaces
           ! Compute the indices in the interface state arrays
           call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
@@ -896,15 +2134,82 @@ contains
           right_interface%velocity_z = right_interfaces_z%velocity_y(i,j,k)
           right_interface%pressure   = right_interfaces_z%pressure(i,j,k)
 
-          ! Call the Riemann Solver
-          flux = riemann_fluxes(left_interface, right_interface, gamma, smallr, smallc2, riemann)
+#ifdef MHD
+          left_interface%Bx = left_interfaces_z%Bz(i,j,k); left_interface%By = left_interfaces_z%Bx(i,j,k); left_interface%Bz = left_interfaces_z%By(i,j,k)
+          right_interface%Bx = right_interfaces_z%Bz(i,j,k); right_interface%By = right_interfaces_z%Bx(i,j,k); right_interface%Bz = right_interfaces_z%By(i,j,k)
+#endif
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             sLin(n) = left_interfaces_z%scalar(i,j,k,n); sRin(n) = right_interfaces_z%scalar(i,j,k,n)
+          end do
+#endif
+       end if
 
-          ! Unpack the fluxes into the interface state arrays
+       ! Call the Riemann Solver
+       flux = riemann_fluxes(left_interface, right_interface, gamma, smallr, smallc2, riemann)
+#if NVAR>5+NENER
+#ifdef MHD
+       call hll_mhd_wavespeeds(left_interface, right_interface, gamma, smallr, smallc2, SL, SR)
+       rhoL = max(left_interface%density, smallr)
+       rhoR = max(right_interface%density, smallr)
+#else
+       call hll_hydro_wavespeeds(left_interface, right_interface, gamma, riemann, SL, SR)
+       rhoL = left_interface%density
+       rhoR = right_interface%density
+#endif
+       do n = 1, nscalar
+          fscal(n) = scalar_flux(riemann, flux%density, SL, SR, &
+               & rhoL, left_interface%velocity_x, sLin(n), &
+               & rhoR, right_interface%velocity_x, sRin(n))
+       end do
+#endif
+
+       ! Unpack the fluxes into the interface state arrays
+       if (work_idx < interface_array_size) then
+          left_interfaces_x%density   (i,j,k) = flux%density
+          left_interfaces_x%velocity_x(i,j,k) = flux%momentum_x
+          left_interfaces_x%velocity_y(i,j,k) = flux%momentum_y
+          left_interfaces_x%velocity_z(i,j,k) = flux%momentum_z
+          left_interfaces_x%pressure  (i,j,k) = flux%energy
+#ifdef MHD
+          left_interfaces_x%Bx(i,j,k) = flux%Bx; left_interfaces_x%By(i,j,k) = flux%By; left_interfaces_x%Bz(i,j,k) = flux%Bz
+#endif
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             left_interfaces_x%scalar(i,j,k,n) = fscal(n)
+          end do
+#endif
+       else if (work_idx < 2 * interface_array_size) then
+          left_interfaces_y%density(i,j,k) = flux%density
+          left_interfaces_y%velocity_y(i,j,k) = flux%momentum_x
+          left_interfaces_y%pressure(i,j,k) = flux%energy
+#ifdef MHD
+          left_interfaces_y%velocity_x(i,j,k) = flux%momentum_y
+          left_interfaces_y%velocity_z(i,j,k) = flux%momentum_z
+          left_interfaces_y%By(i,j,k) = flux%Bx; left_interfaces_y%Bx(i,j,k) = flux%By; left_interfaces_y%Bz(i,j,k) = flux%Bz
+#else
+          left_interfaces_y%velocity_x(i,j,k) = flux%momentum_z
+          left_interfaces_y%velocity_z(i,j,k) = flux%momentum_y
+#endif
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             left_interfaces_y%scalar(i,j,k,n) = fscal(n)
+          end do
+#endif
+       else
           left_interfaces_z%density   (i,j,k) = flux%density
           left_interfaces_z%velocity_x(i,j,k) = flux%momentum_y
           left_interfaces_z%velocity_y(i,j,k) = flux%momentum_z
           left_interfaces_z%velocity_z(i,j,k) = flux%momentum_x
           left_interfaces_z%pressure  (i,j,k) = flux%energy
+#ifdef MHD
+          left_interfaces_z%Bz(i,j,k) = flux%Bx; left_interfaces_z%Bx(i,j,k) = flux%By; left_interfaces_z%By(i,j,k) = flux%Bz
+#endif
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             left_interfaces_z%scalar(i,j,k,n) = fscal(n)
+          end do
+#endif
        end if
     end do
 
@@ -914,6 +2219,7 @@ contains
   ! =========================================================================
 
   ! =========================================================================
+  !> Zero fluxes at refined faces (MHD: includes scalar and transverse-B slots).
   attributes(device) subroutine zero_fine_fluxes(local_subgrid, fluxes_x, fluxes_y, fluxes_z, thread_idx)
     type(subgrid_6x6x6cell_primitive), intent(in)    :: local_subgrid
     type(subgrid_3x2x2cell_primitive), intent(inout) :: fluxes_x
@@ -923,6 +2229,9 @@ contains
 
     integer :: work_idx, interface_array_size
     integer :: i, j, k
+#if NVAR>5+NENER
+    integer :: n
+#endif
 
     interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
 
@@ -938,6 +2247,14 @@ contains
              fluxes_x%velocity_y(i, j, k) = 0_dp
              fluxes_x%velocity_z(i, j, k) = 0_dp
              fluxes_x%pressure  (i, j, k) = 0_dp
+#ifdef MHD
+             fluxes_x%Bx(i,j,k) = 0_dp; fluxes_x%By(i,j,k) = 0_dp; fluxes_x%Bz(i,j,k) = 0_dp
+#endif
+#if NVAR>5+NENER
+             do n = 1, nscalar
+                fluxes_x%scalar(i,j,k,n) = 0_dp
+             end do
+#endif
           endif
 
        else if (work_idx < 2 * interface_array_size) then ! Zero fluxes across the y interfaces
@@ -950,6 +2267,14 @@ contains
              fluxes_y%velocity_y(i, j, k) = 0_dp
              fluxes_y%velocity_z(i, j, k) = 0_dp
              fluxes_y%pressure  (i, j, k) = 0_dp
+#ifdef MHD
+             fluxes_y%Bx(i,j,k) = 0_dp; fluxes_y%By(i,j,k) = 0_dp; fluxes_y%Bz(i,j,k) = 0_dp
+#endif
+#if NVAR>5+NENER
+             do n = 1, nscalar
+                fluxes_y%scalar(i,j,k,n) = 0_dp
+             end do
+#endif
           endif
 
        else ! Zero fluxes across the z interfaces
@@ -962,6 +2287,14 @@ contains
              fluxes_z%velocity_y(i, j, k) = 0_dp
              fluxes_z%velocity_z(i, j, k) = 0_dp
              fluxes_z%pressure  (i, j, k) = 0_dp
+#ifdef MHD
+             fluxes_z%Bx(i,j,k) = 0_dp; fluxes_z%By(i,j,k) = 0_dp; fluxes_z%Bz(i,j,k) = 0_dp
+#endif
+#if NVAR>5+NENER
+             do n = 1, nscalar
+                fluxes_z%scalar(i,j,k,n) = 0_dp
+             end do
+#endif
           endif
 
        end if
@@ -973,13 +2306,22 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(device) subroutine conservative_update(unew, nbor, fluxes_x, fluxes_y, fluxes_z, &
+  attributes(device) subroutine conservative_update(unew, bnew, nbor, fluxes_x, fluxes_y, fluxes_z, &
+#ifdef MHD
+       & emfx, emfy, emfz, &
+#endif
        & head_idx, block_idx, thread_idx, dtdx)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*) ! Unused without MHD
     integer(kind=4), device :: nbor(1:subgridsize,*)
     type(subgrid_3x2x2cell_primitive), intent(in) :: fluxes_x
     type(subgrid_2x3x2cell_primitive), intent(in) :: fluxes_y
     type(subgrid_2x2x3cell_primitive), intent(in) :: fluxes_z
+#ifdef MHD
+    type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
+    type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
+    type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
+#endif
     integer(kind=4), value :: head_idx
     integer, value :: block_idx, thread_idx
     real(kind=dp), value :: dtdx
@@ -988,6 +2330,13 @@ contains
     integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
     integer :: work_idx, subgrid_idx, oct_idx, cell_idx, ind_nbor
     type(conserved_t) :: update_term
+#if NVAR>5+NENER
+    integer :: n
+    real(kind=dp) :: supd
+#endif
+#ifdef MHD
+    real(kind=dp) :: dflux
+#endif
 
     ! Compute the size of the section of the subgrid to operate on
     work_size = 2*nsubgrid
@@ -1050,21 +2399,56 @@ contains
        unew(cell_idx, 4, oct_idx) = unew(cell_idx, 4, oct_idx) + update_term%momentum_z
        unew(cell_idx, 5, oct_idx) = unew(cell_idx, 5, oct_idx) + update_term%energy
 
+#if NVAR>5+NENER
+       do n = 1, nscalar
+          supd = (fluxes_x%scalar(i,j,k,n) - fluxes_x%scalar(i+1,j,k,n)) * dtdx &
+               & + (fluxes_y%scalar(i,j,k,n) - fluxes_y%scalar(i,j+1,k,n)) * dtdx &
+               & + (fluxes_z%scalar(i,j,k,n) - fluxes_z%scalar(i,j,k+1,n)) * dtdx
+          unew(cell_idx, 5+nener+n, oct_idx) = unew(cell_idx, 5+nener+n, oct_idx) + supd
+       end do
+
+#endif
+#ifdef MHD
+       ! Constrained-transport curl of edge EMFs advances face-B.
+       dflux = ( (emfy%edge_e(i,j,k)-emfy%edge_e(i,j,k+1)) - (emfz%edge_e(i,j,k)-emfz%edge_e(i,j+1,k)) ) * dtdx
+       bnew(cell_idx, 1, oct_idx) = bnew(cell_idx, 1, oct_idx) + dflux
+       dflux = ( (emfy%edge_e(i+1,j,k)-emfy%edge_e(i+1,j,k+1)) - (emfz%edge_e(i+1,j,k)-emfz%edge_e(i+1,j+1,k)) ) * dtdx
+       bnew(cell_idx, 4, oct_idx) = bnew(cell_idx, 4, oct_idx) + dflux
+       dflux = ( (emfz%edge_e(i,j,k)-emfz%edge_e(i+1,j,k)) - (emfx%edge_e(i,j,k)-emfx%edge_e(i,j,k+1)) ) * dtdx
+       bnew(cell_idx, 2, oct_idx) = bnew(cell_idx, 2, oct_idx) + dflux
+       dflux = ( (emfz%edge_e(i,j+1,k)-emfz%edge_e(i+1,j+1,k)) - (emfx%edge_e(i,j+1,k)-emfx%edge_e(i,j+1,k+1)) ) * dtdx
+       bnew(cell_idx, 5, oct_idx) = bnew(cell_idx, 5, oct_idx) + dflux
+       dflux = ( (emfx%edge_e(i,j,k)-emfx%edge_e(i,j+1,k)) - (emfy%edge_e(i,j,k)-emfy%edge_e(i+1,j,k)) ) * dtdx
+       bnew(cell_idx, 3, oct_idx) = bnew(cell_idx, 3, oct_idx) + dflux
+       dflux = ( (emfx%edge_e(i,j,k+1)-emfx%edge_e(i,j+1,k+1)) - (emfy%edge_e(i,j,k+1)-emfy%edge_e(i+1,j,k+1)) ) * dtdx
+       bnew(cell_idx, 6, oct_idx) = bnew(cell_idx, 6, oct_idx) + dflux
+#endif
+
     end do
 
   end subroutine conservative_update
   ! =========================================================================
 
   ! =========================================================================
-  attributes(device) subroutine coarse_cell_update(grid, unew, father, nbor, fluxes_x, fluxes_y, fluxes_z, &
+  !> Coarse/fine flux correction; MHD also corrects scalars and edge EMFs.
+  attributes(device) subroutine coarse_cell_update(grid, unew, bnew, father, nbor, fluxes_x, fluxes_y, fluxes_z, &
+#ifdef MHD
+       & emfx, emfy, emfz, &
+#endif
        & head_idx, block_idx, thread_idx, ngridmax, dtdx)
     type(oct), device :: grid(*)
     integer, device :: father(*)
     integer, device :: nbor(1:subgridsize,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*) ! Unused without MHD
     type(subgrid_3x2x2cell_primitive), intent(in) :: fluxes_x
     type(subgrid_2x3x2cell_primitive), intent(in) :: fluxes_y
     type(subgrid_2x2x3cell_primitive), intent(in) :: fluxes_z
+#ifdef MHD
+    type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
+    type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
+    type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
+#endif
     integer, value :: head_idx
     integer, value :: block_idx
     integer, value :: thread_idx
@@ -1077,6 +2461,15 @@ contains
     integer :: interface_array_size, info, ind_nbor
     type(conserved_t) :: flux
     real(kind=dp) :: coarse_flux_scale
+#if NVAR>5+NENER
+    integer :: n
+    real(kind=dp) :: fs(1:nscalar)
+#endif
+#ifdef MHD
+    real(kind=dp) :: dflux, weight
+    logical :: c1, c2, c3
+    integer :: oc1, oc2, oc3, cc1, cc2, cc3
+#endif
 
     interface_array_size = nsubgrid**(ndim-1)
     coarse_flux_scale = dtdx * inv_twotondim
@@ -1103,6 +2496,11 @@ contains
        flux%momentum_y = 0_dp
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
+#if NVAR>5+NENER
+       do n = 1, nscalar
+          fs(n) = 0_dp
+       end do
+#endif
        do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
           do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
              flux%density    = flux%density    - fluxes_x%density   (0, j, k) * coarse_flux_scale
@@ -1110,6 +2508,11 @@ contains
              flux%momentum_y = flux%momentum_y - fluxes_x%velocity_y(0, j, k) * coarse_flux_scale
              flux%momentum_z = flux%momentum_z - fluxes_x%velocity_z(0, j, k) * coarse_flux_scale
              flux%energy     = flux%energy     - fluxes_x%pressure  (0, j, k) * coarse_flux_scale
+#if NVAR>5+NENER
+             do n = 1, nscalar
+                fs(n) = fs(n) - fluxes_x%scalar(0,j,k,n)*coarse_flux_scale
+             end do
+#endif
           end do
        end do
 
@@ -1127,6 +2530,11 @@ contains
           info = atomicadd(unew(cell_idx, 3, father_idx), flux%momentum_y)
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n))
+          end do
+#endif
        endif
 
     else if (thread_idx < 2 * interface_array_size) then
@@ -1144,6 +2552,11 @@ contains
        flux%momentum_y = 0_dp
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
+#if NVAR>5+NENER
+       do n = 1, nscalar
+          fs(n) = 0_dp
+       end do
+#endif
        do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
           do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
              flux%density    = flux%density    + fluxes_x%density   (2*nsubgrid, j, k) * coarse_flux_scale
@@ -1151,6 +2564,11 @@ contains
              flux%momentum_y = flux%momentum_y + fluxes_x%velocity_y(2*nsubgrid, j, k) * coarse_flux_scale
              flux%momentum_z = flux%momentum_z + fluxes_x%velocity_z(2*nsubgrid, j, k) * coarse_flux_scale
              flux%energy     = flux%energy     + fluxes_x%pressure  (2*nsubgrid, j, k) * coarse_flux_scale
+#if NVAR>5+NENER
+             do n = 1, nscalar
+                fs(n) = fs(n) + fluxes_x%scalar(2*nsubgrid,j,k,n)*coarse_flux_scale
+             end do
+#endif
           end do
        end do
 
@@ -1168,6 +2586,11 @@ contains
           info = atomicadd(unew(cell_idx, 3, father_idx), flux%momentum_y)
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n))
+          end do
+#endif
        endif
 
     !============
@@ -1189,6 +2612,11 @@ contains
        flux%momentum_y = 0_dp
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
+#if NVAR>5+NENER
+       do n = 1, nscalar
+          fs(n) = 0_dp
+       end do
+#endif
        do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
           do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
              flux%density    = flux%density    - fluxes_y%density   (i, 0, k) * coarse_flux_scale
@@ -1196,6 +2624,11 @@ contains
              flux%momentum_y = flux%momentum_y - fluxes_y%velocity_y(i, 0, k) * coarse_flux_scale
              flux%momentum_z = flux%momentum_z - fluxes_y%velocity_z(i, 0, k) * coarse_flux_scale
              flux%energy     = flux%energy     - fluxes_y%pressure  (i, 0, k) * coarse_flux_scale
+#if NVAR>5+NENER
+             do n = 1, nscalar
+                fs(n) = fs(n) - fluxes_y%scalar(i,0,k,n)*coarse_flux_scale
+             end do
+#endif
           end do
        end do
     
@@ -1213,6 +2646,11 @@ contains
           info = atomicadd(unew(cell_idx, 3, father_idx), flux%momentum_y)
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n))
+          end do
+#endif
        endif
 
     else if (thread_idx < 4 * interface_array_size) then
@@ -1230,6 +2668,11 @@ contains
        flux%momentum_y = 0_dp
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
+#if NVAR>5+NENER
+       do n = 1, nscalar
+          fs(n) = 0_dp
+       end do
+#endif
        do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
           do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
              flux%density    = flux%density    + fluxes_y%density   (i, 2*nsubgrid, k) * coarse_flux_scale
@@ -1237,6 +2680,11 @@ contains
              flux%momentum_y = flux%momentum_y + fluxes_y%velocity_y(i, 2*nsubgrid, k) * coarse_flux_scale
              flux%momentum_z = flux%momentum_z + fluxes_y%velocity_z(i, 2*nsubgrid, k) * coarse_flux_scale
              flux%energy     = flux%energy     + fluxes_y%pressure  (i, 2*nsubgrid, k) * coarse_flux_scale
+#if NVAR>5+NENER
+             do n = 1, nscalar
+                fs(n) = fs(n) + fluxes_y%scalar(i,2*nsubgrid,k,n)*coarse_flux_scale
+             end do
+#endif
           end do
        end do
 
@@ -1254,6 +2702,11 @@ contains
           info = atomicadd(unew(cell_idx, 3, father_idx), flux%momentum_y)
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n))
+          end do
+#endif
        endif
 
     !============
@@ -1275,6 +2728,11 @@ contains
        flux%momentum_y = 0_dp
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
+#if NVAR>5+NENER
+       do n = 1, nscalar
+          fs(n) = 0_dp
+       end do
+#endif
        do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
           do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
              flux%density    = flux%density    - fluxes_z%density   (i, j, 0) * coarse_flux_scale
@@ -1282,6 +2740,11 @@ contains
              flux%momentum_y = flux%momentum_y - fluxes_z%velocity_y(i, j, 0) * coarse_flux_scale
              flux%momentum_z = flux%momentum_z - fluxes_z%velocity_z(i, j, 0) * coarse_flux_scale
              flux%energy     = flux%energy     - fluxes_z%pressure  (i, j, 0) * coarse_flux_scale
+#if NVAR>5+NENER
+             do n = 1, nscalar
+                fs(n) = fs(n) - fluxes_z%scalar(i,j,0,n)*coarse_flux_scale
+             end do
+#endif
           end do
        end do
     
@@ -1299,6 +2762,11 @@ contains
           info = atomicadd(unew(cell_idx, 3, father_idx), flux%momentum_y)
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n))
+          end do
+#endif
        endif
 
     else if (thread_idx < 6 * interface_array_size) then
@@ -1316,6 +2784,11 @@ contains
        flux%momentum_y = 0_dp
        flux%momentum_z = 0_dp
        flux%energy     = 0_dp
+#if NVAR>5+NENER
+       do n = 1, nscalar
+          fs(n) = 0_dp
+       end do
+#endif
        do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
           do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
              flux%density    = flux%density    + fluxes_z%density   (i, j, 2*nsubgrid) * coarse_flux_scale
@@ -1323,6 +2796,11 @@ contains
              flux%momentum_y = flux%momentum_y + fluxes_z%velocity_y(i, j, 2*nsubgrid) * coarse_flux_scale
              flux%momentum_z = flux%momentum_z + fluxes_z%velocity_z(i, j, 2*nsubgrid) * coarse_flux_scale
              flux%energy     = flux%energy     + fluxes_z%pressure  (i, j, 2*nsubgrid) * coarse_flux_scale
+#if NVAR>5+NENER
+             do n = 1, nscalar
+                fs(n) = fs(n) + fluxes_z%scalar(i,j,2*nsubgrid,n)*coarse_flux_scale
+             end do
+#endif
           end do
        end do
 
@@ -1340,18 +2818,492 @@ contains
           info = atomicadd(unew(cell_idx, 3, father_idx), flux%momentum_y)
           info = atomicadd(unew(cell_idx, 4, father_idx), flux%momentum_z)
           info = atomicadd(unew(cell_idx, 5, father_idx), flux%energy)
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             info = atomicadd(unew(cell_idx,5+nener+n,father_idx), fs(n))
+          end do
+#endif
        endif
 
     end if
+
+#ifdef MHD
+    ! Coarse/fine EMF correction at oct boundary edges.
+    if (thread_idx == 0) then
+
+       ! 4 EMFz edges
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1,-1, 0, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfz%edge_e(0,0,0)+emfz%edge_e(0,0,1))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,1,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,4,oc2),dflux);  info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,4,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 1, 0, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfz%edge_e(0,2,0)+emfz%edge_e(0,2,1))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,4,oc1),dflux);  info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,4,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,1,oc3),-dflux); info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 1, 0, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfz%edge_e(2,2,0)+emfz%edge_e(2,2,1))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,4,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,1,oc2),-dflux); info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,1,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1,-1, 0, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfz%edge_e(2,0,0)+emfz%edge_e(2,0,1))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,1,oc1),-dflux); info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,1,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,4,oc3),dflux);  info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
+       end if
+
+       ! 4 EMFx edges
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1,-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfx%edge_e(0,0,0)+emfx%edge_e(1,0,0))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,6,oc1),dflux);  info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,6,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,3,oc3),-dflux); info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0,-1, 1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfx%edge_e(0,0,2)+emfx%edge_e(1,0,2))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,6,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,3,oc2),-dflux); info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,3,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfx%edge_e(0,2,2)+emfx%edge_e(1,2,2))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,3,oc1),-dflux); info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,3,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,6,oc3),dflux);  info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 1,-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfx%edge_e(0,2,0)+emfx%edge_e(1,2,0))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,3,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,6,oc2),dflux);  info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,6,oc3),-dflux); endif
+       end if
+
+       ! 4 EMFy edges
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0,-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfy%edge_e(0,0,0)+emfy%edge_e(0,1,0))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,6,oc1),-dflux); info=atomicadd(bnew(cc1,1,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,4,oc2),-dflux); info=atomicadd(bnew(cc2,6,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,3,oc3),dflux);  info=atomicadd(bnew(cc3,4,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax,-1, 0, 1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfy%edge_e(0,0,2)+emfy%edge_e(0,1,2))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,4,oc1),-dflux); info=atomicadd(bnew(cc1,6,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,3,oc2),dflux);  info=atomicadd(bnew(cc2,4,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,1,oc3),dflux);  info=atomicadd(bnew(cc3,3,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0, 1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfy%edge_e(2,0,2)+emfy%edge_e(2,1,2))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,3,oc1),dflux);  info=atomicadd(bnew(cc1,4,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,1,oc2),dflux);  info=atomicadd(bnew(cc2,3,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,6,oc3),-dflux); info=atomicadd(bnew(cc3,1,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0, 0, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 1, 0,-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, 0, 0,-1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfy%edge_e(2,0,0)+emfy%edge_e(2,1,0))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,1,oc1),dflux);  info=atomicadd(bnew(cc1,3,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,6,oc2),-dflux); info=atomicadd(bnew(cc2,1,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,4,oc3),-dflux); info=atomicadd(bnew(cc3,6,oc3),dflux);  endif
+       end if
+
+    end if
+#endif
 
   end subroutine coarse_cell_update
   ! =========================================================================
 
   ! =========================================================================
+#ifdef MHD
+  ! Transverse TVD slope on face-centred B (3-point limiter).
+  attributes(device) function face_b_tvd_slope(bm, b0, bp, slope_mag) result(db)
+    real(kind=dp), value :: bm, b0, bp
+    integer, value :: slope_mag
+    real(kind=dp) :: db
+    real(kind=dp) :: dlft, drgt, dcen, dsgn, slop, dlim, fac
+    real(kind=dp), parameter :: half = 0.5_dp, zero = 0.0_dp, one = 1.0_dp
+
+    if (slope_mag == 0) then
+       db = zero
+       return
+    end if
+    fac = real(min(slope_mag,2), kind=dp)
+    dlft = fac*(b0 - bm)
+    drgt = fac*(bp - b0)
+    dcen = half*(dlft+drgt)/fac; dsgn = sign(one, dcen)
+    slop = min(abs(dlft),abs(drgt)); dlim = merge(zero, slop, (dlft*drgt) <= zero)
+    db = dsgn*min(dlim,abs(dcen))
+  end function face_b_tvd_slope
+
+  ! Passive-scalar flux matched to the active 1D MHD solver.
+  attributes(device) function scalar_flux(riemann, fdens, speed_l, speed_r, rhoL, uL, sL, rhoR, uR, sR) result(fs)
+    ! NB: Fortran is case-insensitive, so the wave speeds cannot be named SL/SR
+    ! alongside the scalar values sL/sR (duplicate dummy); they follow the
+    ! hll_flux speed_l/speed_r naming instead.
+    integer, value :: riemann
+    real(kind=dp), value :: fdens, speed_l, speed_r, rhoL, uL, sL, rhoR, uR, sR
+    real(kind=dp) :: fs
+    if (riemann .eq. solver_hllc .or. riemann .eq. solver_hlld) then
+       if (fdens > 0.0_dp) then
+          fs = fdens*sL
+       else
+          fs = fdens*sR
+       endif
+    else
+       fs = hll_flux(speed_l, speed_r, rhoL*uL*sL, rhoR*uR*sR, rhoL*sL, rhoR*sR)
+    endif
+  end function scalar_flux
+
+  attributes(device) subroutine hll_hydro_wavespeeds(left, right, gamma, riemann, SL, SR)
+    type(primitive_t), intent(in) :: left, right
+    real(kind=dp), value :: gamma
+    integer, value :: riemann
+    real(kind=dp), intent(out) :: SL, SR
+    real(kind=dp) :: sound_speed_l, sound_speed_r, speed_max
+
+    sound_speed_l = sound_speed(left, gamma)
+    sound_speed_r = sound_speed(right, gamma)
+    if (riemann .eq. solver_llf) then
+       speed_max = max(abs(left%velocity_x)+sound_speed_l, abs(right%velocity_x)+sound_speed_r)
+       SL = -speed_max
+       SR = speed_max
+    else
+       SL = min(min(left%velocity_x, right%velocity_x) - max(sound_speed_l, sound_speed_r), 0.0_dp)
+       SR = max(max(left%velocity_x, right%velocity_x) + max(sound_speed_l, sound_speed_r), 0.0_dp)
+    endif
+  end subroutine hll_hydro_wavespeeds
+
+  ! Fast-magnetosonic HLL wave speeds for passive-scalar MHD fluxes.
+  attributes(device) subroutine hll_mhd_wavespeeds(left, right, gamma, smallr, smallc2, SL, SR)
+    type(primitive_t), intent(in) :: left, right
+    real(kind=dp), value :: gamma, smallr, smallc2
+    real(kind=dp), intent(out) :: SL, SR
+    real(kind=dp) :: smallp, bx_mean, rl, rr, pl, pr, ul, ur
+    real(kind=dp) :: blx, bly, blz, brx, bry, brz
+    real(kind=dp) :: b2l, b2r, c2l, c2r, d2l, d2r, cfleft, cfright
+
+    smallp = smallc2 / gamma
+    bx_mean = 0.5_dp * (left%Bx + right%Bx)
+    rl = max(left%density, smallr);  rr = max(right%density, smallr)
+    pl = max(left%pressure, smallp*rl); pr = max(right%pressure, smallp*rr)
+    ul = left%velocity_x; ur = right%velocity_x
+    blx = bx_mean; brx = bx_mean
+    bly = left%By;  blz = left%Bz
+    bry = right%By; brz = right%Bz
+    b2l = compute_bsquared(blx, bly, blz); c2l = gamma*pl/rl
+    d2l = 0.5_dp*(b2l/rl + c2l); cfleft = sqrt(d2l + sqrt(d2l**2 - c2l*blx*blx/rl))
+    b2r = compute_bsquared(brx, bry, brz); c2r = gamma*pr/rr
+    d2r = 0.5_dp*(b2r/rr + c2r); cfright = sqrt(d2r + sqrt(d2r**2 - c2r*brx*brx/rr))
+    SL = min(min(ul, ur) - max(cfleft, cfright), 0.0_dp)
+    SR = max(max(ul, ur) + max(cfleft, cfright), 0.0_dp)
+  end subroutine hll_mhd_wavespeeds
+
+  ! Permute edge corner state into the 2D Riemann frame (x edges).
+  attributes(device) function gather_corner_x(c, islot, I, J, K) result(q)
+    type(subgrid_2x3x3edge_corner), intent(in) :: c
+    integer, value :: islot, I, J, K
+    type(primitive_t) :: q
+    ! Orientation 1 (Ex): lp1=3, lp2=4, lor=2; bp1=7, bp2=8, bor=6.
+    q%density    = c%density(I,J,K,islot)
+    q%pressure   = c%pressure(I,J,K,islot)
+    q%velocity_x = c%velocity_y(I,J,K,islot)
+    q%velocity_y = c%velocity_z(I,J,K,islot)
+    q%velocity_z = 0.0_dp
+    q%Bx         = c%By(I,J,K,islot)
+    q%By         = c%Bz(I,J,K,islot)
+    q%Bz         = c%Bx(I,J,K,islot)
+  end function gather_corner_x
+
+  attributes(device) function gather_corner_y(c, islot, I, J, K) result(q)
+    type(subgrid_3x2x3edge_corner), intent(in) :: c
+    integer, value :: islot, I, J, K
+    type(primitive_t) :: q
+    ! Orientation 2 (Ey): lp1=4, lp2=2, lor=3; bp1=8, bp2=6, bor=7.
+    q%density    = c%density(I,J,K,islot)
+    q%pressure   = c%pressure(I,J,K,islot)
+    q%velocity_x = c%velocity_z(I,J,K,islot)
+    q%velocity_y = c%velocity_x(I,J,K,islot)
+    q%velocity_z = 0.0_dp
+    q%Bx         = c%Bz(I,J,K,islot)
+    q%By         = c%Bx(I,J,K,islot)
+    q%Bz         = c%By(I,J,K,islot)
+  end function gather_corner_y
+
+  attributes(device) function gather_corner_z(c, islot, I, J, K) result(q)
+    type(subgrid_3x3x2edge_corner), intent(in) :: c
+    integer, value :: islot, I, J, K
+    type(primitive_t) :: q
+    ! Orientation 3 (Ez): lp1=2, lp2=3, lor=4; bp1=6, bp2=7, bor=8 (identity).
+    q%density    = c%density(I,J,K,islot)
+    q%pressure   = c%pressure(I,J,K,islot)
+    q%velocity_x = c%velocity_x(I,J,K,islot)
+    q%velocity_y = c%velocity_y(I,J,K,islot)
+    q%velocity_z = 0.0_dp
+    q%Bx         = c%Bx(I,J,K,islot)
+    q%By         = c%By(I,J,K,islot)
+    q%Bz         = c%Bz(I,J,K,islot)
+  end function gather_corner_z
+
+  ! Apply parallel-B continuity and dispatch the 2D EMF solver.
+  attributes(device) function emf_solve(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
+       & switch_llf_dmin, switch_llf_pmin, riemann2d) result(E)
+    type(primitive_t), intent(in) :: qLL, qLR, qRL, qRR
+    real(kind=dp), value :: gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
+    integer, value :: riemann2d
+    real(kind=dp) :: E
+    type(primitive_t) :: sLL, sLR, sRL, sRR
+    real(kind=dp) :: b1_LL, b1_LR, b2_LL, b2_RL
+    real(kind=dp), parameter :: half = 0.5_dp
+
+    sLL = qLL; sLR = qLR; sRL = qRL; sRR = qRR
+    b1_LL = half*(qLL%Bx + qRL%Bx); b1_LR = half*(qLR%Bx + qRR%Bx)
+    sLL%Bx = b1_LL; sRL%Bx = b1_LL; sLR%Bx = b1_LR; sRR%Bx = b1_LR
+    b2_LL = half*(qLL%By + qLR%By); b2_RL = half*(qRL%By + qRR%By)
+    sLL%By = b2_LL; sLR%By = b2_LL; sRL%By = b2_RL; sRR%By = b2_RL
+    E = riemann2d_emf(sLL, sLR, sRL, sRR, gamma, smallr, smallc, &
+         & switch_llf_dmin, switch_llf_pmin, riemann2d)
+  end function emf_solve
+
+  ! Solve edge EMFs on the oct subgrid from stored corner states.
+  attributes(device) subroutine cmp_mag_flx_mhd(corner_x, corner_y, corner_z, emfx, emfy, emfz, &
+       & thread_idx, gamma, smallr, smallc, &
+       & switch_llf_dmin, switch_llf_pmin, riemann2d)
+    type(subgrid_2x3x3edge_corner), intent(in) :: corner_x
+    type(subgrid_3x2x3edge_corner), intent(in) :: corner_y
+    type(subgrid_3x3x2edge_corner), intent(in) :: corner_z
+    integer, value :: thread_idx, riemann2d
+    real(kind=dp), value :: gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin
+    type(subgrid_2x3x3edge_primitive), intent(inout) :: emfx
+    type(subgrid_3x2x3edge_primitive), intent(inout) :: emfy
+    type(subgrid_3x3x2edge_primitive), intent(inout) :: emfz
+    integer, parameter :: iqLL = 1, iqRL = 2, iqLR = 3, iqRR = 4
+    integer :: work_idx, emf_size, I, J, K
+    type(primitive_t) :: qLL, qLR, qRL, qRR
+    real(kind=dp) :: E
+
+    emf_size = (2*nsubgrid+1)**2 * (2*nsubgrid)
+
+    do work_idx = thread_idx, emf_size*3 - 1, blockDim%x
+       if (work_idx < emf_size) then
+          ! EMF z (orientation 3): lp1=2 lp2=3 lor=4, bp1=6 bp2=7 bor=8
+          ! Edges parallel to z: I,J in [0,2*nsubgrid], K in [0,2*nsubgrid-1].
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
+          qLL = gather_corner_z(corner_z, iqLL, I, J, K)
+          qRL = gather_corner_z(corner_z, iqRL, I, J, K)
+          qLR = gather_corner_z(corner_z, iqLR, I, J, K)
+          qRR = gather_corner_z(corner_z, iqRR, I, J, K)
+       else if (work_idx < 2*emf_size) then
+          ! EMF y (orientation 2): lp1=4 lp2=2 lor=3, bp1=8 bp2=6 bor=7
+          ! Edges parallel to y: I,K in [0,2*nsubgrid], J in [0,2*nsubgrid-1].
+          call index_1Dto3D(work_idx - emf_size, 2*nsubgrid+1, 2*nsubgrid, I, J, K)
+          qLL = gather_corner_y(corner_y, iqLL, I, J, K)
+          qRL = gather_corner_y(corner_y, iqRL, I, J, K)
+          qLR = gather_corner_y(corner_y, iqLR, I, J, K)
+          qRR = gather_corner_y(corner_y, iqRR, I, J, K)
+       else
+          ! EMF x (orientation 1): lp1=3 lp2=4 lor=2, bp1=7 bp2=8 bor=6
+          ! Edges parallel to x: J,K in [0,2*nsubgrid], I in [0,2*nsubgrid-1].
+          call index_1Dto3D(work_idx - 2*emf_size, 2*nsubgrid, 2*nsubgrid+1, I, J, K)
+          qLL = gather_corner_x(corner_x, iqLL, I, J, K)
+          qRL = gather_corner_x(corner_x, iqRL, I, J, K)
+          qLR = gather_corner_x(corner_x, iqLR, I, J, K)
+          qRR = gather_corner_x(corner_x, iqRR, I, J, K)
+       end if
+
+       ! The ONE 2D solver call site (convergent across the warp)
+       E = emf_solve(qLL, qLR, qRL, qRR, gamma, smallr, smallc, &
+            & switch_llf_dmin, switch_llf_pmin, riemann2d)
+
+       if (work_idx < emf_size) then
+          emfz%edge_e(I,J,K) = E
+       else if (work_idx < 2*emf_size) then
+          emfy%edge_e(I,J,K) = E
+       else
+          emfx%edge_e(I,J,K) = E
+       end if
+    end do
+
+    call syncthreads()
+
+  end subroutine cmp_mag_flx_mhd
+
+  ! Zero MHD Euler fluxes when induction-only CT is active.
+  attributes(device) subroutine zero_euler_fluxes_mhd(fluxes_x, fluxes_y, fluxes_z, thread_idx)
+    type(subgrid_3x2x2cell_primitive), intent(inout) :: fluxes_x
+    type(subgrid_2x3x2cell_primitive), intent(inout) :: fluxes_y
+    type(subgrid_2x2x3cell_primitive), intent(inout) :: fluxes_z
+    integer, value :: thread_idx
+    integer :: work_idx, interface_array_size, i, j, k
+#if NVAR>5+NENER
+    integer :: n
+#endif
+
+    interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
+
+    do work_idx = thread_idx, interface_array_size * 3 - 1, blockDim%x
+       if (work_idx < interface_array_size) then
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
+          fluxes_x%density(i,j,k) = 0_dp;  fluxes_x%velocity_x(i,j,k) = 0_dp
+          fluxes_x%velocity_y(i,j,k) = 0_dp; fluxes_x%velocity_z(i,j,k) = 0_dp
+          fluxes_x%pressure(i,j,k) = 0_dp
+          fluxes_x%Bx(i,j,k) = 0_dp; fluxes_x%By(i,j,k) = 0_dp; fluxes_x%Bz(i,j,k) = 0_dp
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             fluxes_x%scalar(i,j,k,n) = 0_dp
+          end do
+#endif
+       else if (work_idx < 2 * interface_array_size) then
+          call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
+          fluxes_y%density(i,j,k) = 0_dp;  fluxes_y%velocity_x(i,j,k) = 0_dp
+          fluxes_y%velocity_y(i,j,k) = 0_dp; fluxes_y%velocity_z(i,j,k) = 0_dp
+          fluxes_y%pressure(i,j,k) = 0_dp
+          fluxes_y%Bx(i,j,k) = 0_dp; fluxes_y%By(i,j,k) = 0_dp; fluxes_y%Bz(i,j,k) = 0_dp
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             fluxes_y%scalar(i,j,k,n) = 0_dp
+          end do
+#endif
+       else
+          call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
+          fluxes_z%density(i,j,k) = 0_dp;  fluxes_z%velocity_x(i,j,k) = 0_dp
+          fluxes_z%velocity_y(i,j,k) = 0_dp; fluxes_z%velocity_z(i,j,k) = 0_dp
+          fluxes_z%pressure(i,j,k) = 0_dp
+          fluxes_z%Bx(i,j,k) = 0_dp; fluxes_z%By(i,j,k) = 0_dp; fluxes_z%Bz(i,j,k) = 0_dp
+#if NVAR>5+NENER
+          do n = 1, nscalar
+             fluxes_z%scalar(i,j,k,n) = 0_dp
+          end do
+#endif
+       end if
+    end do
+
+    call syncthreads()
+
+  end subroutine zero_euler_fluxes_mhd
+
+  ! Zero edge EMF when any adjacent cell is refined.
+  attributes(device) subroutine zero_fine_emf(local_mhd, emfx, emfy, emfz, thread_idx)
+    type(subgrid_6x6x6cell_primitive), intent(in) :: local_mhd
+    type(subgrid_2x3x3edge_primitive), intent(inout) :: emfx
+    type(subgrid_3x2x3edge_primitive), intent(inout) :: emfy
+    type(subgrid_3x3x2edge_primitive), intent(inout) :: emfz
+    integer, value :: thread_idx
+    integer :: work_idx, emf_size, I, J, K, X, Y, Z
+
+    emf_size = (2*nsubgrid+1)**2 * (2*nsubgrid)   ! 18 edges per orientation
+
+    do work_idx = thread_idx, emf_size*3 - 1, blockDim%x
+       if (work_idx < emf_size) then
+          ! Edges parallel to z: I,J in [0,2*nsubgrid], K in [0,2*nsubgrid-1].
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
+          X = I+2; Y = J+2; Z = K+2
+          if (local_mhd%refined(X-1,Y-1,Z) .or. local_mhd%refined(X,Y-1,Z) .or. &
+               & local_mhd%refined(X-1,Y,Z) .or. local_mhd%refined(X,Y,Z)) emfz%edge_e(I,J,K) = 0_dp
+       else if (work_idx < 2*emf_size) then
+          ! Edges parallel to y: I,K in [0,2*nsubgrid], J in [0,2*nsubgrid-1].
+          call index_1Dto3D(work_idx - emf_size, 2*nsubgrid+1, 2*nsubgrid, I, J, K)
+          X = I+2; Y = J+2; Z = K+2
+          if (local_mhd%refined(X-1,Y,Z-1) .or. local_mhd%refined(X,Y,Z-1) .or. &
+               & local_mhd%refined(X-1,Y,Z) .or. local_mhd%refined(X,Y,Z)) emfy%edge_e(I,J,K) = 0_dp
+       else
+          ! Edges parallel to x: J,K in [0,2*nsubgrid], I in [0,2*nsubgrid-1].
+          call index_1Dto3D(work_idx - 2*emf_size, 2*nsubgrid, 2*nsubgrid+1, I, J, K)
+          X = I+2; Y = J+2; Z = K+2
+          if (local_mhd%refined(X,Y-1,Z-1) .or. local_mhd%refined(X,Y,Z-1) .or. &
+               & local_mhd%refined(X,Y-1,Z) .or. local_mhd%refined(X,Y,Z)) emfx%edge_e(I,J,K) = 0_dp
+       end if
+    end do
+
+    call syncthreads()
+
+  end subroutine zero_fine_emf
+
+  ! Map cache oct to parent coarse cell for coarse/fine corrections.
+  attributes(device) subroutine get_cf_cell(nbor, grid, father, subgrid_idx, ngridmax, &
+       & di, dj, dk, is_coarse, coct, ccell)
+    integer(kind=4), device :: nbor(1:subgridsize,*)
+    type(oct), device :: grid(*)
+    integer, device :: father(*)
+    integer, value :: subgrid_idx, ngridmax, di, dj, dk
+    logical, intent(out) :: is_coarse
+    integer, intent(out) :: coct, ccell
+    integer :: stencil_idx, nbidx, fidx, ci, cj, ck
+
+    stencil_idx = 1 + (1+di) + nsubgridp2*(1+dj) + nsubgridp2sq*(1+dk)
+    nbidx = nbor(stencil_idx, subgrid_idx)
+    is_coarse = (nbidx > ngridmax)
+    coct = 0; ccell = 1
+    if (is_coarse) then
+       fidx = father(nbidx)
+       ci = grid(nbidx)%ckey(1) - 2*grid(fidx)%ckey(1)
+       cj = grid(nbidx)%ckey(2) - 2*grid(fidx)%ckey(2)
+       ck = grid(nbidx)%ckey(3) - 2*grid(fidx)%ckey(3)
+       ccell = 1 + ci + 2*cj + 4*ck
+       coct = fidx
+    end if
+  end subroutine get_cf_cell
+
+#endif
+
+  !
+  ! Fused MHD Godunov+CT kernel; working buffers live in shared memory.
+
 #ifndef PAPER
-  attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, f, father, nbor, &
+  attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, bold, bnew, &
+       & f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
-       & gamma, smallr, smallc2, dt, dx, slope, riemann, constant_gravity)
+       & gamma, smallr, smallc2, dt, dx, slope, slope_mag, riemann, riemann2d, &
+       & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
     type(oct), device :: grid(*)
     integer, device :: father(*)
     integer, device :: nbor(1:subgridsize,*)
@@ -1359,6 +3311,9 @@ contains
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    ! Face-centred B; unused without MHD.
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_subgrids
     integer, intent(in), value :: ngridmax
@@ -1367,17 +3322,37 @@ contains
     real(kind=dp), intent(in), value :: dt
     real(kind=dp), intent(in), value :: dx
     integer, intent(in), value :: slope
+    integer, intent(in), value :: slope_mag
     integer, intent(in), value :: riemann
+    integer, intent(in), value :: riemann2d
+    real(kind=dp), intent(in), value :: switch_llf_dmin, switch_llf_pmin
+    logical, intent(in), value :: induction
 
     type(subgrid_3x2x2cell_primitive), shared :: left_interfaces_x, right_interfaces_x
     type(subgrid_2x3x2cell_primitive), shared :: left_interfaces_y, right_interfaces_y
     type(subgrid_2x2x3cell_primitive), shared :: left_interfaces_z, right_interfaces_z
     type(subgrid_6x6x6cell_primitive), shared :: local_subgrid
+#if NVAR>5+NENER
+    real(kind=dp), shared :: scalar_subgrid(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
+#endif
+#ifdef MHD
+    ! MHD shared buffers for face-B, edge EMFs, and corner states.
+    type(subgrid_face_b_t), shared :: bf
+    type(subgrid_2x3x3edge_primitive), shared :: emfx
+    type(subgrid_3x2x3edge_primitive), shared :: emfy
+    type(subgrid_3x3x2edge_primitive), shared :: emfz
+    type(subgrid_2x3x3edge_corner), shared :: corner_x
+    type(subgrid_3x2x3edge_corner), shared :: corner_y
+    type(subgrid_3x3x2edge_corner), shared :: corner_z
+#endif
     real(kind=dp) :: dtdx
     integer :: block_idx  ! The index of this block, corresponds to the subgrid to load
     integer :: thread_idx ! The index of this thread within the block
-
-    dtdx = dt/dx
+#ifdef MHD
+    real(kind=dp) :: smallc
+    smallc = sqrt(smallc2)
+#endif
+    dtdx = dt / dx
 
     ! compute the various indices. Note the conversion to zero based indexing
     block_idx = blockIdx%x - 1
@@ -1389,7 +3364,13 @@ contains
     ! =======================================================================
     ! Convert from conserved to primitive variables
     ! =======================================================================
-    call subgrid_conserved_2_primitive(grid, uold, f, constant_gravity, nbor, &
+    call subgrid_conserved_2_primitive(grid, uold, bold, f, constant_gravity, nbor, &
+#if NVAR>5+NENER
+         & scalar_subgrid, &
+#endif
+#ifdef MHD
+         & bf, &
+#endif
          & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
 
     ! =======================================================================
@@ -1397,6 +3378,13 @@ contains
     ! =======================================================================
     ! This will compute the interface states and write them to shared memory
     call trace_3d(local_subgrid, thread_idx, &
+#if NVAR>5+NENER
+         & scalar_subgrid, &
+#endif
+#ifdef MHD
+         & bf, corner_x, corner_y, corner_z, &
+         & smallc, slope_mag, induction, &
+#endif
          & left_interfaces_x, right_interfaces_x, left_interfaces_y, right_interfaces_y, &
          & left_interfaces_z, right_interfaces_z, gamma, smallr, smallc2, dtdx, slope)
 
@@ -1411,29 +3399,52 @@ contains
          & right_interfaces_y, left_interfaces_z, right_interfaces_z, thread_idx, &
          & gamma, smallr, smallc2, riemann)
 
+#ifdef MHD
+    ! Zero Euler fluxes when induction-only CT is active.
+    if (induction) then
+       call zero_euler_fluxes_mhd(left_interfaces_x, left_interfaces_y, left_interfaces_z, thread_idx)
+    endif
+
+    ! 2D EMF solve from the shared edge-corner buffers -> edge-EMF subgrids
+    call cmp_mag_flx_mhd(corner_x, corner_y, corner_z, emfx, emfy, emfz, thread_idx, &
+         & gamma, smallr, smallc, switch_llf_dmin, switch_llf_pmin, riemann2d)
+#endif
+
     ! =======================================================================
     ! Zero fluxes at boundaries with finer levels.
     ! =======================================================================
     if (ilevel < levelmax) then
        call zero_fine_fluxes(local_subgrid, left_interfaces_x, left_interfaces_y, left_interfaces_z, thread_idx)
+#ifdef MHD
+       call zero_fine_emf(local_subgrid, emfx, emfy, emfz, thread_idx)
+#endif
     endif
 
     ! =======================================================================
     ! Update the conserved variables at current level.
     ! =======================================================================
-    call conservative_update(unew, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, head_idx, block_idx, &
+    call conservative_update(unew, bnew, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, &
+#ifdef MHD
+         & emfx, emfy, emfz, &
+#endif
+         & head_idx, block_idx, &
          & thread_idx, dtdx)
 
     ! =======================================================================
     ! Update the conserved variables at coarser level.
     ! =======================================================================
     if (ilevel > levelmin) then
-       call coarse_cell_update(grid, unew, father, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, &
+       call coarse_cell_update(grid, unew, bnew, father, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, &
+#ifdef MHD
+            & emfx, emfy, emfz, &
+#endif
             & head_idx, block_idx, thread_idx, ngridmax, dtdx)
     endif
 
   end subroutine hydro_integrator_kernel
+
 #endif
+
   ! =========================================================================
 
   ! =========================================================================
@@ -1465,11 +3476,78 @@ contains
   end subroutine hydro_crit
   ! =========================================================================
 
+#ifdef MHD
+  attributes(device) subroutine hydro_crit_mhd(bc_lft, bc_mid, bc_rgt, ok, &
+       & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C)
+    real(kind=dp) :: bc_lft(1:3), bc_mid(1:3), bc_rgt(1:3)
+    real(kind=dp), value :: err_grad_b2, floor_b2
+    real(kind=dp), value :: err_grad_A, floor_A
+    real(kind=dp), value :: err_grad_B, floor_B
+    real(kind=dp), value :: err_grad_C, floor_C
+    logical :: ok
+
+    real(kind=8) :: emagg, emagm, emagd
+    real(kind=8) :: pg, pm, pd, vg, vm, vd, cg, cm, cd, error
+    integer :: idim
+
+    ok = .false.
+
+    ! Cell-centred magnetic energy at three stencil points.
+    emagg = 0.0_dp; emagm = 0.0_dp; emagd = 0.0_dp
+    do idim = 1, 3
+       emagg = emagg + 0.5_dp*bc_lft(idim)**2
+       emagm = emagm + 0.5_dp*bc_mid(idim)**2
+       emagd = emagd + 0.5_dp*bc_rgt(idim)**2
+    end do
+
+    ! Magnetic-energy gradient criterion.
+    if (err_grad_b2 >= 0.0_dp) then
+       pg = emagg; pm = emagm; pd = emagd
+       error = 2.0_dp*max( &
+            & abs((pd-pm)/(pd+pm+floor_b2)), &
+            & abs((pm-pg)/(pm+pg+floor_b2)) )
+       if (error > err_grad_b2) ok = .true.
+    endif
+
+    ! Per-component B gradient criteria.
+    if (err_grad_A >= 0.0_dp) then
+       vg = bc_lft(1); vm = bc_mid(1); vd = bc_rgt(1)
+       cg = sqrt(emagg); cm = sqrt(emagm); cd = sqrt(emagd)
+       error = 2.0_dp*max( &
+            & abs((vd-vm)/(cd+cm+floor_A)), &
+            & abs((vm-vg)/(cm+cg+floor_A)) )
+       if (error > err_grad_A) ok = .true.
+    endif
+
+    if (err_grad_B >= 0.0_dp) then
+       vg = bc_lft(2); vm = bc_mid(2); vd = bc_rgt(2)
+       cg = sqrt(emagg); cm = sqrt(emagm); cd = sqrt(emagd)
+       error = 2.0_dp*max( &
+            & abs((vd-vm)/(cd+cm+floor_B)), &
+            & abs((vm-vg)/(cm+cg+floor_B)) )
+       if (error > err_grad_B) ok = .true.
+    endif
+
+    if (err_grad_C >= 0.0_dp) then
+       vg = bc_lft(3); vm = bc_mid(3); vd = bc_rgt(3)
+       cg = sqrt(emagg); cm = sqrt(emagm); cd = sqrt(emagd)
+       error = 2.0_dp*max( &
+            & abs((vd-vm)/(cd+cm+floor_C)), &
+            & abs((vm-vg)/(cm+cg+floor_C)) )
+       if (error > err_grad_C) ok = .true.
+    endif
+
+  end subroutine hydro_crit_mhd
+#endif
+
   ! =========================================================================
-  attributes(global) subroutine hydro_flag_kernel(flag1, grid, nbor, uold, head_idx, num_octs, & 
-       & gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p)
+  attributes(global) subroutine hydro_flag_kernel(flag1, grid, nbor, uold, bold, head_idx, num_octs, &
+       & gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p, &
+       & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C)
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    ! Face-centred B; unused without MHD.
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
     integer(kind=4), device :: flag1(1:twotondim,*)
     integer(kind=4), intent(in), value :: head_idx
@@ -1477,6 +3555,11 @@ contains
     real(kind=dp), intent(in), value :: gamma, smallr, smallc2
     real(kind=dp), intent(in), value :: err_grad_d, floor_d
     real(kind=dp), intent(in), value :: err_grad_p, floor_p
+    ! MHD refinement thresholds (unused when namelist < 0).
+    real(kind=dp), intent(in), value :: err_grad_b2, floor_b2
+    real(kind=dp), intent(in), value :: err_grad_A, floor_A
+    real(kind=dp), intent(in), value :: err_grad_B, floor_B
+    real(kind=dp), intent(in), value :: err_grad_C, floor_C
 
     integer :: cell_idx, oct_idx, block_idx, source_idx, subgrid_idx
     integer :: i, j, k, il, jl, kl, ir, jr, kr
@@ -1484,6 +3567,11 @@ contains
     type(primitive_t) :: prim_lft, prim_mid, prim_rgt
     type(conserved_t) :: cons_lft, cons_mid, cons_rgt
     logical :: ok
+#ifdef MHD
+    ! Cell-centred B for MHD refinement criteria.
+    real(kind=dp) :: bc_lft(1:3), bc_mid(1:3), bc_rgt(1:3)
+    logical :: ok_mhd
+#endif
 
     block_idx = blockIdx%x - 1
 
@@ -1515,6 +3603,14 @@ contains
     cons_mid%momentum_y = uold(cell_idx, 3, oct_idx)
     cons_mid%momentum_z = uold(cell_idx, 4, oct_idx)
     cons_mid%energy     = uold(cell_idx, 5, oct_idx)
+#ifdef MHD
+    cons_mid%Bx = 0.5_dp*(bold(cell_idx,1,oct_idx)+bold(cell_idx,4,oct_idx))
+    cons_mid%By = 0.5_dp*(bold(cell_idx,2,oct_idx)+bold(cell_idx,5,oct_idx))
+    cons_mid%Bz = 0.5_dp*(bold(cell_idx,3,oct_idx)+bold(cell_idx,6,oct_idx))
+    bc_mid(1) = cons_mid%Bx
+    bc_mid(2) = cons_mid%By
+    bc_mid(3) = cons_mid%Bz
+#endif
     prim_mid = conserved_2_primitive(cons_mid, gamma, smallr, smallc2)
 
     ! Loop over dimensions
@@ -1542,6 +3638,14 @@ contains
        cons_lft%momentum_y = uold(icell, 3, source_idx)
        cons_lft%momentum_z = uold(icell, 4, source_idx)
        cons_lft%energy     = uold(icell, 5, source_idx)
+#ifdef MHD
+       cons_lft%Bx = 0.5_dp*(bold(icell,1,source_idx)+bold(icell,4,source_idx))
+       cons_lft%By = 0.5_dp*(bold(icell,2,source_idx)+bold(icell,5,source_idx))
+       cons_lft%Bz = 0.5_dp*(bold(icell,3,source_idx)+bold(icell,6,source_idx))
+       bc_lft(1) = cons_lft%Bx
+       bc_lft(2) = cons_lft%By
+       bc_lft(3) = cons_lft%Bz
+#endif
        prim_lft = conserved_2_primitive(cons_lft, gamma, smallr, smallc2)
 
        ! Right cell
@@ -1553,7 +3657,15 @@ contains
        cons_rgt%momentum_y = uold(icell, 3, source_idx)
        cons_rgt%momentum_z = uold(icell, 4, source_idx)
        cons_rgt%energy     = uold(icell, 5, source_idx)
-       prim_rgt = conserved_2_primitive(cons_rgt, gamma,smallr, smallc2)
+#ifdef MHD
+       cons_rgt%Bx = 0.5_dp*(bold(icell,1,source_idx)+bold(icell,4,source_idx))
+       cons_rgt%By = 0.5_dp*(bold(icell,2,source_idx)+bold(icell,5,source_idx))
+       cons_rgt%Bz = 0.5_dp*(bold(icell,3,source_idx)+bold(icell,6,source_idx))
+       bc_rgt(1) = cons_rgt%Bx
+       bc_rgt(2) = cons_rgt%By
+       bc_rgt(3) = cons_rgt%Bz
+#endif
+       prim_rgt = conserved_2_primitive(cons_rgt, gamma, smallr, smallc2)
 
        ! Check refinement criteria
        call hydro_crit(prim_lft, prim_mid, prim_rgt, ok, err_grad_d, err_grad_p, floor_d, floor_p)
@@ -1561,27 +3673,40 @@ contains
        ! If satisfied set flag1 to 1
        if (ok) flag1(cell_idx, oct_idx) = 1
 
+#ifdef MHD
+       ! MHD refinement on magnetic energy and B-component gradients.
+       call hydro_crit_mhd(bc_lft, bc_mid, bc_rgt, ok_mhd, &
+            & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C)
+       if (ok_mhd) flag1(cell_idx, oct_idx) = 1
+#endif
+
     end do
 
   end subroutine hydro_flag_kernel
   ! =========================================================================~
 
   ! =========================================================================
-  attributes(global) subroutine upload_kernel(grid, father, uold, head_idx, num_octs, &
+  attributes(global) subroutine upload_kernel(grid, father, uold, bold, head_idx, num_octs, &
        & internal_energy, gamma, smallr, smallc2)
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: father(*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
-    real(kind=dp), intent(in), value :: gamma, smallr, smallc2
     logical, intent(in), value :: internal_energy
+    real(kind=dp), intent(in), value :: gamma, smallr, smallc2
 
     integer :: tid, bid, cell_idx, oct_idx
     integer :: ind, father_idx, i, j, k
+    integer :: ivar
+    integer :: idim ! Spatial dimension (face-B restriction / energy split)
+    real(kind=dp) :: eint_sum, ekin, erad, emag ! internal-energy restriction
+    real(kind=dp) :: density, smalle
+#ifdef MHD
+    integer, dimension(1:6,1:4) :: hh ! Child cells lying on each parent face (MHD)
+#endif
     real(kind=dp), parameter :: inv_twotondim = 1.0_dp / real(twotondim, kind=dp)
-    real(kind=dp) :: density, eint, ekin, smalle
-    real(kind=dp) :: density_average, eint_average, ekin_average
 
     ! Thread and block id
     tid = threadIdx%x - 1
@@ -1600,59 +3725,112 @@ contains
     cell_idx = 1 + i + 2*j + 4*k
 
     ! Reset conservative variables
-    uold(cell_idx, 1, father_idx) = 0_dp
-    uold(cell_idx, 2, father_idx) = 0_dp
-    uold(cell_idx, 3, father_idx) = 0_dp
-    uold(cell_idx, 4, father_idx) = 0_dp
-    uold(cell_idx, 5, father_idx) = 0_dp
-
     ! Average children variables
-    do ind = 1, twotondim
-       uold(cell_idx, 1, father_idx) = uold(cell_idx, 1, father_idx) + uold(ind, 1, oct_idx) * inv_twotondim
-       uold(cell_idx, 2, father_idx) = uold(cell_idx, 2, father_idx) + uold(ind, 2, oct_idx) * inv_twotondim
-       uold(cell_idx, 3, father_idx) = uold(cell_idx, 3, father_idx) + uold(ind, 3, oct_idx) * inv_twotondim
-       uold(cell_idx, 4, father_idx) = uold(cell_idx, 4, father_idx) + uold(ind, 4, oct_idx) * inv_twotondim
-       uold(cell_idx, 5, father_idx) = uold(cell_idx, 5, father_idx) + uold(ind, 5, oct_idx) * inv_twotondim
+    do ivar = 1, nvar
+       uold(cell_idx, ivar, father_idx) = 0_dp
+       do ind = 1, twotondim
+          uold(cell_idx, ivar, father_idx) = uold(cell_idx, ivar, father_idx) + uold(ind, ivar, oct_idx) * inv_twotondim
+       end do
     end do
+
+    ! Restrict face-B by averaging child faces on each parent face.
+#ifdef MHD
+    ! Child cells whose low/high face on each axis lies on the corresponding parent face
+    hh(1,1:4) = (/1,3,5,7/) ! low-x face children
+    hh(2,1:4) = (/2,4,6,8/) ! high-x face children
+    hh(3,1:4) = (/1,2,5,6/) ! low-y face children
+    hh(4,1:4) = (/3,4,7,8/) ! high-y face children
+    hh(5,1:4) = (/1,2,3,4/) ! low-z face children
+    hh(6,1:4) = (/5,6,7,8/) ! high-z face children
+
+    ! Reset parent face-B (this refined parent cell)
+    do idim = 1, 6
+       bold(cell_idx, idim, father_idx) = 0_dp
+    end do
+
+    ! Area-average each parent face from the 4 child faces lying on it
+    do idim = 1, ndim
+       ! Low-side face (component idim)
+       do ind = 1, twotondim/2
+          bold(cell_idx, idim, father_idx) = bold(cell_idx, idim, father_idx) &
+               & + bold(hh(2*idim-1,ind), idim, oct_idx) / dble(twotondim/2)
+       end do
+       ! High-side face (component idim+3)
+       do ind = 1, twotondim/2
+          bold(cell_idx, idim+3, father_idx) = bold(cell_idx, idim+3, father_idx) &
+               & + bold(hh(2*idim,ind), idim+3, oct_idx) / dble(twotondim/2)
+       end do
+    end do
+#endif
 
     ! Non-conservative upload
     if (internal_energy) then
-       smalle = smallc2 / gamma / (gamma - 1.0_dp)
-       eint_average = 0_dp
+       smalle = smallc2/gamma/(gamma - 1.0_dp)
+       eint_sum = 0.0_dp
        do ind = 1, twotondim
           ! Compute children density
-          density = max(uold(ind, 1, oct_idx), smallr)
+          density = max(uold(ind,1,oct_idx), smallr)
           ! Compute children kinetic and internal energy
-          ekin = 0.5_dp * uold(ind, 2, oct_idx)**2 / density + &
-               & 0.5_dp * uold(ind, 3, oct_idx)**2 / density + &
-               & 0.5_dp * uold(ind, 4, oct_idx)**2 / density
-          eint = max(uold(ind, 5, oct_idx) - ekin, smalle * density) 
+          ekin = 0.0_dp
+          do idim = 1, 3
+             ekin = ekin + 0.5_dp*uold(ind,idim+1,oct_idx)**2 / density
+          end do
+          emag = 0.0_dp
+#ifdef MHD
+          do idim = 1, 3
+             emag = emag + 0.125_dp*(bold(ind,idim,oct_idx)+bold(ind,idim+3,oct_idx))**2
+          end do
+#endif
+          erad = 0.0_dp
+#if NENER>0
+          do idim = 1, nener
+             erad = erad + uold(ind,5+idim,oct_idx)
+          end do
+#endif
           ! Average children internal energy
-          eint_average = eint_average + eint * inv_twotondim
+          eint_sum = eint_sum + max(uold(ind,5,oct_idx) - ekin - erad - emag, smalle*density)
        end do
        ! Compute father density
-       density_average = max(uold(cell_idx, 1, father_idx), smallr)
+       density = max(uold(cell_idx,1,father_idx), smallr)
        ! Compute father kinetic energy
-       ekin_average = 0.5_dp * uold(cell_idx, 2, father_idx)**2 / density_average + &
-            &         0.5_dp * uold(cell_idx, 3, father_idx)**2 / density_average + &
-            &         0.5_dp * uold(cell_idx, 4, father_idx)**2 / density_average
+       ekin = 0.0_dp
+       do idim = 1, 3
+          ekin = ekin + 0.5_dp*uold(cell_idx,idim+1,father_idx)**2 / density
+       end do
+       emag = 0.0_dp
+#ifdef MHD
+       do idim = 1, 3
+          emag = emag + 0.125_dp*(bold(cell_idx,idim,father_idx)+bold(cell_idx,idim+3,father_idx))**2
+       end do
+#endif
+       erad = 0.0_dp
+#if NENER>0
+       do idim = 1, nener
+          erad = erad + uold(cell_idx,5+idim,father_idx)
+       end do
+#endif
        ! Add father internal energy
-       uold(cell_idx, 5, father_idx) = eint_average + ekin_average
+       uold(cell_idx,5,father_idx) = eint_sum*inv_twotondim + ekin + erad + emag
     end if
 
   end subroutine upload_kernel
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine set_uold_kernel(uold, unew, head_idx, num_octs)
+  attributes(global) subroutine set_uold_kernel(uold, unew, bold, bnew, head_idx, num_octs)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
 
     integer :: block_idx ! The index of this block, corresponds to the oct to load
     integer :: cell_idx ! The index of the cell within the block
     integer :: oct_idx ! The index of the oct  within the block
+#if defined MHD || NVAR>5+NENER
+    integer :: ivar
+#endif
 
     block_idx = blockIdx%x - 1
 
@@ -1670,19 +3848,37 @@ contains
     uold(cell_idx, 4, oct_idx) = unew(cell_idx, 4, oct_idx)
     uold(cell_idx, 5, oct_idx) = unew(cell_idx, 5, oct_idx)
 
+    ! Copy bnew to bold.
+#ifdef MHD
+    do ivar = 1, 6
+       bold(cell_idx, ivar, oct_idx) = bnew(cell_idx, ivar, oct_idx)
+    end do
+#endif
+#if NVAR>5+NENER
+    ! Write back passive scalars advanced by conservative_update.
+    do ivar = 6+nener, nvar
+       uold(cell_idx, ivar, oct_idx) = unew(cell_idx, ivar, oct_idx)
+    end do
+#endif
+
   end subroutine set_uold_kernel
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine set_unew_kernel(uold, unew, head_idx, num_octs)
+  attributes(global) subroutine set_unew_kernel(uold, unew, bold, bnew, head_idx, num_octs)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
 
     integer :: block_idx ! The index of this block, corresponds to the oct to load
     integer :: cell_idx ! The index of the cell within the block
     integer :: oct_idx ! The index of the oct  within the block
+#if defined MHD || NVAR>5+NENER
+    integer :: ivar
+#endif
 
     block_idx = blockIdx%x - 1
 
@@ -1700,12 +3896,24 @@ contains
     unew(cell_idx, 4, oct_idx) = uold(cell_idx, 4, oct_idx)
     unew(cell_idx, 5, oct_idx) = uold(cell_idx, 5, oct_idx)
 
+    ! Copy bold to bnew.
+#ifdef MHD
+    do ivar = 1, 6
+       bnew(cell_idx, ivar, oct_idx) = bold(cell_idx, ivar, oct_idx)
+    end do
+#endif
+#if NVAR>5+NENER
+    ! Seed unew with passive scalars so conservative_update accumulates onto uold.
+    do ivar = 6+nener, nvar
+       unew(cell_idx, ivar, oct_idx) = uold(cell_idx, ivar, oct_idx)
+    end do
+#endif
+
   end subroutine set_unew_kernel
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine sync_hydro(uold, f, constant_gravity, head_idx, num_octs, &
-       & gamma, smallr, smallc2, dt)
+  attributes(global) subroutine sync_hydro(uold, f, constant_gravity, head_idx, num_octs, gamma, smallr, smallc2, dt)
     real(kind=8), device :: constant_gravity(1:3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -1715,8 +3923,7 @@ contains
     real(kind=8), intent(in), value :: dt
 
     integer :: block_idx, cell_idx, oct_idx
-    type(primitive_t) :: prim
-    type(conserved_t) :: cons
+    real(kind=dp) :: rho, mx, my, mz, ener
 
     block_idx = blockIdx%x - 1
 
@@ -1728,36 +3935,26 @@ contains
     ! Compute the cell idx
     cell_idx = threadIdx%x
 
-    ! Collect conservative variables
-    cons%density    = uold(cell_idx, 1, oct_idx)
-    cons%momentum_x = uold(cell_idx, 2, oct_idx)
-    cons%momentum_y = uold(cell_idx, 3, oct_idx)
-    cons%momentum_z = uold(cell_idx, 4, oct_idx)
-    cons%energy     = uold(cell_idx, 5, oct_idx)
-
-    ! Convert to primitive
-    prim = conserved_2_primitive(cons, gamma, smallr, smallc2)
-
-    ! Update velocity
+    ! Apply gravity on conserved variables; internal (and magnetic) energy stays in total E.
+    rho = max(uold(cell_idx, 1, oct_idx), smallr)
+    mx  = uold(cell_idx, 2, oct_idx)
+    my  = uold(cell_idx, 3, oct_idx)
+    mz  = uold(cell_idx, 4, oct_idx)
+    ener = uold(cell_idx, 5, oct_idx) - 0.5_dp*(mx*mx + my*my + mz*mz)/rho
 #ifdef GRAV
-    prim%velocity_x = prim%velocity_x + f(cell_idx, 1, oct_idx) * dt
-    prim%velocity_y = prim%velocity_y + f(cell_idx, 2, oct_idx) * dt
-    prim%velocity_z = prim%velocity_z + f(cell_idx, 3, oct_idx) * dt
+    mx = mx + rho*f(cell_idx, 1, oct_idx)*dt
+    my = my + rho*f(cell_idx, 2, oct_idx)*dt
+    mz = mz + rho*f(cell_idx, 3, oct_idx)*dt
 #else
-    prim%velocity_x = prim%velocity_x + constant_gravity(1) * dt
-    prim%velocity_y = prim%velocity_y + constant_gravity(2) * dt
-    prim%velocity_z = prim%velocity_z + constant_gravity(3) * dt
+    mx = mx + rho*constant_gravity(1)*dt
+    my = my + rho*constant_gravity(2)*dt
+    mz = mz + rho*constant_gravity(3)*dt
 #endif
-
-    ! Convert back to conservative
-    cons = primitive_2_conserved(prim, gamma)
-
-    ! Save to main memory
-    uold(cell_idx, 1, oct_idx) = cons%density
-    uold(cell_idx, 2, oct_idx) = cons%momentum_x
-    uold(cell_idx, 3, oct_idx) = cons%momentum_y
-    uold(cell_idx, 4, oct_idx) = cons%momentum_z
-    uold(cell_idx, 5, oct_idx) = cons%energy
+    ener = ener + 0.5_dp*(mx*mx + my*my + mz*mz)/rho
+    uold(cell_idx, 2, oct_idx) = mx
+    uold(cell_idx, 3, oct_idx) = my
+    uold(cell_idx, 4, oct_idx) = mz
+    uold(cell_idx, 5, oct_idx) = ener
 
   end subroutine sync_hydro
   ! =========================================================================
@@ -1774,10 +3971,7 @@ contains
     real(kind=8), intent(in), value :: dt
 
     integer :: block_idx, cell_idx, oct_idx
-    ! real(kind=8) :: rho_old, rho_new
-    real(kind=dp) :: rho_old_new_ratio_dt    
-    type(primitive_t) :: prim
-    type(conserved_t) :: cons
+    real(kind=dp) :: d, mx, my, mz, e_prim, fact
 
     block_idx = blockIdx%x - 1
 
@@ -1789,41 +3983,26 @@ contains
     ! Compute the cell idx
     cell_idx = threadIdx%x
 
-    ! Collect conservative variables
-    cons%density    = unew(cell_idx, 1, oct_idx)
-    cons%momentum_x = unew(cell_idx, 2, oct_idx)
-    cons%momentum_y = unew(cell_idx, 3, oct_idx)
-    cons%momentum_z = unew(cell_idx, 4, oct_idx)
-    cons%energy     = unew(cell_idx, 5, oct_idx)
-
-    ! Convert to primitive
-    prim = conserved_2_primitive(cons, gamma, smallr, smallc2)
-
-    ! Old and new densities
-    ! rho_old = uold(cell_idx, 1, oct_idx)
-    ! rho_new = unew(cell_idx, 1, oct_idx)
-    rho_old_new_ratio_dt = dt * uold(cell_idx, 1, oct_idx) / unew(cell_idx, 1, oct_idx)
-
-    ! Update velocity
+    ! Apply gravity on unew (conserved variables); internal/magnetic energy and face-B unchanged.
+    d  = max(unew(cell_idx, 1, oct_idx), smallr)
+    mx = unew(cell_idx, 2, oct_idx)
+    my = unew(cell_idx, 3, oct_idx)
+    mz = unew(cell_idx, 4, oct_idx)
+    e_prim = unew(cell_idx, 5, oct_idx) - 0.5_dp*(mx*mx + my*my + mz*mz)/d
+    fact = max(uold(cell_idx, 1, oct_idx), smallr)/d * dt
 #ifdef GRAV
-    prim%velocity_x = prim%velocity_x + f(cell_idx, 1, oct_idx) * rho_old_new_ratio_dt
-    prim%velocity_y = prim%velocity_y + f(cell_idx, 2, oct_idx) * rho_old_new_ratio_dt
-    prim%velocity_z = prim%velocity_z + f(cell_idx, 3, oct_idx) * rho_old_new_ratio_dt
+    mx = mx + d*f(cell_idx, 1, oct_idx)*fact
+    my = my + d*f(cell_idx, 2, oct_idx)*fact
+    mz = mz + d*f(cell_idx, 3, oct_idx)*fact
 #else
-    prim%velocity_x = prim%velocity_x + constant_gravity(1) * rho_old_new_ratio_dt
-    prim%velocity_y = prim%velocity_y + constant_gravity(2) * rho_old_new_ratio_dt
-    prim%velocity_z = prim%velocity_z + constant_gravity(3) * rho_old_new_ratio_dt
+    mx = mx + d*constant_gravity(1)*fact
+    my = my + d*constant_gravity(2)*fact
+    mz = mz + d*constant_gravity(3)*fact
 #endif
-
-    ! Convert back to conservative
-    cons = primitive_2_conserved(prim, gamma)
-
-    ! Save to main memory
-    unew(cell_idx, 1, oct_idx) = cons%density
-    unew(cell_idx, 2, oct_idx) = cons%momentum_x
-    unew(cell_idx, 3, oct_idx) = cons%momentum_y
-    unew(cell_idx, 4, oct_idx) = cons%momentum_z
-    unew(cell_idx, 5, oct_idx) = cons%energy
+    unew(cell_idx, 2, oct_idx) = mx
+    unew(cell_idx, 3, oct_idx) = my
+    unew(cell_idx, 4, oct_idx) = mz
+    unew(cell_idx, 5, oct_idx) = e_prim + 0.5_dp*(mx*mx + my*my + mz*mz)/d
 
   end subroutine grav_hydro
   ! =========================================================================
@@ -1833,16 +4012,18 @@ contains
   ! Modifying data_out, vol_loc, mass_loc, ekin_loc, eint_loc, emag_loc, dt_loc, sound_speed, grav, ctot 
   ! requires changing other files in the code. This should be done if OK for numerical accuracy.
   ! In this case, all the 'd0' should be changed to '_dp'
-  attributes(global) subroutine cmpdt_kernel(grid, uold, f, constant_gravity, &
-      & head_idx, num_octs, data_out, dx, gamma, smallr, smallc2, courant_factor)
+  attributes(global) subroutine cmpdt_kernel(grid, uold, bold, f, constant_gravity, &
+      & head_idx, num_octs, data_out, dx, gamma, smallr, smallc2, courant_factor, induction)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
     real(kind=8), device :: data_out(*) !mass, ekin, eint, emag, dt
     real(kind=dp), value :: dx, gamma, smallr, smallc2, courant_factor
+    logical, value :: induction
 
     type(primitive_t) :: primitive
     type(conserved_t) :: conserved
@@ -1852,6 +4033,14 @@ contains
     integer :: oct_idx ! The index of the oct
     real(kind=8) :: vol_loc, mass_loc, ekin_loc, eint_loc, emag_loc, dt_loc
     real(kind=8) :: sound_speed, grav, ctot
+    real(kind=8) :: a2, b2sq, c2v, pp, rinv
+#ifdef MHD
+    real(kind=dp) :: smallc
+#endif
+
+#ifdef MHD
+    smallc = sqrt(smallc2)
+#endif
 
     ! Thread and block id
     tid = threadIdx%x - 1
@@ -1894,19 +4083,46 @@ contains
           conserved%momentum_z = uold(cell_idx, 4, oct_idx)
           conserved%energy     = uold(cell_idx, 5, oct_idx)
 
-          ! Convert to primitive variables
-          primitive = conserved_2_primitive(conserved, gamma, smallr, smallc2)
-
-          ! Compute extensive quantities
           vol_loc = dx*dx*dx
-          mass_loc = primitive%density*vol_loc
+          mass_loc = conserved%density*vol_loc
           ekin_loc = conserved%energy*vol_loc
-          eint_loc = primitive%pressure/(gamma-1d0)*vol_loc
-          emag_loc = 0_dp
 
-          ! Compute time step
-          sound_speed = sqrt(gamma*primitive%pressure/primitive%density)
-          ctot = (abs(primitive%velocity_x)+abs(primitive%velocity_y)+abs(primitive%velocity_z)+3d0*sound_speed)
+#ifdef MHD
+             ! MHD: cell-centred B + emag-subtracted gas pressure (,
+             ! speed per direction; sound speed (|v_d|+smallc) under induction.
+             conserved%Bx = 0.5_dp*(bold(cell_idx,1,oct_idx)+bold(cell_idx,4,oct_idx))
+             conserved%By = 0.5_dp*(bold(cell_idx,2,oct_idx)+bold(cell_idx,5,oct_idx))
+             conserved%Bz = 0.5_dp*(bold(cell_idx,3,oct_idx)+bold(cell_idx,6,oct_idx))
+             primitive = conserved_2_primitive(conserved, gamma, smallr, smallc2)
+             pp = max(primitive%pressure, primitive%density*smallc2/gamma)
+             b2sq = compute_bsquared(primitive%Bx, primitive%By, primitive%Bz)
+             emag_loc = 0.5d0*b2sq*vol_loc
+             eint_loc = pp/(gamma-1d0)*vol_loc
+             rinv = 1.0d0 / primitive%density
+             a2 = gamma*pp*rinv
+             if (induction) then
+                ctot = abs(primitive%velocity_x)+abs(primitive%velocity_y)+abs(primitive%velocity_z) + 3d0*smallc
+             else
+                c2v = 0.5d0*(b2sq*rinv + a2)
+                ctot = abs(primitive%velocity_x) + sqrt(c2v + sqrt(c2v**2 - a2*primitive%Bx**2*rinv)) &
+                     & + abs(primitive%velocity_y) + sqrt(c2v + sqrt(c2v**2 - a2*primitive%By**2*rinv)) &
+                     & + abs(primitive%velocity_z) + sqrt(c2v + sqrt(c2v**2 - a2*primitive%Bz**2*rinv))
+             endif
+#else
+             ! Convert to primitive variables
+             primitive = conserved_2_primitive(conserved, gamma, smallr, smallc2)
+
+             ! Compute extensive quantities
+             vol_loc = dx*dx*dx
+             mass_loc = primitive%density*vol_loc
+             ekin_loc = conserved%energy*vol_loc
+             eint_loc = primitive%pressure/(gamma-1d0)*vol_loc
+             emag_loc = 0_dp
+
+             ! Compute time step
+             sound_speed = sqrt(gamma*primitive%pressure/primitive%density)
+             ctot = (abs(primitive%velocity_x)+abs(primitive%velocity_y)+abs(primitive%velocity_z)+3d0*sound_speed)
+#endif
 #ifdef GRAV
           grav = abs(f(cell_idx, 1, oct_idx)) + abs(f(cell_idx, 2, oct_idx)) + abs(f(cell_idx, 3, oct_idx))
 #else
@@ -2066,9 +4282,6 @@ contains
 
     integer :: jx, jy, jz, kx, ky, kz, nbor_idx, cell_idx, oct_idx, father_oct_idx, ivar, info
     integer :: nx, ny, nz, neighbor_cell_idx, neighbor_oct_idx
-    real(kind=dp) :: oneovertwotondim
-
-    oneovertwotondim = 1_dp / dble(twotondim)
 
     jx = (ix - 1)/2 ! oct coordinates (zero based)
     jy = (iy - 1)/2
@@ -2125,7 +4338,7 @@ contains
     kz = grid(neighbor_oct_idx)%ckey(3) - 2 * grid(father_oct_idx)%ckey(3)
     cell_idx = 1 + kx + 2*ky + 4*kz
     do ivar = 1, nvar
-       info = atomicadd(unew(cell_idx, ivar, father_oct_idx), -dU(ivar) * oneovertwotondim)
+       info = atomicadd(unew(cell_idx, ivar, father_oct_idx), -dU(ivar) / real(twotondim, kind=dp))
     end do
   end subroutine add_conserved
 
@@ -2285,6 +4498,9 @@ contains
 
    ! =========================================================================
 #ifdef PAPER
+#if NVAR>5+NENER
+#error "hydro_integrator_paper_kernel does not support passive scalars; use the default GPU hydro integrator"
+#endif
    ! > @brief Paper hydro kernel solves HD in planes to minimise usage of shared memory without recomputing anything.
   attributes(global) subroutine hydro_integrator_paper_kernel(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
@@ -2324,6 +4540,7 @@ contains
 
     ! Density and pressure floors
     real(kind=dp), parameter :: smallr = 1d-10
+    real(kind=dp), parameter :: smallc = 1d-10
     real(kind=dp), parameter :: smallc_squared = (1d-10)**2
     real(kind=dp), parameter :: smallp = smallr * smallc_squared
 
@@ -2466,7 +4683,7 @@ contains
              right_state%velocity_z = qR(ix,iy,i_pz)
              right_state%pressure   = qR(ix,iy,i_ene)
 
-             flux_result = riemann_fluxes(left_state, right_state, gamma, riemann)
+             flux_result = riemann_fluxes(left_state, right_state, gamma, smallr, smallc_squared, riemann)
 
              flux(ix,iy,i_rho) = flux_result%density
              flux(ix,iy,i_pz ) = flux_result%momentum_x
@@ -2538,7 +4755,7 @@ contains
              right_state%velocity_z = qR(ix,iy,i_pz)
              right_state%pressure   = qR(ix,iy,i_ene)
 
-             flux_result = riemann_fluxes(left_state, right_state, gamma, riemann)
+             flux_result = riemann_fluxes(left_state, right_state, gamma, smallr, smallc_squared, riemann)
 
              flux(ix,iy,i_rho) = flux_result%density
              flux(ix,iy,i_px ) = flux_result%momentum_x
@@ -2593,7 +4810,7 @@ contains
              right_state%velocity_z = qR(ix,iy,i_pz)
              right_state%pressure   = qR(ix,iy,i_ene)
 
-             flux_result = riemann_fluxes(left_state, right_state, gamma, riemann)
+             flux_result = riemann_fluxes(left_state, right_state, gamma, smallr, smallc_squared, riemann)
 
              flux(ix,iy,i_rho) = flux_result%density
              flux(ix,iy,i_py ) = flux_result%momentum_x

@@ -384,7 +384,7 @@ contains
     real(kind=dp), intent(in), value :: dx, vol_loc, m_refine, mass_sph, var_cut_refine
 
     real(kind=dp) :: monopole, deposit, mask
-    real(kind=dp) :: x_com(3), dg(3), dd(3), vol_cic(8)
+    real(kind=8) :: x_com(3), dg(3), dd(3), vol_cic(8)
     integer :: key_cic(3, 8), ig(3), id(3)
     integer :: oct_idx, cell_idx, idim, ind
     integer :: sum_d, in_vec(3), tgt_cell_local(3)

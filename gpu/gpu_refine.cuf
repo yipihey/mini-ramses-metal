@@ -1,6 +1,6 @@
 module refine_device
-  use amr_parameters, only: dp, ndim, twotondim, nhilbert
-  use hydro_parameters, only: nvar
+  use amr_parameters, only: dp, ndim, twotondim, twondim, nhilbert
+  use hydro_parameters, only: nvar, nener
   use oct_commons, only: oct
   use gpu_utils
   use cudafor
@@ -11,19 +11,613 @@ contains
   include 'gpu_hash.cuf'
   include 'gpu_hilbert.cuf'
 
+#ifdef MHD
+! divB-preserving MHD prolongation.
+
+! MinMod cell-centred slope limiter.
+attributes(device) subroutine compute_limiter_minmod_d(a, w)
+  implicit none
+  real(kind=dp) :: a(0:twondim)
+  real(kind=dp) :: w(1:ndim)
+  integer :: idim
+  real(kind=dp) :: diff_left, diff_right, minmod
+  do idim = 1, ndim
+     diff_left  = 0.5_dp*(a(2*idim)-a(0))
+     diff_right = 0.5_dp*(a(0)-a(2*idim-1))
+     if (diff_left*diff_right <= 0.0_dp) then
+        minmod = 0.0_dp
+     else
+        minmod = min(abs(diff_left),abs(diff_right))*diff_left/abs(diff_left)
+     end if
+     w(idim) = minmod
+  end do
+end subroutine compute_limiter_minmod_d
+
+! Moncen cell-centred slope limiter.
+attributes(device) subroutine compute_limiter_central_d(a, w)
+  implicit none
+  real(kind=dp) :: a(0:twondim)
+  real(kind=dp) :: w(1:ndim)
+  integer :: j, idim, ind, ix, iy, iz
+  real(kind=dp) :: xc(1:twotondim,1:3)
+  real(kind=dp) :: xxc
+  real(kind=dp) :: ac(1:twotondim)
+  real(kind=dp) :: corner, kernel, diff_corner, diff_kernel
+  real(kind=dp) :: max_limiter, min_limiter, limiter
+
+  ! Set position of cell centers relative to grid center
+  do ind = 1, twotondim
+     iz = (ind-1)/4
+     iy = (ind-1-4*iz)/2
+     ix = (ind-1-2*iy-4*iz)
+     xc(ind,1) = (real(ix,kind=dp)-0.5_dp)
+     xc(ind,2) = (real(iy,kind=dp)-0.5_dp)
+     xc(ind,3) = (real(iz,kind=dp)-0.5_dp)
+  end do
+
+  ! Second order central slope
+  do idim = 1, ndim
+     w(idim) = 0.25_dp*(a(2*idim)-a(2*idim-1))
+  end do
+
+  ! Compute corner interpolated values
+  do ind = 1, twotondim
+     ac(ind) = a(0)
+  end do
+  do idim = 1, ndim
+     do ind = 1, twotondim
+        xxc = xc(ind,idim)
+        corner = ac(ind) + 2.0_dp*w(idim)*xxc
+        ac(ind) = corner
+     end do
+  end do
+
+  ! Compute max of corners
+  corner = ac(1)
+  do j = 2, twotondim
+     corner = max(corner, ac(j))
+  end do
+  ! Compute max of gradient kernel
+  kernel = a(1)
+  do j = 2, twondim
+     kernel = max(kernel, a(j))
+  end do
+  diff_kernel = a(0) - kernel
+  diff_corner = a(0) - corner
+  max_limiter = 0.0_dp
+  if (diff_kernel*diff_corner > 0.0_dp) then
+     max_limiter = min(1.0_dp, diff_kernel/diff_corner)
+  end if
+
+  ! Compute min of corners
+  corner = ac(1)
+  do j = 2, twotondim
+     corner = min(corner, ac(j))
+  end do
+  ! Compute min of gradient kernel
+  kernel = a(1)
+  do j = 2, twondim
+     kernel = min(kernel, a(j))
+  end do
+  diff_kernel = a(0) - kernel
+  diff_corner = a(0) - corner
+  min_limiter = 0.0_dp
+  if (diff_kernel*diff_corner > 0.0_dp) then
+     min_limiter = min(1.0_dp, diff_kernel/diff_corner)
+  end if
+
+  ! Compute limiter and correct gradient
+  limiter = min(min_limiter, max_limiter)
+  do idim = 1, ndim
+     w(idim) = w(idim)*limiter
+  end do
+end subroutine compute_limiter_central_d
+
+! Central cell-centred slope.
+attributes(device) subroutine compute_central_d(a, w)
+  implicit none
+  real(kind=dp) :: a(0:twondim)
+  real(kind=dp) :: w(1:ndim)
+  integer :: idim
+  do idim = 1, ndim
+     w(idim) = 0.25_dp*(a(2*idim)-a(2*idim-1))
+  end do
+end subroutine compute_central_d
+
+! 2D TVD face-slope limiter (interpol_type selects mode).
+attributes(device) subroutine compute_2d_tvd_d(b, s, interpol_type)
+  implicit none
+  real(kind=dp) :: b(0:4)
+  real(kind=dp) :: s(1:2)
+  integer, value :: interpol_type
+  real(kind=dp) :: dsgn, dlim, dcen, dlft, drgt, slop, rtype
+
+  if (interpol_type == 3) then
+     dlft = 0.5_dp*(b(0) - b(1))
+     drgt = 0.5_dp*(b(2) - b(0))
+     s(1) = dlft + drgt
+     dlft = 0.5_dp*(b(0) - b(3))
+     drgt = 0.5_dp*(b(4) - b(0))
+     s(2) = dlft + drgt
+     return
+  end if
+
+  rtype = real(interpol_type, kind=dp)
+
+  dlft = rtype*(b(0) - b(1))
+  drgt = rtype*(b(2) - b(0))
+  dcen = 0.5_dp*(dlft+drgt)/rtype
+  dsgn = sign(1.0_dp, dcen)
+  slop = min(abs(dlft),abs(drgt))
+  dlim = slop
+  if ((dlft*drgt) <= 0.0_dp) dlim = 0.0_dp
+  s(1) = dsgn*min(dlim,abs(dcen))
+
+  dlft = rtype*(b(0) - b(3))
+  drgt = rtype*(b(4) - b(0))
+  dcen = 0.5_dp*(dlft+drgt)/rtype
+  dsgn = sign(1.0_dp, dcen)
+  slop = min(abs(dlft),abs(drgt))
+  dlim = slop
+  if ((dlft*drgt) <= 0.0_dp) dlim = 0.0_dp
+  s(2) = dsgn*min(dlim,abs(dcen))
+end subroutine compute_2d_tvd_d
+
+! TVD interpolation of fine B onto coarse side faces.
+attributes(device) subroutine interpol_faces_d(B1, u, v, w, interpol_type)
+  implicit none
+  real(kind=dp) :: B1(0:twondim,1:6)
+  real(kind=dp) :: u(-1:1,0:1,0:1)
+  real(kind=dp) :: v(0:1,-1:1,0:1)
+  real(kind=dp) :: w(0:1,0:1,-1:1)
+  integer, value :: interpol_type
+  integer :: i, j, k
+  real(kind=dp) :: b(0:4)
+  real(kind=dp) :: s(1:2)
+
+  ! Left face along direction x (interpolate Bx)
+  b(0) = B1(0,1); b(1) = B1(3,1); b(2) = B1(4,1); b(3) = B1(5,1); b(4) = B1(6,1)
+  s(1:2) = 0.0_dp
+  if (interpol_type > 0) call compute_2d_tvd_d(b, s, interpol_type)
+  do j = 0, 1
+  do k = 0, 1
+     u(-1,j,k) = b(0) + 0.5_dp*s(1)*(real(j,kind=dp)-0.5_dp) + 0.5_dp*s(2)*(real(k,kind=dp)-0.5_dp)
+  end do
+  end do
+
+  ! Right face along direction x (interpolate Bx)
+  b(0) = B1(0,4); b(1) = B1(3,4); b(2) = B1(4,4); b(3) = B1(5,4); b(4) = B1(6,4)
+  s(1:2) = 0.0_dp
+  if (interpol_type > 0) call compute_2d_tvd_d(b, s, interpol_type)
+  do j = 0, 1
+  do k = 0, 1
+     u(+1,j,k) = b(0) + 0.5_dp*s(1)*(real(j,kind=dp)-0.5_dp) + 0.5_dp*s(2)*(real(k,kind=dp)-0.5_dp)
+  end do
+  end do
+
+  ! Left face along direction y (interpolate By)
+  b(0) = B1(0,2); b(1) = B1(1,2); b(2) = B1(2,2); b(3) = B1(5,2); b(4) = B1(6,2)
+  s(1:2) = 0.0_dp
+  if (interpol_type > 0) call compute_2d_tvd_d(b, s, interpol_type)
+  do i = 0, 1
+  do k = 0, 1
+     v(i,-1,k) = b(0) + 0.5_dp*s(1)*(real(i,kind=dp)-0.5_dp) + 0.5_dp*s(2)*(real(k,kind=dp)-0.5_dp)
+  end do
+  end do
+
+  ! Right face along direction y (interpolate By)
+  b(0) = B1(0,5); b(1) = B1(1,5); b(2) = B1(2,5); b(3) = B1(5,5); b(4) = B1(6,5)
+  s(1:2) = 0.0_dp
+  if (interpol_type > 0) call compute_2d_tvd_d(b, s, interpol_type)
+  do i = 0, 1
+  do k = 0, 1
+     v(i,+1,k) = b(0) + 0.5_dp*s(1)*(real(i,kind=dp)-0.5_dp) + 0.5_dp*s(2)*(real(k,kind=dp)-0.5_dp)
+  end do
+  end do
+
+  ! Left face along direction z (interpolate Bz)
+  b(0) = B1(0,3); b(1) = B1(1,3); b(2) = B1(2,3); b(3) = B1(3,3); b(4) = B1(4,3)
+  s(1:2) = 0.0_dp
+  if (interpol_type > 0) call compute_2d_tvd_d(b, s, interpol_type)
+  do i = 0, 1
+  do j = 0, 1
+     w(i,j,-1) = b(0) + 0.5_dp*s(1)*(real(i,kind=dp)-0.5_dp) + 0.5_dp*s(2)*(real(j,kind=dp)-0.5_dp)
+  end do
+  end do
+
+  ! Right face along direction z (interpolate Bz)
+  b(0) = B1(0,6); b(1) = B1(1,6); b(2) = B1(2,6); b(3) = B1(3,6); b(4) = B1(4,6)
+  s(1:2) = 0.0_dp
+  if (interpol_type > 0) call compute_2d_tvd_d(b, s, interpol_type)
+  do i = 0, 1
+  do j = 0, 1
+     w(i,j,+1) = b(0) + 0.5_dp*s(1)*(real(i,kind=dp)-0.5_dp) + 0.5_dp*s(2)*(real(j,kind=dp)-0.5_dp)
+  end do
+  end do
+end subroutine interpol_faces_d
+
+! Copy refined sibling face-B from neighbour.
+attributes(device) subroutine copy_from_refined_faces_d(B3, refined, u, v, w)
+  implicit none
+  real(kind=dp) :: B3(1:twondim,1:twotondim,1:6)
+  logical :: refined(1:twondim)
+  real(kind=dp) :: u(-1:1,0:1,0:1)
+  real(kind=dp) :: v(0:1,-1:1,0:1)
+  real(kind=dp) :: w(0:1,0:1,-1:1)
+  integer :: i, j, k, ind
+
+  ! Left face along direction x
+  do j = 0, 1
+  do k = 0, 1
+     ind = 1 + 1 + j*2 + k*4
+     if (refined(1)) u(-1,j,k) = B3(1,ind,4)
+  end do
+  end do
+  ! Right face along direction x
+  do j = 0, 1
+  do k = 0, 1
+     ind = 1 + 0 + j*2 + k*4
+     if (refined(2)) u(+1,j,k) = B3(2,ind,1)
+  end do
+  end do
+
+  ! Left face along direction y
+  do i = 0, 1
+  do k = 0, 1
+     ind = 1 + i + 1*2 + k*4
+     if (refined(3)) v(i,-1,k) = B3(3,ind,5)
+  end do
+  end do
+  ! Right face along direction y
+  do i = 0, 1
+  do k = 0, 1
+     ind = 1 + i + 0*2 + k*4
+     if (refined(4)) v(i,+1,k) = B3(4,ind,2)
+  end do
+  end do
+
+  ! Left face along direction z
+  do i = 0, 1
+  do j = 0, 1
+     ind = 1 + i + j*2 + 1*4
+     if (refined(5)) w(i,j,-1) = B3(5,ind,6)
+  end do
+  end do
+  ! Right face along direction z
+  do i = 0, 1
+  do j = 0, 1
+     ind = 1 + i + j*2 + 0*4
+     if (refined(6)) w(i,j,+1) = B3(6,ind,3)
+  end do
+  end do
+end subroutine copy_from_refined_faces_d
+
+! Reconstruct interior face-B with divB=0 constraint.
+attributes(device) subroutine cmp_central_faces_d(u, v, w)
+  implicit none
+  real(kind=dp) :: u(-1:1,0:1,0:1)
+  real(kind=dp) :: v(0:1,-1:1,0:1)
+  real(kind=dp) :: w(0:1,0:1,-1:1)
+  integer :: i, j, k, ii, jj, kk
+  real(kind=dp) :: UXX, VYY, WZZ, UXYZ, VXYZ, WXYZ
+
+  UXX = 0.0_dp; VYY = 0.0_dp; WZZ = 0.0_dp
+  UXYZ = 0.0_dp; VXYZ = 0.0_dp; WXYZ = 0.0_dp
+
+  do i = 0, 1
+  do j = 0, 1
+  do k = 0, 1
+     ii = 2*i-1
+     jj = 2*j-1
+     kk = 2*k-1
+     UXX  = UXX  + (real(ii*jj,kind=dp)*v(i,jj,k)+real(ii*kk,kind=dp)*w(i,j,kk))*0.125_dp
+     VYY  = VYY  + (real(jj*kk,kind=dp)*w(i,j,kk)+real(ii*jj,kind=dp)*u(ii,j,k))*0.125_dp
+     WZZ  = WZZ  + (real(ii*kk,kind=dp)*u(ii,j,k)+real(jj*kk,kind=dp)*v(i,jj,k))*0.125_dp
+     UXYZ = UXYZ + (real(ii*jj*kk,kind=dp)*u(ii,j,k))*0.125_dp
+     VXYZ = VXYZ + (real(ii*jj*kk,kind=dp)*v(i,jj,k))*0.125_dp
+     WXYZ = WXYZ + (real(ii*jj*kk,kind=dp)*w(i,j,kk))*0.125_dp
+  end do
+  end do
+  end do
+
+  ! Bx on central faces
+  do j = 0, 1
+  do k = 0, 1
+     u(0,j,k) = 0.5_dp*(u(-1,j,k)+u(+1,j,k)) + UXX &
+          &   + (real(k,kind=dp)-0.5_dp)*VXYZ + (real(j,kind=dp)-0.5_dp)*WXYZ
+  end do
+  end do
+  ! By on central faces
+  do i = 0, 1
+  do k = 0, 1
+     v(i,0,k) = 0.5_dp*(v(i,-1,k)+v(i,+1,k)) + VYY &
+          &   + (real(i,kind=dp)-0.5_dp)*WXYZ + (real(k,kind=dp)-0.5_dp)*UXYZ
+  end do
+  end do
+  ! Bz on central faces
+  do i = 0, 1
+  do j = 0, 1
+     w(i,j,0) = 0.5_dp*(w(i,j,-1)+w(i,j,+1)) + WZZ &
+          &   + (real(j,kind=dp)-0.5_dp)*UXYZ + (real(i,kind=dp)-0.5_dp)*VXYZ
+  end do
+  end do
+end subroutine cmp_central_faces_d
+
+! Balsara constrained face-B prolongation.
+attributes(device) subroutine interpol_mag_d(B1, B2, B3, refined, interpol_type)
+  implicit none
+  real(kind=dp) :: B1(0:twondim,1:6)
+  real(kind=dp) :: B2(1:twotondim,1:6)
+  real(kind=dp) :: B3(1:twondim,1:twotondim,1:6)
+  logical :: refined(1:twondim)
+  integer, value :: interpol_type
+  integer :: i, j, k, ind
+  real(kind=dp) :: u(-1:1,0:1,0:1)
+  real(kind=dp) :: v(0:1,-1:1,0:1)
+  real(kind=dp) :: w(0:1,0:1,-1:1)
+
+  ! Compute interpolated fine B over coarse side faces
+  call interpol_faces_d(B1, u, v, w, interpol_type)
+  ! Get fine B from refined faces, if any
+  call copy_from_refined_faces_d(B3, refined, u, v, w)
+  ! Compute interpolated fine B inside coarse cell
+  call cmp_central_faces_d(u, v, w)
+
+  ! Scatter results onto the 8 children's 6 face-B slots
+  do i = 0, 1
+  do j = 0, 1
+  do k = 0, 1
+     ind = 1 + i + 2*j + 4*k
+     B2(ind,1) = u(i-1,j,k)
+     B2(ind,4) = u(i,j,k)
+     B2(ind,2) = v(i,j-1,k)
+     B2(ind,5) = v(i,j,k)
+     B2(ind,3) = w(i,j,k-1)
+     B2(ind,6) = w(i,j,k)
+  end do
+  end do
+  end do
+end subroutine interpol_mag_d
+
+! Constrained MHD prolongation of hydro and face-B.
+
+attributes(device) subroutine interpol_mhd_d(u1, u2, B1, B2, B3, refined, &
+     & interpol_var, interpol_type, smallr)
+  implicit none
+  real(kind=dp) :: u1(0:twondim,1:nvar)
+  real(kind=dp) :: u2(1:twotondim,1:nvar)
+  real(kind=dp) :: B1(0:twondim,1:6)
+  real(kind=dp) :: B2(1:twotondim,1:6)
+  real(kind=dp) :: B3(1:twondim,1:twotondim,1:6)
+  logical :: refined(1:twondim)
+  integer, value :: interpol_var, interpol_type
+  real(kind=dp), value :: smallr
+  integer :: irad
+  integer :: j, ivar, idim, ind, ix, iy, iz
+  real(kind=dp) :: xc(1:twotondim,1:3)
+  real(kind=dp) :: a(0:twondim)
+  real(kind=dp) :: ww(1:ndim)
+  real(kind=dp) :: ekin, emag, erad
+
+  ! Set position of cell centers relative to grid center
+  do ind = 1, twotondim
+     iz = (ind-1)/4
+     iy = (ind-1-4*iz)/2
+     ix = (ind-1-2*iy-4*iz)
+     xc(ind,1) = (real(ix,kind=dp)-0.5_dp)
+     xc(ind,2) = (real(iy,kind=dp)-0.5_dp)
+     xc(ind,3) = (real(iz,kind=dp)-0.5_dp)
+  end do
+
+  ! If necessary, convert father total energy into internal energy
+  if (interpol_var == 1) then
+     do j = 0, twondim
+        ekin = 0.0_dp
+        do idim = 1, 3
+           ekin = ekin + 0.5_dp*u1(j,idim+1)**2/max(u1(j,1),smallr)
+        end do
+        emag = 0.0_dp
+        do idim = 1, 3
+           emag = emag + 0.125_dp*(B1(j,idim)+B1(j,idim+3))**2
+        end do
+        erad = 0.0_dp
+        do irad = 1, nener
+           erad = erad + u1(j,5+irad)
+        end do
+        u1(j,5) = u1(j,5) - ekin - emag - erad
+     end do
+  end if
+
+  ! Cell-centred hydro variables (B handled on faces).
+  ! nvar+3-ndim collapses to nvar, so only the hydro slots (and passive
+  ! scalars) are interpolated here; cell-centred B comes from interpol_mag.
+  do ivar = 1, nvar
+     ! Load father variable
+     do j = 0, twondim
+        a(j) = u1(j,ivar)
+     end do
+     ! Reset gradient
+     ww(1:ndim) = 0.0_dp
+     ! Compute gradient with chosen limiter
+     if (interpol_type == 1) call compute_limiter_minmod_d(a, ww)
+     if (interpol_type == 2) call compute_limiter_central_d(a, ww)
+     if (interpol_type == 3) call compute_central_d(a, ww)
+     ! Interpolate over children cells
+     do ind = 1, twotondim
+        u2(ind,ivar) = a(0)
+        do idim = 1, ndim
+           u2(ind,ivar) = u2(ind,ivar) + ww(idim)*xc(ind,idim)
+        end do
+     end do
+  end do
+
+  ! Interpolate face-centred MHD variables (Balsara constrained)
+  call interpol_mag_d(B1, B2, B3, refined, interpol_type)
+
+  ! If necessary, convert children internal energy into total energy
+  if (interpol_var == 1) then
+     do ind = 1, twotondim
+        ekin = 0.0_dp
+        do idim = 1, 3
+           ekin = ekin + 0.5_dp*u2(ind,idim+1)**2/max(u2(ind,1),smallr)
+        end do
+        emag = 0.0_dp
+        do idim = 1, 3
+           emag = emag + 0.125_dp*(B2(ind,idim)+B2(ind,idim+3))**2
+        end do
+        erad = 0.0_dp
+        do irad = 1, nener
+           erad = erad + u2(ind,5+irad)
+        end do
+        u2(ind,5) = u2(ind,5) + ekin + emag + erad
+     end do
+  end if
+end subroutine interpol_mhd_d
+
+! Gather coarse parent stencil for MHD prolongation.
+attributes(device) subroutine gather_twondim_parent_stencil( &
+     & grid, uold, bold, hash_key, hash_val, hash_size, ckey_max, key_off, &
+     & box_ckey_min, box_ckey_max, periodic, ilev_child, chkey, central_idx, central_cell, u1, B1, B3, refined)
+  implicit none
+  type(oct), device :: grid(*)
+  real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+  real(kind=dp), device :: bold(1:twotondim,1:6,*)
+  integer(kind=8), device :: hash_key(*)
+  integer(kind=4), device :: hash_val(*)
+  integer(kind=4), value :: hash_size
+  integer(kind=4), device :: ckey_max(*)
+  integer(kind=8), device :: key_off(*)
+  integer(kind=4), device :: box_ckey_min(1:ndim,*)
+  integer(kind=4), device :: box_ckey_max(1:ndim,*)
+  logical, device :: periodic(1:3)
+  integer(kind=4), value :: ilev_child
+  integer(kind=4), value :: central_idx, central_cell
+  integer(kind=4) :: chkey(1:ndim)
+  real(kind=dp) :: u1(0:twondim,1:nvar)
+  real(kind=dp) :: B1(0:twondim,1:6)
+  real(kind=dp) :: B3(1:twondim,1:twotondim,1:6)
+  logical :: refined(1:twondim)
+
+  integer(kind=8) :: key, offset, ix, iy, iz, nx
+  integer :: inbor, idim, idn, ivar, ib, ind, pidx, cidx, pcell, ilev_par
+  integer :: nkey(1:ndim), fkey(1:ndim), bit(1:ndim)
+
+  ilev_par = ilev_child - 1
+
+  ! --- Central parent cell (inbor=0): the father cell being refined ---
+  ! Use the caller's resident father directly; re-deriving it via hash_get can
+  ! miss and read element 0 (uninitialised) on a coarse-fine ghost edge.
+  pcell = central_cell
+  pidx  = central_idx
+  do ivar = 1, nvar
+     u1(0,ivar) = uold(pcell,ivar,pidx)
+  end do
+  do ib = 1, 6
+     B1(0,ib) = bold(pcell,ib,pidx)
+  end do
+
+  ! --- Neighbouring father cells (inbor=1..twondim) + refined-sibling b3 ---
+  ! shift(:,inbor): 1->(-1,0,0) 2->(+1,0,0) 3->(0,-1,0) 4->(0,+1,0) 5->(0,0,-1)
+  ! Neighbour offset mapping for parent stencil.
+  do inbor = 1, twondim
+     refined(inbor) = .false.
+     do idim = 1, ndim
+        nkey(idim) = chkey(idim)
+     end do
+     idn = (inbor+1)/2
+     if (mod(inbor,2) == 1) then
+        nkey(idn) = chkey(idn) - 1
+     else
+        nkey(idn) = chkey(idn) + 1
+     end if
+     ! Periodic boundary conditions at the child level
+     do idim = 1, ndim
+        if (periodic(idim)) then
+           if (nkey(idim) <  box_ckey_min(idim,ilev_child)) nkey(idim) = box_ckey_max(idim,ilev_child) - 1
+           if (nkey(idim) >= box_ckey_max(idim,ilev_child)) nkey(idim) = box_ckey_min(idim,ilev_child)
+        end if
+     end do
+     do idim = 1, ndim
+        fkey(idim) = nkey(idim)/2
+        bit(idim)  = nkey(idim) - 2*fkey(idim)
+     end do
+     pcell = 1 + bit(1) + 2*bit(2) + 4*bit(3)
+     ix = int(fkey(1),kind=8); iy = int(fkey(2),kind=8); iz = int(fkey(3),kind=8)
+     nx = int(ckey_max(ilev_par),kind=8); offset = key_off(ilev_par)
+     key = offset + ix + iy*nx + iz*nx*nx
+     pidx = hash_get(hash_key, hash_val, hash_size, key)
+     if (pidx > 0) then
+        do ivar = 1, nvar
+           u1(inbor,ivar) = uold(pcell,ivar,pidx)
+        end do
+        do ib = 1, 6
+           B1(inbor,ib) = bold(pcell,ib,pidx)
+        end do
+        ! Refined-neighbour child oct (if already in the hash table)
+        if (grid(pidx)%refined(pcell)) then
+           ix = int(nkey(1),kind=8); iy = int(nkey(2),kind=8); iz = int(nkey(3),kind=8)
+           nx = int(ckey_max(ilev_child),kind=8); offset = key_off(ilev_child)
+           key = offset + ix + iy*nx + iz*nx*nx
+           cidx = hash_get(hash_key, hash_val, hash_size, key)
+           if (cidx > 0) then
+              refined(inbor) = .true.
+              do ib = 1, 6
+                 do ind = 1, twotondim
+                    B3(inbor,ind,ib) = bold(ind,ib,cidx)
+                 end do
+              end do
+           end if
+        end if
+     else
+        ! Defensive: a missing neighbour father reuses the central cell value
+        ! Zero gradient at domain boundary.
+        do ivar = 1, nvar
+           u1(inbor,ivar) = u1(0,ivar)
+        end do
+        do ib = 1, 6
+           B1(inbor,ib) = B1(0,ib)
+        end do
+     end if
+  end do
+end subroutine gather_twondim_parent_stencil
+#endif
+
   ! =========================================================================
-  attributes(device) subroutine make_new_oct(grid, flag1, uold, f, phi, phi_old, ifree, oct_idx, cell_idx)
+  attributes(device) subroutine make_new_oct(grid, flag1, uold, bold, f, phi, phi_old, ifree, oct_idx, cell_idx, &
+       & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
+       & interpol_var, interpol_type, smallr)
     use amr_parameters, only: ndim
     type(oct), device :: grid(*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: phi(1:twotondim,*)
     real(kind=dp), device :: phi_old(1:twotondim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: flag1(1:twotondim,*)
     integer, device :: ifree
     integer, value :: oct_idx, cell_idx
+    integer(kind=8), device :: hash_key(*)
+    integer(kind=4), device :: hash_val(*)
+    integer(kind=4), value :: hash_size
+    integer(kind=4), device :: ckey_max(*)
+    integer(kind=8), device :: key_off(*)
+    integer(kind=4), device :: box_ckey_min(1:ndim,*)
+    integer(kind=4), device :: box_ckey_max(1:ndim,*)
+    logical, device :: periodic(1:3)
+    integer(kind=4), value :: interpol_var, interpol_type
+    real(kind=dp), value :: smallr
 
     integer(kind=4) :: i, j, k, ind, child_idx, ilevel
+#ifdef MHD
+    integer(kind=4) :: ivar
+    ! Prolongation scratch for parent stencil and children.
+    real(kind=dp) :: u1(0:twondim,1:nvar)
+    real(kind=dp) :: u2(1:twotondim,1:nvar)
+    real(kind=dp) :: b1(0:twondim,1:6)
+    real(kind=dp) :: b2(1:twotondim,1:6)
+    real(kind=dp) :: b3(1:twondim,1:twotondim,1:6)
+    logical :: refined(1:twondim)
+#endif
     integer(kind=4), dimension(1:ndim) :: ckey
     integer(kind=8) :: hkey
 
@@ -53,6 +647,25 @@ contains
     hkey = hilbert_key(ckey, ilevel - 1)
     grid(child_idx)%hkey(1) = hkey
 
+#ifdef MHD
+    ! divB-preserving MHD prolongation.
+    ! Gather the 7-point coarse stencil + refined-sibling face-B, interpolate
+    ! hydro + face-B together (Balsara 2001), and scatter all nvar + 6 child
+
+    call gather_twondim_parent_stencil(grid, uold, bold, hash_key, hash_val, hash_size, &
+         & ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, ilevel, ckey, oct_idx, cell_idx, u1, b1, b3, refined)
+    call interpol_mhd_d(u1, u2, b1, b2, b3, refined, interpol_var, interpol_type, smallr)
+    do ivar = 1, nvar
+       do ind = 1, twotondim
+          uold(ind,ivar,child_idx) = u2(ind,ivar)
+       end do
+    end do
+    do ivar = 1, 6
+       do ind = 1, twotondim
+          bold(ind,ivar,child_idx) = b2(ind,ivar)
+       end do
+    end do
+#else
 #ifdef HYDRO
     ! Straight injection for hydro variables
     do ind = 1, twotondim
@@ -62,6 +675,7 @@ contains
        uold(ind,4,child_idx) = uold(cell_idx,4,oct_idx)
        uold(ind,5,child_idx) = uold(cell_idx,5,oct_idx)
     end do
+#endif
 #endif
 
 #ifdef GRAV
@@ -79,16 +693,30 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine refine_kernel(grid, flag1, uold, f, phi, phi_old, ifree, head_idx, num_octs)
+  attributes(global) subroutine refine_kernel(grid, flag1, uold, bold, f, phi, phi_old, ifree, head_idx, num_octs, &
+       & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
+       & interpol_var, interpol_type, smallr)
     type(oct), device :: grid(*)
     integer, device :: flag1(1:twotondim,*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: phi(1:twotondim,*)
     real(kind=dp), device :: phi_old(1:twotondim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer, device :: ifree
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
+    ! Parent stencil for MHD prolongation.
+    integer(kind=8), device :: hash_key(*)
+    integer(kind=4), device :: hash_val(*)
+    integer(kind=4), intent(in), value :: hash_size
+    integer(kind=4), device :: ckey_max(*)
+    integer(kind=8), device :: key_off(*)
+    integer(kind=4), device :: box_ckey_min(1:ndim,*)
+    integer(kind=4), device :: box_ckey_max(1:ndim,*)
+    logical, device :: periodic(1:3)
+    integer(kind=4), intent(in), value :: interpol_var, interpol_type
+    real(kind=dp), intent(in), value :: smallr
 
     integer :: block_idx, oct_idx, cell_idx
     logical :: flagged, refined
@@ -109,7 +737,9 @@ contains
 
     ! Create new oct
     if (flagged .and. .not. refined) then
-       call make_new_oct(grid, flag1, uold, f, phi, phi_old, ifree, oct_idx, cell_idx)
+       call make_new_oct(grid, flag1, uold, bold, f, phi, phi_old, ifree, oct_idx, cell_idx, &
+            & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
+            & interpol_var, interpol_type, smallr)
        grid(oct_idx)%refined(cell_idx) = .true.
     endif
 
@@ -559,7 +1189,7 @@ contains
 
     !$acc do seq unroll(8)
     do i = i0,i1,di
-      hkeys(i) = grid(swap_global(i))%hkey(1) 
+      hkeys(i) = grid(swap_global(i))%hkey(1)
     end do
 
   end subroutine gather_keys_2
@@ -879,21 +1509,25 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine sort_gather_hydro(unew, uold, swap_global, head_idx, num_octs)
+  attributes(global) subroutine sort_gather_hydro(unew, uold, bnew, bold, swap_global, head_idx, num_octs)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: swap_global(*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
 
-    call sort_gather_hydro_impl(unew, uold, swap_global, head_idx, num_octs)
+    call sort_gather_hydro_impl(unew, uold, bnew, bold, swap_global, head_idx, num_octs)
 
   end subroutine sort_gather_hydro
 
   ! =========================================================================
-  attributes(device) subroutine sort_gather_hydro_impl(unew, uold, swap_global, head_idx, num_octs)
+  attributes(device) subroutine sort_gather_hydro_impl(unew, uold, bnew, bold, swap_global, head_idx, num_octs)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: swap_global(*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_octs
@@ -918,6 +1552,13 @@ contains
     do ivar = 1, nvar
        unew(cell_idx, ivar, oct_idx) = uold(cell_idx, ivar, old_oct_idx)
     end do
+
+#ifdef MHD
+    ! Gather bold into bnew
+    do ivar = 1, 6
+       bnew(cell_idx, ivar, oct_idx) = bold(cell_idx, ivar, old_oct_idx)
+    end do
+#endif
 
   end subroutine sort_gather_hydro_impl
   ! =========================================================================
@@ -1392,10 +2033,10 @@ contains
 
   ! =========================================================================
   attributes(grid_global) subroutine make_cache_insert_ghost_octs(grid, flag1, &
-       & uold, f, phi, phi_old, swap_local, prefix_sum, father, nbor, hash_key, &
+       & uold, bold, f, phi, phi_old, swap_local, prefix_sum, father, nbor, hash_key, &
        & hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, &
        & periodic, ngridmax, ifree_cache, input_ind, head_idx, &
-       & num_subgrids)
+       & num_subgrids, interpol_var, interpol_type, smallr)
 
     use cooperative_groups
 
@@ -1405,6 +2046,7 @@ contains
     real(kind=dp), device :: phi(1:twotondim,*)
     real(kind=dp), device :: phi_old(1:twotondim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: flag1(1:twotondim,*)
     integer(kind=4), device :: swap_local(*)
     integer(kind=4), device :: prefix_sum(*)
@@ -1423,6 +2065,8 @@ contains
     integer(kind=4), intent(in), value :: input_ind
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_subgrids
+    integer(kind=4), intent(in), value :: interpol_var, interpol_type
+    real(kind=dp), intent(in), value :: smallr
     integer(kind=4) :: num_octs
 
     type(grid_group) :: gg
@@ -1436,9 +2080,9 @@ contains
     call syncthreads(gg)
 
     ! Make new ghost octs in cache
-    call make_cache_octs_impl(grid, flag1, uold, f, phi, phi_old, swap_local, father, nbor, &
+    call make_cache_octs_impl(grid, flag1, uold, bold, f, phi, phi_old, swap_local, father, nbor, &
         & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-        & ngridmax, ifree_cache, num_octs, input_ind)
+        & ngridmax, ifree_cache, num_octs, input_ind, interpol_var, interpol_type, smallr)
     call syncthreads(gg)
 
     ! Insert new octs in hash table
@@ -1455,14 +2099,15 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(global) subroutine make_cache_octs(grid, flag1, uold, f, phi, phi_old, swap_local, father, nbor, &
+  attributes(global) subroutine make_cache_octs(grid, flag1, uold, bold, f, phi, phi_old, swap_local, father, nbor, &
        & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-       & ngridmax, ifree_cache, num_octs, input_ind)
+       & ngridmax, ifree_cache, num_octs, input_ind, interpol_var, interpol_type, smallr)
     type(oct), device :: grid(*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: phi(1:twotondim,*)
     real(kind=dp), device :: phi_old(1:twotondim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: flag1(1:twotondim,*)
     integer(kind=4), device :: swap_local(*)
     integer(kind=4), device :: father(*)
@@ -1478,22 +2123,25 @@ contains
     integer(kind=4), intent(in), value :: hash_size
     integer(kind=4), intent(in), value :: ngridmax
     integer(kind=4), intent(in), value :: input_ind
+    integer(kind=4), intent(in), value :: interpol_var, interpol_type
+    real(kind=dp), intent(in), value :: smallr
 
-    call make_cache_octs_impl(grid, flag1, uold, f, phi, phi_old, swap_local, father, nbor, &
+    call make_cache_octs_impl(grid, flag1, uold, bold, f, phi, phi_old, swap_local, father, nbor, &
         & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-        & ngridmax, ifree_cache, num_octs, input_ind)
+        & ngridmax, ifree_cache, num_octs, input_ind, interpol_var, interpol_type, smallr)
 
   end subroutine make_cache_octs
 
   ! =========================================================================
-  attributes(device) subroutine make_cache_octs_impl(grid, flag1, uold, f, phi, phi_old, swap_local, father, nbor, &
+  attributes(device) subroutine make_cache_octs_impl(grid, flag1, uold, bold, f, phi, phi_old, swap_local, father, nbor, &
        & hash_key, hash_val, hash_size, ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, &
-       & ngridmax, ifree_cache, num_octs, input_ind)
+       & ngridmax, ifree_cache, num_octs, input_ind, interpol_var, interpol_type, smallr)
     type(oct), device :: grid(*)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
     real(kind=dp), device :: phi(1:twotondim,*)
     real(kind=dp), device :: phi_old(1:twotondim,*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
     integer(kind=4), device :: flag1(1:twotondim,*)
     integer(kind=4), device :: swap_local(*)
     integer(kind=4), device :: father(*)
@@ -1509,11 +2157,23 @@ contains
     integer(kind=4), intent(in), value :: hash_size
     integer(kind=4), intent(in), value :: ngridmax
     integer(kind=4), intent(in), value :: input_ind
+    integer(kind=4), intent(in), value :: interpol_var, interpol_type
+    real(kind=dp), intent(in), value :: smallr
 
     integer(kind=8) :: hkey, parent_key, offset, ix, iy, iz, nx
     integer :: oct_idx, subgrid_idx, thread_idx, block_idx, cache_idx, parent_idx, cell_idx
     integer :: ind, i, j, k, ilevel, idim
     integer, dimension(1:ndim) :: ckey
+#ifdef MHD
+    integer :: ivar
+    ! Prolongation scratch for parent stencil and children.
+    real(kind=dp) :: u1(0:twondim,1:nvar)
+    real(kind=dp) :: u2(1:twotondim,1:nvar)
+    real(kind=dp) :: b1(0:twondim,1:6)
+    real(kind=dp) :: b2(1:twotondim,1:6)
+    real(kind=dp) :: b3(1:twondim,1:twotondim,1:6)
+    logical :: refined(1:twondim)
+#endif
 
     ! Compute thread and block idx
     thread_idx = threadIdx%x - 1
@@ -1587,6 +2247,24 @@ contains
     k = ckey(3) - 2*iz
     cell_idx = 1 + i + 2*j + 4*k
 
+#ifdef MHD
+    ! divB-preserving MHD prolongation for
+    ! cache (ghost) octs.  ilevel is now the parent level, so the cache oct's own
+    ! (child) level is ilevel+1 and its Cartesian key is ckey.
+    call gather_twondim_parent_stencil(grid, uold, bold, hash_key, hash_val, hash_size, &
+         & ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, ilevel+1, ckey, parent_idx, cell_idx, u1, b1, b3, refined)
+    call interpol_mhd_d(u1, u2, b1, b2, b3, refined, interpol_var, interpol_type, smallr)
+    do ivar = 1, nvar
+       do ind = 1, twotondim
+          uold(ind,ivar,cache_idx) = u2(ind,ivar)
+       end do
+    end do
+    do ivar = 1, 6
+       do ind = 1, twotondim
+          bold(ind,ivar,cache_idx) = b2(ind,ivar)
+       end do
+    end do
+#else
 #ifdef HYDRO
     ! Straight injection for hydro variables
     do ind = 1, twotondim
@@ -1596,6 +2274,7 @@ contains
        uold(ind,4,cache_idx) = uold(cell_idx,4,parent_idx)
        uold(ind,5,cache_idx) = uold(cell_idx,5,parent_idx)
     end do
+#endif
 #endif
 
 #ifdef GRAV
