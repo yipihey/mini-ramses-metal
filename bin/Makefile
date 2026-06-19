@@ -34,7 +34,11 @@ NPSCAL = 0
 NRTGRP = 0
 NHILBERT = 1
 NVECTOR = 32
-NPRE = 8
+# Default precision of `dp` (4=single, 8=double). fp32 is the default: on the GPU
+# (esp. consumer/workstation GA10x with 1:64 fp64) the hydro/gravity kernels are
+# compute-bound, and fp32 is ~6-14x faster while tracking fp64 to the chaos floor.
+# Override with NPRE=8 for a double-precision reference build.
+NPRE = 4
 PATCH =
 DEBUG = 0
 HDF5 = 0
@@ -309,6 +313,14 @@ write_gitinfo.o: FORCE
                 -DGITREPO=\'"$(GITREPO)"\' -DBUILDDATE=\'"$(BUILDDATE)"\' -DBUILDCOMMAND=\'"$(BUILDCOMMAND)"\' -c ../amr/write_gitinfo.f90 -o $@
 %.o:%.cuf
 	$(F90) $(FFLAGS) -c $^ -o $@ $(LIBS)
+# Occupancy tuning (NVHPC/CUDA): the monolithic per-oct godunov kernel is
+# register-limited (119 regs/thread fp32 -> only 2 blocks/SM, ~33% occupancy),
+# which starves the arithmetic-heavy PPM path of latency-hiding warps. Capping
+# registers so 3 blocks/SM stay resident (~50% occupancy) gives ~+14% PPM /
+# ~+12% PLM. Harmless to the simple kernels in this file (they use < 72 regs).
+ifeq ($(COMPILER),NVHPC)
+gpu_hydro.o: FFLAGS += -gpu=maxregcount:72
+endif
 %.o:%.f90
 	$(F90) $(FFLAGS) -c $^ -o $@ $(LIBS)
 %.o:%.c
