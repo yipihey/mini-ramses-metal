@@ -23,6 +23,13 @@ module ramses_capi
                              capi_inject_vp
   implicit none
 
+  ! _CUDA: when .true. (default) every capi getter syncs the whole device-resident
+  ! mesh→host before reading (correct but ~0.9s/managed-memory call).  A caller that
+  ! reads MANY variables in one host phase (e.g. get_hydro_all for the chem step) can
+  ! flip this off, call ramses_sync_to_host ONCE, read all vars, then flip it back —
+  ! collapsing N full syncs into 1.  No effect on CPU/Metal builds.
+  logical, save :: capi_autosync = .true.
+
 contains
 
   !--------------------------------------------------------------------------
@@ -160,6 +167,16 @@ contains
          call capi_pst(handle, pst, ok)
          if (ok) call m_metal_part_to_host(pst)
       end if
+    end block
+#endif
+#ifdef _CUDA
+    ! CUDA build keeps the mesh+particles device-resident; sync to host so the capi
+    ! reads the evolved state (else host arrays are stale → "frozen" particles).
+    block
+      use gpu_manager, only: r_transfer_grid_host
+      type(pst_t) :: pst; logical :: ok
+      call capi_pst(handle, pst, ok)
+      if (ok .and. capi_autosync) call r_transfer_grid_host(pst)
     end block
 #endif
     if (handle < 1 .or. handle > CAPI_MAXSTATE) return
@@ -326,6 +343,14 @@ contains
             call m_metal_fields_to_host(pst)   ! phi/f in the SAME slot order
          end if
       end if
+    end block
+#endif
+#ifdef _CUDA
+    block
+      use gpu_manager, only: r_transfer_grid_host
+      type(pst_t) :: pst; logical :: ok
+      call capi_pst(handle, pst, ok)
+      if (ok .and. capi_autosync) call r_transfer_grid_host(pst)   ! grid + phi/f device→host
     end block
 #endif
     noct = 0
@@ -601,6 +626,14 @@ contains
     integer(c_int) :: noct
     type(ramses_t), pointer :: s
     integer :: o, c, j, d, hd, no
+#ifdef _CUDA
+    block
+      use gpu_manager, only: r_transfer_grid_host
+      type(pst_t) :: pst; logical :: ok
+      call capi_pst(handle, pst, ok)
+      if (ok .and. capi_autosync) call r_transfer_grid_host(pst)   ! uold device→host for the capi read
+    end block
+#endif
     noct = 0
     if (handle < 1 .or. handle > CAPI_MAXSTATE) return
     if (ivar < 1 .or. ivar > nvar) return
@@ -659,6 +692,72 @@ contains
        nset = nset + 1
     end do
   end function ramses_set_hydro
+
+  ! Upload the host uold to the device after host-side edits (e.g. operator-split
+  ! chemistry via set_hydro).  No-op on the CPU/Metal builds (host IS authoritative);
+  ! on the _CUDA build the mesh is device-resident, so without this the chem write-back
+  ! never reaches the GPU.  Grid/hash and device particles are left untouched.
+  subroutine ramses_set_uold_device(handle) bind(C, name="ramses_set_uold_device")
+    integer(c_int), value :: handle
+#ifdef _CUDA
+    block
+      use gpu_manager, only: set_uold_device
+      type(pst_t) :: pst; logical :: ok
+      call capi_pst(handle, pst, ok)
+      if (ok) call set_uold_device(pst)
+    end block
+#endif
+  end subroutine ramses_set_uold_device
+
+  ! Toggle the per-getter device→host autosync (see capi_autosync).  flag/=0 → on.
+  ! A host phase that reads many variables flips it OFF, calls ramses_sync_to_host
+  ! ONCE, reads, then flips it back ON — turning N full managed-memory syncs into 1.
+  subroutine ramses_set_autosync(flag) bind(C, name="ramses_set_autosync")
+    integer(c_int), value :: flag
+    capi_autosync = (flag /= 0)
+  end subroutine ramses_set_autosync
+
+  ! Explicitly sync the device-resident mesh→host once (no-op on CPU/Metal).  Used
+  ! with autosync OFF to amortize one transfer across many getter calls.
+  subroutine ramses_sync_to_host(handle) bind(C, name="ramses_sync_to_host")
+    integer(c_int), value :: handle
+#ifdef _CUDA
+    block
+      use gpu_manager, only: r_transfer_grid_host
+      type(pst_t) :: pst; logical :: ok
+      call capi_pst(handle, pst, ok)
+      if (ok) call r_transfer_grid_host(pst)
+    end block
+#endif
+  end subroutine ramses_sync_to_host
+
+  ! ZERO-COPY chem: expose the DEVICE address of the module uold array at the first
+  ! oct of `ilevel`, plus the oct count, so Julia (CUDA.jl) can unsafe_wrap it as a
+  ! CuArray(twotondim,nvar,noct) and run ChemistryKernels in place — no host round-trip.
+  ! Returns 0 on non-_CUDA / failure.  Device uold(c,iv,o) mirrors host indices (whole-
+  ! array H→D at set_grid_device), so the level slice starts at o=head(ilevel).
+  function ramses_uold_devptr(handle, ilevel, noct_out, head_out) result(addr) &
+       bind(C, name="ramses_uold_devptr")
+    integer(c_int), value :: handle, ilevel
+    integer(c_int), intent(out) :: noct_out, head_out
+    integer(c_intptr_t) :: addr
+    addr = 0_c_intptr_t; noct_out = 0; head_out = 0
+#ifdef _CUDA
+    block
+      use gpu_runner, only: uold
+      use cudafor,    only: c_devloc
+      type(ramses_t), pointer :: s
+      integer :: hd
+      if (handle < 1 .or. handle > CAPI_MAXSTATE) return
+      s => capi_reg(handle)%p
+      if (.not. associated(s)) return
+      hd = s%m%head(ilevel)
+      noct_out = s%m%noct(ilevel)
+      head_out = hd
+      addr = transfer(c_devloc(uold(1,1,hd)), addr)
+    end block
+#endif
+  end function ramses_uold_devptr
 
   ! Hyperbolic solver (unsplit Godunov): the heavy hydro kernel, THE target of
   ! the Metal port.  Reads m%uold, writes fluxes into m%unew (amr_step calls it

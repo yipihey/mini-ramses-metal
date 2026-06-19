@@ -121,7 +121,7 @@ endif
 #############################################################################
 # GNU compiler (gfortran)
 ifeq ($(COMPILER),GNU)
-   FFLAGS = -cpp $(DEFINES)
+   FFLAGS = -cpp $(DEFINES) -fPIC
    ifeq ($(MPI),1)
       F90 = $(MPIF90)
       FC = gfortran
@@ -164,7 +164,7 @@ endif
 #############################################################################
 # NVHPC compiler
 ifeq ($(COMPILER),NVHPC)
-   FFLAGS = -cpp -gpu=$(CUDA_ARCH),nordc -cuda -cudalib=nvtx $(DEFINES)
+   FFLAGS = -cpp -gpu=$(CUDA_ARCH),nordc -cuda -cudalib=nvtx -fpic $(DEFINES)
    LIBS = -gpu=$(CUDA_ARCH),nordc -cuda -cudalib=nvtx
    GPU_PATH = ../gpu
    ifeq ($(CUDA_PROFILE),1)
@@ -287,8 +287,9 @@ ramses:	$(MODOBJ) ramses.o $(EXTRADEP)
 # C-API in ../julia/ramses_capi.f90.  CPU:   make GRAV=1 libramses
 #                                     Metal: make COMPILER=METAL GRAV=1 libramses
 # Output: libramses<NDIM>d.dylib (CPU) or libramses<NDIM>d_metal.dylib (Metal).
+SHARED_EXT := $(if $(filter Darwin,$(shell uname -s)),dylib,so)
 libramses:	$(MODOBJ) ramses_capi.o $(EXTRADEP)
-	$(F90) $(FFLAGS) -shared -fPIC $(MODOBJ) ramses_capi.o -o libramses$(NDIM)d$(LIBSUF).dylib $(LIBS)
+	$(F90) $(FFLAGS) -shared -fPIC $(MODOBJ) ramses_capi.o -o libramses$(NDIM)d$(LIBSUF).$(SHARED_EXT) $(LIBS)
 #############################################################################
 # Metal kernel library (Apple Silicon).  Compiles gpu/metal/*.metal -> .metallib.
 # Depend on the sources + shared headers so an edit to any kernel (or header)
@@ -308,8 +309,9 @@ ramses_kernels.metallib: $(addprefix ../gpu/metal/,$(addsuffix .metal,$(METAL_KE
 test_cooling:	$(MODOBJ) test_cooling.o
 	$(F90) $(FFLAGS) $(MODOBJ) test_cooling.o -o test_cooling $(LIBS)
 #############################################################################
+PIC_FLAG = $(if $(filter NVHPC,$(COMPILER)),-fpic,-fPIC)
 write_gitinfo.o: FORCE
-	$(FC) -O0 -cpp -DPATCH=\'"$(PATCH)"\' -DGITBRANCH=\'"$(GITBRANCH)"\' -DGITHASH=\'"$(GITHASH)"\' \
+	$(FC) -O0 $(PIC_FLAG) -cpp -DPATCH=\'"$(PATCH)"\' -DGITBRANCH=\'"$(GITBRANCH)"\' -DGITHASH=\'"$(GITHASH)"\' \
                 -DGITREPO=\'"$(GITREPO)"\' -DBUILDDATE=\'"$(BUILDDATE)"\' -DBUILDCOMMAND=\'"$(BUILDCOMMAND)"\' -c ../amr/write_gitinfo.f90 -o $@
 %.o:%.cuf
 	$(F90) $(FFLAGS) -c $^ -o $@ $(LIBS)

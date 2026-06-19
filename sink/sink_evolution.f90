@@ -265,8 +265,8 @@ contains
     real(kind=8)::m_acc,e_acc
     real(kind=8),dimension(1:ndim)::p_acc,l_acc,vel_gas
     real(kind=8),dimension(1:nvar)::passive_acc
-    integer::i,j,k,ii,jj,kk,icelln,igridn,ind,idim,ivar
-    real(kind=8)::d,e,ethermal,r2_sink,v_bondi,cs,rho_gas,velocity
+    integer::i,j,k,ii,jj,kk,icelln,igridn,ind,idim,ivar,irad
+    real(kind=8)::d,e,ethermal,r2_sink,v_bondi,cs,rho_gas,velocity,erad
     real(kind=8)::weight,r_rel
     real(kind=8)::d_acc,m_gas,bondi_mass
     real(kind=8)::weighted_bondi,dMdt_freefall,t_ff

@@ -105,7 +105,12 @@ subroutine init_amr(r,g,m,type)
      m%ncachemax=MAX(r%ncachemax,10000)
   endif
   if(type=='mg')then
-     m%ngridmax=r%ngridmax/7
+     ! The MG hierarchy holds ~fine/7 father octs PER the geometric series, but the GPU
+     ! build (make_father_octs + neighbor/ghost octs in gpu_build_mg) also stores the
+     ! ghost-neighbour octs of each coarse level — roughly DOUBLING the count to ~2/7 of
+     ! the fine grid.  /7 undersized phi_mg/f_mg/grid_mg and caused an out-of-bounds
+     ! write at 256³ (gpu_mg.cuf make_father_octs); /3 covers father+ghost with margin.
+     m%ngridmax=r%ngridmax/3
      m%ncachemax=MAX(r%ncachemax/7,10000)
   endif
 

@@ -45,6 +45,12 @@ subroutine m_newdt_fine(pst,ilevel)
   type(out_courant_fine_t)::out_courant_fine
   type(out_newdt_part_t)::out_newdt_part
   type(in_broadcast_dt_t)::in_broadcast_dt
+  ! Cosmic-expansion da/a cap, configurable via CIC_MAXEXP (default 0.1) so the
+  ! step can be refined to match Enzo for cross-code convergence tests.  Read once.
+  real(kind=8),save::maxexp_val=0.1d0
+  logical,save::maxexp_init=.false.
+  character(len=64)::maxexp_str
+  integer::maxexp_ist
 
   associate(r=>pst%s%r,g=>pst%s%g,m=>pst%s%m,p=>pst%s%p,mdl=>pst%s%mdl)
 
@@ -73,7 +79,12 @@ subroutine m_newdt_fine(pst,ilevel)
 
   ! Cosmic-expansion-based Courant condition
   if(r%cosmo)then
-     g%dtnew(ilevel)=MIN(g%dtnew(ilevel),0.1/g%hexp)
+     if(.not.maxexp_init)then
+        call get_environment_variable("CIC_MAXEXP",maxexp_str,status=maxexp_ist)
+        if(maxexp_ist==0 .and. len_trim(maxexp_str)>0) read(maxexp_str,*) maxexp_val
+        maxexp_init=.true.
+     end if
+     g%dtnew(ilevel)=MIN(g%dtnew(ilevel),maxexp_val/g%hexp)
   end if
 
   ! Turbulence driving condition
