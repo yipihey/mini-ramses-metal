@@ -34,6 +34,26 @@ module gpu_utils
 #endif
   end type subgrid_6x6x6cell_primitive
 
+#ifdef GLMMHD
+  !> @brief 6x6x6 shared-memory subgrid of Dedner GLM-MHD primitives (9 fields:
+  !> rho, vx,vy,vz, p, Bx,By,Bz, psi). Inner 2^3 real cells + 2-cell ghost halo.
+  type, public :: subgrid_6x6x6cell_mhd
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: density
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_x
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_y
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_z
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: pressure
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: bx
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: by
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: bz
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: psi
+     logical      , dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: refined
+#if NVAR>9
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:(NVAR)-9) :: scalar
+#endif
+  end type subgrid_6x6x6cell_mhd
+#endif
+
   !> @brief
   !> Contains a 6 by 6 by 6 subgrid of conserved variables. Intended to act as a subgrid
   !> where the inner 2 by 2 by 2 cells are "real" and the outer 2 cells are ghost/halo cells.

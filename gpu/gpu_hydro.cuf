@@ -69,6 +69,52 @@ module hydro_device
      real(kind=dp) :: pressure
   end type primitive_t
 
+#ifdef GLMMHD
+  ! =========================================================================
+  ! Dedner GLM-MHD: cell-centered 9-variable state. Conserved energy includes
+  ! the magnetic energy 0.5*B^2; psi is the hyperbolic divergence-cleaning scalar.
+  ! A parallel path to the 5-var hydro above (selected at build time by -DMHD),
+  ! so the validated hydro kernels are untouched.
+  ! =========================================================================
+  type, public :: mhd_conserved_t
+     real(kind=dp) :: density
+     real(kind=dp) :: momentum_x
+     real(kind=dp) :: momentum_y
+     real(kind=dp) :: momentum_z
+     real(kind=dp) :: energy        ! total: internal + kinetic + 0.5*B^2
+     real(kind=dp) :: bx
+     real(kind=dp) :: by
+     real(kind=dp) :: bz
+     real(kind=dp) :: psi           ! GLM divergence-cleaning scalar
+  end type mhd_conserved_t
+
+  type, public :: mhd_primitive_t
+     real(kind=dp) :: density
+     real(kind=dp) :: velocity_x
+     real(kind=dp) :: velocity_y
+     real(kind=dp) :: velocity_z
+     real(kind=dp) :: pressure      ! gas (thermal) pressure
+     real(kind=dp) :: bx
+     real(kind=dp) :: by
+     real(kind=dp) :: bz
+     real(kind=dp) :: psi
+  end type mhd_primitive_t
+
+  ! Directional interface-state subgrids (mirror the hydro ones + B/psi).
+  type, public :: subgrid_3x2x2cell_mhd
+     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: &
+          & density, velocity_x, velocity_y, velocity_z, pressure, bx, by, bz, psi
+  end type subgrid_3x2x2cell_mhd
+  type, public :: subgrid_2x3x2cell_mhd
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: &
+          & density, velocity_x, velocity_y, velocity_z, pressure, bx, by, bz, psi
+  end type subgrid_2x3x2cell_mhd
+  type, public :: subgrid_2x2x3cell_mhd
+     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: &
+          & density, velocity_x, velocity_y, velocity_z, pressure, bx, by, bz, psi
+  end type subgrid_2x2x3cell_mhd
+#endif
+
 contains
 
   include 'gpu_reduce.cuf'
@@ -259,6 +305,180 @@ contains
     conserved%energy     = compute_energy(primitive, gamma)
     return
   end function primitive_2_conserved
+
+#ifdef GLMMHD
+  ! ==========================================================================
+  ! Dedner GLM-MHD device math (cell-centered, 9 variables). Pure functions that
+  ! found the MHD Riemann/reconstruction layer. Total energy carries 0.5*B^2.
+  ! ==========================================================================
+
+  !> Gas pressure from MHD conserved state: p=(g-1)(E - 0.5 rho v^2 - 0.5 B^2),
+  !> floored to smallr*smallc2/g for positivity at low beta.
+  attributes(device) function mhd_pressure(c, gamma, smallr, smallc2) result(pressure)
+    type(mhd_conserved_t), intent(in) :: c
+    real(kind=dp), value :: gamma, smallr, smallc2
+    real(kind=dp) :: pressure, rho, ekin, emag, smallp
+    smallp = smallc2 / gamma
+    rho  = max(c%density, smallr)
+    ekin = 0.5_dp*magnitude_squared(c%momentum_x, c%momentum_y, c%momentum_z)/rho
+    emag = 0.5_dp*magnitude_squared(c%bx, c%by, c%bz)
+    pressure = max((gamma - 1.0_dp)*(c%energy - ekin - emag), rho*smallp)
+    return
+  end function mhd_pressure
+
+  attributes(device) function mhd_conserved_2_primitive(c, gamma, smallr, smallc2) result(p)
+    type(mhd_conserved_t), intent(in) :: c
+    real(kind=dp), value :: gamma, smallr, smallc2
+    type(mhd_primitive_t) :: p
+    real(kind=dp) :: rho
+    rho = max(c%density, smallr)
+    p%density    = rho
+    p%velocity_x = c%momentum_x / rho
+    p%velocity_y = c%momentum_y / rho
+    p%velocity_z = c%momentum_z / rho
+    p%pressure   = mhd_pressure(c, gamma, smallr, smallc2)
+    p%bx = c%bx; p%by = c%by; p%bz = c%bz; p%psi = c%psi
+    return
+  end function mhd_conserved_2_primitive
+
+  attributes(device) function mhd_primitive_2_conserved(p, gamma) result(c)
+    type(mhd_primitive_t), intent(in) :: p
+    real(kind=dp), value :: gamma
+    type(mhd_conserved_t) :: c
+    real(kind=dp) :: ekin, emag
+    ekin = 0.5_dp*p%density*magnitude_squared(p%velocity_x, p%velocity_y, p%velocity_z)
+    emag = 0.5_dp*magnitude_squared(p%bx, p%by, p%bz)
+    c%density    = p%density
+    c%momentum_x = p%density*p%velocity_x
+    c%momentum_y = p%density*p%velocity_y
+    c%momentum_z = p%density*p%velocity_z
+    c%energy     = p%pressure/(gamma - 1.0_dp) + ekin + emag
+    c%bx = p%bx; c%by = p%by; c%bz = p%bz; c%psi = p%psi
+    return
+  end function mhd_primitive_2_conserved
+
+  !> Fast magnetosonic speed for waves travelling along the x-axis (normal B = bx).
+  !> Standard form: cf^2 = 0.5(b2/rho + c2 + sqrt((b2/rho+c2)^2 - 4 c2 bx^2/rho)).
+  !> Mirrors the CPU find_speed_fast (godunov_utils.f90).
+  attributes(device) function mhd_fast_speed_x(p, gamma) result(cf)
+    type(mhd_primitive_t), intent(in) :: p
+    real(kind=dp), value :: gamma
+    real(kind=dp) :: cf, c2, b2, d2, rho
+    rho = p%density
+    c2  = gamma*p%pressure/rho
+    b2  = magnitude_squared(p%bx, p%by, p%bz)/rho
+    d2  = 0.5_dp*(b2 + c2)
+    cf  = sqrt( d2 + sqrt(max(d2*d2 - c2*p%bx*p%bx/rho, 0.0_dp)) )
+    return
+  end function mhd_fast_speed_x
+
+  !> Ideal-MHD physical flux along x (normal = x). The Bx and psi slots are set to
+  !> zero here and OVERWRITTEN by the GLM (Bn,psi) pair in the solver.
+  attributes(device) function mhd_phys_flux(p, gamma) result(f)
+    type(mhd_primitive_t), intent(in) :: p
+    real(kind=dp), value :: gamma
+    type(mhd_conserved_t) :: f
+    real(kind=dp) :: ptot, etot, vdotb, b2, vx
+    vx = p%velocity_x
+    b2 = magnitude_squared(p%bx, p%by, p%bz)
+    ptot = p%pressure + 0.5_dp*b2
+    etot = p%pressure/(gamma - 1.0_dp) &
+         & + 0.5_dp*p%density*magnitude_squared(p%velocity_x, p%velocity_y, p%velocity_z) &
+         & + 0.5_dp*b2
+    vdotb = p%velocity_x*p%bx + p%velocity_y*p%by + p%velocity_z*p%bz
+    f%density    = p%density*vx
+    f%momentum_x = p%density*vx*vx + ptot - p%bx*p%bx
+    f%momentum_y = p%density*vx*p%velocity_y - p%bx*p%by
+    f%momentum_z = p%density*vx*p%velocity_z - p%bx*p%bz
+    f%energy     = (etot + ptot)*vx - p%bx*vdotb
+    f%bx  = 0.0_dp
+    f%by  = vx*p%by - p%velocity_y*p%bx
+    f%bz  = vx*p%bz - p%velocity_z*p%bx
+    f%psi = 0.0_dp
+    return
+  end function mhd_phys_flux
+
+  !> HLL/Rusanov combination of left/right fluxes & states for all 9 components.
+  !> LLF is the symmetric case sl=-smax, sr=+smax.
+  attributes(device) function mhd_hll_combine(sl, sr, fL, fR, uL, uR) result(f)
+    real(kind=dp), value :: sl, sr
+    type(mhd_conserved_t), intent(in) :: fL, fR, uL, uR
+    type(mhd_conserved_t) :: f
+    real(kind=dp) :: inv
+    if (sl >= 0.0_dp) then
+       f = fL; return
+    else if (sr <= 0.0_dp) then
+       f = fR; return
+    end if
+    inv = 1.0_dp/(sr - sl)
+    f%density    = (sr*fL%density    - sl*fR%density    + sr*sl*(uR%density   -uL%density   ))*inv
+    f%momentum_x = (sr*fL%momentum_x - sl*fR%momentum_x + sr*sl*(uR%momentum_x-uL%momentum_x))*inv
+    f%momentum_y = (sr*fL%momentum_y - sl*fR%momentum_y + sr*sl*(uR%momentum_y-uL%momentum_y))*inv
+    f%momentum_z = (sr*fL%momentum_z - sl*fR%momentum_z + sr*sl*(uR%momentum_z-uL%momentum_z))*inv
+    f%energy     = (sr*fL%energy     - sl*fR%energy     + sr*sl*(uR%energy    -uL%energy    ))*inv
+    f%bx  = (sr*fL%bx  - sl*fR%bx  + sr*sl*(uR%bx -uL%bx ))*inv
+    f%by  = (sr*fL%by  - sl*fR%by  + sr*sl*(uR%by -uL%by ))*inv
+    f%bz  = (sr*fL%bz  - sl*fR%bz  + sr*sl*(uR%bz -uL%bz ))*inv
+    f%psi = (sr*fL%psi - sl*fR%psi + sr*sl*(uR%psi-uL%psi))*inv
+    return
+  end function mhd_hll_combine
+
+  !> Overlay the exact decoupled GLM (Bn,psi) Riemann solution (speed c_h) onto a
+  !> base MHD flux: returns the cleaned normal field Bn* and writes F[Bn], F[psi].
+  !> Call with L,R BEFORE clobbering their bx; substitute Bn* for the 7-system.
+  attributes(device) subroutine glm_pair(bnL, bnR, psiL, psiR, ch, bn_star, fbn, fpsi)
+    real(kind=dp), value :: bnL, bnR, psiL, psiR, ch
+    real(kind=dp), intent(out) :: bn_star, fbn, fpsi
+    real(kind=dp) :: psi_star
+    bn_star  = 0.5_dp*(bnL + bnR) - 0.5_dp*(psiR - psiL)/ch
+    psi_star = 0.5_dp*(psiL + psiR) - 0.5_dp*ch*(bnR - bnL)
+    fbn  = psi_star
+    fpsi = ch*ch*bn_star
+    return
+  end subroutine glm_pair
+
+  !> LLF (Rusanov) MHD flux + GLM cleaning. Robust fallback (MHD analog of two-shock).
+  attributes(device) function llf_mhd_fluxes(Lin, Rin, gamma, smallr, smallc2, ch) result(flux)
+    type(mhd_primitive_t), intent(in) :: Lin, Rin
+    real(kind=dp), value :: gamma, smallr, smallc2, ch
+    type(mhd_primitive_t) :: L, R
+    type(mhd_conserved_t) :: flux, fL, fR, uL, uR
+    real(kind=dp) :: bn_star, fbn, fpsi, smax
+    L = Lin; R = Rin
+    L%density = max(L%density, smallr); R%density = max(R%density, smallr)
+    call glm_pair(L%bx, R%bx, L%psi, R%psi, ch, bn_star, fbn, fpsi)
+    L%bx = bn_star; R%bx = bn_star
+    fL = mhd_phys_flux(L, gamma); fR = mhd_phys_flux(R, gamma)
+    uL = mhd_primitive_2_conserved(L, gamma); uR = mhd_primitive_2_conserved(R, gamma)
+    smax = max(abs(L%velocity_x) + mhd_fast_speed_x(L, gamma), &
+         &     abs(R%velocity_x) + mhd_fast_speed_x(R, gamma))
+    smax = max(smax, ch)
+    flux = mhd_hll_combine(-smax, smax, fL, fR, uL, uR)
+    flux%bx = fbn; flux%psi = fpsi
+    return
+  end function llf_mhd_fluxes
+
+  !> Two-wave HLL MHD flux + GLM cleaning.
+  attributes(device) function hll_mhd_fluxes(Lin, Rin, gamma, smallr, smallc2, ch) result(flux)
+    type(mhd_primitive_t), intent(in) :: Lin, Rin
+    real(kind=dp), value :: gamma, smallr, smallc2, ch
+    type(mhd_primitive_t) :: L, R
+    type(mhd_conserved_t) :: flux, fL, fR, uL, uR
+    real(kind=dp) :: bn_star, fbn, fpsi, sl, sr, cfL, cfR
+    L = Lin; R = Rin
+    L%density = max(L%density, smallr); R%density = max(R%density, smallr)
+    call glm_pair(L%bx, R%bx, L%psi, R%psi, ch, bn_star, fbn, fpsi)
+    L%bx = bn_star; R%bx = bn_star
+    fL = mhd_phys_flux(L, gamma); fR = mhd_phys_flux(R, gamma)
+    uL = mhd_primitive_2_conserved(L, gamma); uR = mhd_primitive_2_conserved(R, gamma)
+    cfL = mhd_fast_speed_x(L, gamma); cfR = mhd_fast_speed_x(R, gamma)
+    sl = min(min(L%velocity_x, R%velocity_x) - max(cfL, cfR), 0.0_dp)
+    sr = max(max(L%velocity_x, R%velocity_x) + max(cfL, cfR), 0.0_dp)
+    flux = mhd_hll_combine(sl, sr, fL, fR, uL, uR)
+    flux%bx = fbn; flux%psi = fpsi
+    return
+  end function hll_mhd_fluxes
+#endif
   ! ==========================================================================
 
   ! ==========================================================================

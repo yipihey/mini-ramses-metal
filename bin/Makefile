@@ -9,6 +9,10 @@ MPI = 0
 HYDRO = 1
 GRAV = 0
 MHD = 0
+# GLM = Dedner cell-centered GLM-MHD on the CUDA GPU path (-DGLMMHD, NHYDRO=9:
+# rho, rho*v, Etot, Bx, By, Bz, psi). Distinct from MHD=1 (CPU constrained
+# transport, face-staggered B, NHYDRO=5+nprim). Do not set both.
+GLM = 0
 RT = 0
 RTZ = 0
 INIT =
@@ -51,6 +55,9 @@ EXEC = ramses
 #############################################################################
 # Compute NVAR
 NHYDRO = 5
+ifeq ($(GLM),1)
+NHYDRO = 9
+endif
 ifeq ($(RTZ),1)
 NION := $(N_CARBON_IONS)+$(N_NITROGEN_IONS)+$(N_OXYGEN_IONS)
 NION := $(NION)+$(N_NEON_IONS)+$(N_MAGNESIUM_IONS)+$(N_SILICON_IONS)
@@ -91,6 +98,9 @@ ifeq ($(HYDRO),1)
 endif
 ifeq ($(MHD),1)
    DEFINES += -DMHD
+endif
+ifeq ($(GLM),1)
+   DEFINES += -DGLMMHD
 endif
 ifeq ($(GRAV),1)
    DEFINES += -DGRAV
