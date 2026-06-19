@@ -422,6 +422,7 @@ contains
 #else
     use hydro_device, only: hydro_integrator_kernel
 #endif
+    use hydro_device, only: switch_llf_dmin_d, switch_llf_pmin_d
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout)::sim
     integer, intent(in)::ilevel
@@ -445,6 +446,9 @@ contains
     riemann2d = sim%r%riemann2d
     switch_llf_dmin = sim%r%switch_llf_dmin
     switch_llf_pmin = sim%r%switch_llf_pmin
+    ! Publish LLF-switch thresholds to the device for the 1D Riemann path.
+    switch_llf_dmin_d = switch_llf_dmin
+    switch_llf_pmin_d = switch_llf_pmin
     induction = sim%r%induction
 
     head_idx = (sim%m%head(ilevel) - 1) / nsubgridtondim + 1
