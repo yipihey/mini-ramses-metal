@@ -314,10 +314,11 @@ write_gitinfo.o: FORCE
 %.o:%.cuf
 	$(F90) $(FFLAGS) -c $^ -o $@ $(LIBS)
 # Occupancy tuning (NVHPC/CUDA): the monolithic per-oct godunov kernel is
-# register-limited (119 regs/thread fp32 -> only 2 blocks/SM, ~33% occupancy),
-# which starves the arithmetic-heavy PPM path of latency-hiding warps. Capping
-# registers so 3 blocks/SM stay resident (~50% occupancy) gives ~+14% PPM /
-# ~+12% PLM. Harmless to the simple kernels in this file (they use < 72 regs).
+# register-limited (~96 regs/thread fp32 after the per-direction PPM trace ->
+# only 2 blocks/SM), which starves the arithmetic-heavy PPM path of latency-
+# hiding warps. Capping to maxregcount:72 (~59% occupancy) is the measured
+# optimum: ~+14% PPM, up to +22% PLM+HLLC. Harmless to the simple kernels in
+# this file (they use < 72 regs); tighter caps spill PPM's working set.
 ifeq ($(COMPILER),NVHPC)
 gpu_hydro.o: FFLAGS += -gpu=maxregcount:72
 endif

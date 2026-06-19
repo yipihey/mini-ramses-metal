@@ -513,6 +513,20 @@ contains
     c%pressure   = a%pressure   + b%pressure
   end function prim_add
 
+  ! Load one cell of the shared-memory subgrid into a primitive_t (by reference,
+  ! no copy of the whole subgrid). Lets the PPM trace read neighbours on demand
+  ! instead of materialising all six at once -> far lower register pressure.
+  attributes(device) function sg_load(sg, i, j, k) result(p)
+    type(subgrid_6x6x6cell_primitive), intent(in) :: sg
+    integer, value :: i, j, k
+    type(primitive_t) :: p
+    p%density    = sg%density   (i, j, k)
+    p%velocity_x = sg%velocity_x(i, j, k)
+    p%velocity_y = sg%velocity_y(i, j, k)
+    p%velocity_z = sg%velocity_z(i, j, k)
+    p%pressure   = sg%pressure  (i, j, k)
+  end function sg_load
+
   !> Compact three-cell PPM reconstruction + characteristic trace along x.
   !> qplus is the cell's +x face state, qminus its -x face state. Five-variable
   !> core only (no passive scalars: CUDA primitive_t carries 5 fields).
@@ -636,13 +650,15 @@ contains
     type(primitive_t) :: cell ! The cell centered primitive variables and (eventually) predicted states
     type(primitive_t) :: slopes_x, slopes_y, slopes_z ! The limited slopes in the x, y, and z directions
     type(primitive_t) :: source_term ! The sources terms
-    ! Per-direction reconstructed face states (left = +1/2 face, right = -1/2 face),
-    ! always stored in the GLOBAL velocity frame (riemann_driver does the rotation).
-    type(primitive_t) :: fxl, fxr, fyl, fyr, fzl, fzr
-    ! Local PPM (slope_type=10) scratch.
-    type(primitive_t) :: m0, cxm, cxp, cym, cyp, czm, czp
-    type(primitive_t) :: rl_, rm_, rr_, qp_, qn_
-    type(primitive_t) :: sx_h, sy_h, sz_h, srcx, srcy, srcz, srcyz, srcxz, srcxy
+    ! Current-direction reconstructed face states, REUSED across x/y/z so only one
+    ! direction's pair is ever live (left = +1/2 face, right = -1/2 face), always
+    ! in the GLOBAL velocity frame (riemann_driver does the rotation).
+    type(primitive_t) :: fl, fr
+    ! Local PPM (slope_type=10) scratch: persistent transverse sources srcx/y/z,
+    ! plus per-direction stencil (na,nb), rotation (rl,rm,rr), trace out (qp,qn)
+    ! and combined transverse source (tsrc) -- all reused each direction to keep
+    ! the kernel's register footprint (and thus occupancy) low.
+    type(primitive_t) :: m0, na, nb, rl, rm, rr, qp, qn, tsrc, srcx, srcy, srcz
     logical :: use_ppm
     integer :: eff_slope
 
@@ -684,183 +700,140 @@ contains
        end if
 
        if (use_ppm) then
-          ! Gather the six axis neighbours.
-          cxm%density=local_subgrid%density(i-1,j,k); cxm%velocity_x=local_subgrid%velocity_x(i-1,j,k); cxm%velocity_y=local_subgrid%velocity_y(i-1,j,k); cxm%velocity_z=local_subgrid%velocity_z(i-1,j,k); cxm%pressure=local_subgrid%pressure(i-1,j,k)
-          cxp%density=local_subgrid%density(i+1,j,k); cxp%velocity_x=local_subgrid%velocity_x(i+1,j,k); cxp%velocity_y=local_subgrid%velocity_y(i+1,j,k); cxp%velocity_z=local_subgrid%velocity_z(i+1,j,k); cxp%pressure=local_subgrid%pressure(i+1,j,k)
-          cym%density=local_subgrid%density(i,j-1,k); cym%velocity_x=local_subgrid%velocity_x(i,j-1,k); cym%velocity_y=local_subgrid%velocity_y(i,j-1,k); cym%velocity_z=local_subgrid%velocity_z(i,j-1,k); cym%pressure=local_subgrid%pressure(i,j-1,k)
-          cyp%density=local_subgrid%density(i,j+1,k); cyp%velocity_x=local_subgrid%velocity_x(i,j+1,k); cyp%velocity_y=local_subgrid%velocity_y(i,j+1,k); cyp%velocity_z=local_subgrid%velocity_z(i,j+1,k); cyp%pressure=local_subgrid%pressure(i,j+1,k)
-          czm%density=local_subgrid%density(i,j,k-1); czm%velocity_x=local_subgrid%velocity_x(i,j,k-1); czm%velocity_y=local_subgrid%velocity_y(i,j,k-1); czm%velocity_z=local_subgrid%velocity_z(i,j,k-1); czm%pressure=local_subgrid%pressure(i,j,k-1)
-          czp%density=local_subgrid%density(i,j,k+1); czp%velocity_x=local_subgrid%velocity_x(i,j,k+1); czp%velocity_y=local_subgrid%velocity_y(i,j,k+1); czp%velocity_z=local_subgrid%velocity_z(i,j,k+1); czp%pressure=local_subgrid%pressure(i,j,k+1)
-
-          ! x sweep: normal already x, results in global frame.
-          call local_ppm_trace(cxm, m0, cxp, gamma, dtdx, fxl, fxr)
-
-          ! y sweep: rotate global->normal (vx,vy,vz)<-(gy,gz,gx); un-rotate back.
-          rl_%density=cym%density; rl_%velocity_x=cym%velocity_y; rl_%velocity_y=cym%velocity_z; rl_%velocity_z=cym%velocity_x; rl_%pressure=cym%pressure
-          rm_%density=m0%density;  rm_%velocity_x=m0%velocity_y;  rm_%velocity_y=m0%velocity_z;  rm_%velocity_z=m0%velocity_x;  rm_%pressure=m0%pressure
-          rr_%density=cyp%density; rr_%velocity_x=cyp%velocity_y; rr_%velocity_y=cyp%velocity_z; rr_%velocity_z=cyp%velocity_x; rr_%pressure=cyp%pressure
-          call local_ppm_trace(rl_, rm_, rr_, gamma, dtdx, qp_, qn_)
-          fyl%density=qp_%density; fyl%velocity_x=qp_%velocity_z; fyl%velocity_y=qp_%velocity_x; fyl%velocity_z=qp_%velocity_y; fyl%pressure=qp_%pressure
-          fyr%density=qn_%density; fyr%velocity_x=qn_%velocity_z; fyr%velocity_y=qn_%velocity_x; fyr%velocity_z=qn_%velocity_y; fyr%pressure=qn_%pressure
-
-          ! z sweep: rotate (vx,vy,vz)<-(gz,gx,gy); un-rotate back.
-          rl_%density=czm%density; rl_%velocity_x=czm%velocity_z; rl_%velocity_y=czm%velocity_x; rl_%velocity_z=czm%velocity_y; rl_%pressure=czm%pressure
-          rm_%density=m0%density;  rm_%velocity_x=m0%velocity_z;  rm_%velocity_y=m0%velocity_x;  rm_%velocity_z=m0%velocity_y;  rm_%pressure=m0%pressure
-          rr_%density=czp%density; rr_%velocity_x=czp%velocity_z; rr_%velocity_y=czp%velocity_x; rr_%velocity_z=czp%velocity_y; rr_%pressure=czp%pressure
-          call local_ppm_trace(rl_, rm_, rr_, gamma, dtdx, qp_, qn_)
-          fzl%density=qp_%density; fzl%velocity_x=qp_%velocity_y; fzl%velocity_y=qp_%velocity_z; fzl%velocity_z=qp_%velocity_x; fzl%pressure=qp_%pressure
-          fzr%density=qn_%density; fzr%velocity_x=qn_%velocity_y; fzr%velocity_y=qn_%velocity_z; fzr%velocity_z=qn_%velocity_x; fzr%pressure=qn_%pressure
-
-          ! Transverse predictor coupling (global frame): each normal face gets
-          ! the source from the OTHER two directions.
-          sx_h = local_ppm_half_slope(cxm, m0, cxp)
-          sy_h = local_ppm_half_slope(cym, m0, cyp)
-          sz_h = local_ppm_half_slope(czm, m0, czp)
-          srcx = transverse_source(m0, sx_h, gamma, 0)
-          srcy = transverse_source(m0, sy_h, gamma, 1)
-          srcz = transverse_source(m0, sz_h, gamma, 2)
-          srcyz = prim_add(srcy, srcz)
-          srcxz = prim_add(srcx, srcz)
-          srcxy = prim_add(srcx, srcy)
-          call add_transverse_source(fxl, srcyz, dtdx, m0)
-          call add_transverse_source(fxr, srcyz, dtdx, m0)
-          call add_transverse_source(fyl, srcxz, dtdx, m0)
-          call add_transverse_source(fyr, srcxz, dtdx, m0)
-          call add_transverse_source(fzl, srcxy, dtdx, m0)
-          call add_transverse_source(fzr, srcxy, dtdx, m0)
+          ! Three transverse predictor sources (each from one axis half-slope).
+          na = sg_load(local_subgrid, i-1, j, k); nb = sg_load(local_subgrid, i+1, j, k)
+          srcx = transverse_source(m0, local_ppm_half_slope(na, m0, nb), gamma, 0)
+          na = sg_load(local_subgrid, i, j-1, k); nb = sg_load(local_subgrid, i, j+1, k)
+          srcy = transverse_source(m0, local_ppm_half_slope(na, m0, nb), gamma, 1)
+          na = sg_load(local_subgrid, i, j, k-1); nb = sg_load(local_subgrid, i, j, k+1)
+          srcz = transverse_source(m0, local_ppm_half_slope(na, m0, nb), gamma, 2)
        else
-          ! MUSCL-Hancock (moncen) path; slope_type=10 falls back to moncen (=2).
+          ! MUSCL-Hancock (moncen) slopes + half-step cell prediction.
           eff_slope = slope
           if (slope == 10) eff_slope = 2
-
-          ! Compute the TVD Slopes
-          slopes_x%density    = 0.5 * slope_moncen(local_subgrid%density   (i - 1, j, k), cell%density,    local_subgrid%density   (i + 1, j, k), eff_slope)
-          slopes_x%velocity_x = 0.5 * slope_moncen(local_subgrid%velocity_x(i - 1, j, k), cell%velocity_x, local_subgrid%velocity_x(i + 1, j, k), eff_slope)
-          slopes_x%velocity_y = 0.5 * slope_moncen(local_subgrid%velocity_y(i - 1, j, k), cell%velocity_y, local_subgrid%velocity_y(i + 1, j, k), eff_slope)
-          slopes_x%velocity_z = 0.5 * slope_moncen(local_subgrid%velocity_z(i - 1, j, k), cell%velocity_z, local_subgrid%velocity_z(i + 1, j, k), eff_slope)
-          slopes_x%pressure   = 0.5 * slope_moncen(local_subgrid%pressure  (i - 1, j, k), cell%pressure,   local_subgrid%pressure  (i + 1, j, k), eff_slope)
-
-          slopes_y%density    = 0.5 * slope_moncen(local_subgrid%density   (i, j - 1, k), cell%density,    local_subgrid%density(   i, j + 1, k), eff_slope)
-          slopes_y%velocity_x = 0.5 * slope_moncen(local_subgrid%velocity_x(i, j - 1, k), cell%velocity_x, local_subgrid%velocity_x(i, j + 1, k), eff_slope)
-          slopes_y%velocity_y = 0.5 * slope_moncen(local_subgrid%velocity_y(i, j - 1, k), cell%velocity_y, local_subgrid%velocity_y(i, j + 1, k), eff_slope)
-          slopes_y%velocity_z = 0.5 * slope_moncen(local_subgrid%velocity_z(i, j - 1, k), cell%velocity_z, local_subgrid%velocity_z(i, j + 1, k), eff_slope)
-          slopes_y%pressure   = 0.5 * slope_moncen(local_subgrid%pressure  (i, j - 1, k), cell%pressure,   local_subgrid%pressure(  i, j + 1, k), eff_slope)
-
-          slopes_z%density    = 0.5 * slope_moncen(local_subgrid%density   (i, j, k - 1), cell%density,    local_subgrid%density   (i, j, k + 1), eff_slope)
-          slopes_z%velocity_x = 0.5 * slope_moncen(local_subgrid%velocity_x(i, j, k - 1), cell%velocity_x, local_subgrid%velocity_x(i, j, k + 1), eff_slope)
-          slopes_z%velocity_y = 0.5 * slope_moncen(local_subgrid%velocity_y(i, j, k - 1), cell%velocity_y, local_subgrid%velocity_y(i, j, k + 1), eff_slope)
-          slopes_z%velocity_z = 0.5 * slope_moncen(local_subgrid%velocity_z(i, j, k - 1), cell%velocity_z, local_subgrid%velocity_z(i, j, k + 1), eff_slope)
-          slopes_z%pressure   = 0.5 * slope_moncen(local_subgrid%pressure  (i, j, k - 1), cell%pressure,   local_subgrid%pressure  (i, j, k + 1), eff_slope)
-
-          ! Source terms
-          source_term%density    = -cell%velocity_x * slopes_x%density    &
-                                   -cell%velocity_y * slopes_y%density    &
-                                   -cell%velocity_z * slopes_z%density    &
-                                   - (slopes_x%velocity_x + slopes_y%velocity_y + slopes_z%velocity_z) * cell%density
-          source_term%velocity_x = -cell%velocity_x * slopes_x%velocity_x &
-                                   -cell%velocity_y * slopes_y%velocity_x &
-                                   -cell%velocity_z * slopes_z%velocity_x &
-                                   - (slopes_x%pressure) / cell%density
-          source_term%velocity_y = -cell%velocity_x * slopes_x%velocity_y &
-                                   -cell%velocity_y * slopes_y%velocity_y &
-                                   -cell%velocity_z * slopes_z%velocity_y &
-                                   - (slopes_y%pressure) / cell%density
-          source_term%velocity_z = -cell%velocity_x * slopes_x%velocity_z &
-                                   -cell%velocity_y * slopes_y%velocity_z &
-                                   -cell%velocity_z * slopes_z%velocity_z &
-                                   - (slopes_z%pressure) / cell%density
-          source_term%pressure   = -cell%velocity_x * slopes_x%pressure   &
-                                   -cell%velocity_y * slopes_y%pressure   &
-                                   -cell%velocity_z * slopes_z%pressure   &
-                                   - (slopes_x%velocity_x + slopes_y%velocity_y + slopes_z%velocity_z) * gamma * cell%pressure
-
-          ! Cell-centered predicted states
-          cell%density    = cell%density    + dtdx * source_term%density
-          cell%velocity_x = cell%velocity_x + dtdx * source_term%velocity_x
-          cell%velocity_y = cell%velocity_y + dtdx * source_term%velocity_y
-          cell%velocity_z = cell%velocity_z + dtdx * source_term%velocity_z
-          cell%pressure   = cell%pressure   + dtdx * source_term%pressure
-
-          ! Project predicted cell +/- slope to the six faces (global frame).
-          fxr%density=cell%density-slopes_x%density; fxr%velocity_x=cell%velocity_x-slopes_x%velocity_x; fxr%velocity_y=cell%velocity_y-slopes_x%velocity_y; fxr%velocity_z=cell%velocity_z-slopes_x%velocity_z; fxr%pressure=cell%pressure-slopes_x%pressure
-          fxl%density=cell%density+slopes_x%density; fxl%velocity_x=cell%velocity_x+slopes_x%velocity_x; fxl%velocity_y=cell%velocity_y+slopes_x%velocity_y; fxl%velocity_z=cell%velocity_z+slopes_x%velocity_z; fxl%pressure=cell%pressure+slopes_x%pressure
-          fyr%density=cell%density-slopes_y%density; fyr%velocity_x=cell%velocity_x-slopes_y%velocity_x; fyr%velocity_y=cell%velocity_y-slopes_y%velocity_y; fyr%velocity_z=cell%velocity_z-slopes_y%velocity_z; fyr%pressure=cell%pressure-slopes_y%pressure
-          fyl%density=cell%density+slopes_y%density; fyl%velocity_x=cell%velocity_x+slopes_y%velocity_x; fyl%velocity_y=cell%velocity_y+slopes_y%velocity_y; fyl%velocity_z=cell%velocity_z+slopes_y%velocity_z; fyl%pressure=cell%pressure+slopes_y%pressure
-          fzr%density=cell%density-slopes_z%density; fzr%velocity_x=cell%velocity_x-slopes_z%velocity_x; fzr%velocity_y=cell%velocity_y-slopes_z%velocity_y; fzr%velocity_z=cell%velocity_z-slopes_z%velocity_z; fzr%pressure=cell%pressure-slopes_z%pressure
-          fzl%density=cell%density+slopes_z%density; fzl%velocity_x=cell%velocity_x+slopes_z%velocity_x; fzl%velocity_y=cell%velocity_y+slopes_z%velocity_y; fzl%velocity_z=cell%velocity_z+slopes_z%velocity_z; fzl%pressure=cell%pressure+slopes_z%pressure
+          slopes_x%density = 0.5 * slope_moncen(local_subgrid%density(i-1,j,k), cell%density, local_subgrid%density(i+1,j,k), eff_slope)
+          slopes_x%velocity_x = 0.5 * slope_moncen(local_subgrid%velocity_x(i-1,j,k), cell%velocity_x, local_subgrid%velocity_x(i+1,j,k), eff_slope)
+          slopes_x%velocity_y = 0.5 * slope_moncen(local_subgrid%velocity_y(i-1,j,k), cell%velocity_y, local_subgrid%velocity_y(i+1,j,k), eff_slope)
+          slopes_x%velocity_z = 0.5 * slope_moncen(local_subgrid%velocity_z(i-1,j,k), cell%velocity_z, local_subgrid%velocity_z(i+1,j,k), eff_slope)
+          slopes_x%pressure = 0.5 * slope_moncen(local_subgrid%pressure(i-1,j,k), cell%pressure, local_subgrid%pressure(i+1,j,k), eff_slope)
+          slopes_y%density = 0.5 * slope_moncen(local_subgrid%density(i,j-1,k), cell%density, local_subgrid%density(i,j+1,k), eff_slope)
+          slopes_y%velocity_x = 0.5 * slope_moncen(local_subgrid%velocity_x(i,j-1,k), cell%velocity_x, local_subgrid%velocity_x(i,j+1,k), eff_slope)
+          slopes_y%velocity_y = 0.5 * slope_moncen(local_subgrid%velocity_y(i,j-1,k), cell%velocity_y, local_subgrid%velocity_y(i,j+1,k), eff_slope)
+          slopes_y%velocity_z = 0.5 * slope_moncen(local_subgrid%velocity_z(i,j-1,k), cell%velocity_z, local_subgrid%velocity_z(i,j+1,k), eff_slope)
+          slopes_y%pressure = 0.5 * slope_moncen(local_subgrid%pressure(i,j-1,k), cell%pressure, local_subgrid%pressure(i,j+1,k), eff_slope)
+          slopes_z%density = 0.5 * slope_moncen(local_subgrid%density(i,j,k-1), cell%density, local_subgrid%density(i,j,k+1), eff_slope)
+          slopes_z%velocity_x = 0.5 * slope_moncen(local_subgrid%velocity_x(i,j,k-1), cell%velocity_x, local_subgrid%velocity_x(i,j,k+1), eff_slope)
+          slopes_z%velocity_y = 0.5 * slope_moncen(local_subgrid%velocity_y(i,j,k-1), cell%velocity_y, local_subgrid%velocity_y(i,j,k+1), eff_slope)
+          slopes_z%velocity_z = 0.5 * slope_moncen(local_subgrid%velocity_z(i,j,k-1), cell%velocity_z, local_subgrid%velocity_z(i,j,k+1), eff_slope)
+          slopes_z%pressure = 0.5 * slope_moncen(local_subgrid%pressure(i,j,k-1), cell%pressure, local_subgrid%pressure(i,j,k+1), eff_slope)
+          source_term%density    = -cell%velocity_x*slopes_x%density    -cell%velocity_y*slopes_y%density    -cell%velocity_z*slopes_z%density    - (slopes_x%velocity_x+slopes_y%velocity_y+slopes_z%velocity_z)*cell%density
+          source_term%velocity_x = -cell%velocity_x*slopes_x%velocity_x -cell%velocity_y*slopes_y%velocity_x -cell%velocity_z*slopes_z%velocity_x - slopes_x%pressure/cell%density
+          source_term%velocity_y = -cell%velocity_x*slopes_x%velocity_y -cell%velocity_y*slopes_y%velocity_y -cell%velocity_z*slopes_z%velocity_y - slopes_y%pressure/cell%density
+          source_term%velocity_z = -cell%velocity_x*slopes_x%velocity_z -cell%velocity_y*slopes_y%velocity_z -cell%velocity_z*slopes_z%velocity_z - slopes_z%pressure/cell%density
+          source_term%pressure   = -cell%velocity_x*slopes_x%pressure   -cell%velocity_y*slopes_y%pressure   -cell%velocity_z*slopes_z%pressure   - (slopes_x%velocity_x+slopes_y%velocity_y+slopes_z%velocity_z)*gamma*cell%pressure
+          cell%density = cell%density + dtdx*source_term%density
+          cell%velocity_x = cell%velocity_x + dtdx*source_term%velocity_x
+          cell%velocity_y = cell%velocity_y + dtdx*source_term%velocity_y
+          cell%velocity_z = cell%velocity_z + dtdx*source_term%velocity_z
+          cell%pressure = cell%pressure + dtdx*source_term%pressure
        end if
 
-       ! Compute and write out the interface states (face states already in the
-       ! global frame for both PPM and moncen; riemann_driver rotates them).
-
-       ! The right state at i-1/2
+       ! ----- X faces (fr = state at i-1/2, fl = state at i+1/2) -----
+       if (use_ppm) then
+          na = sg_load(local_subgrid, i-1, j, k); nb = sg_load(local_subgrid, i+1, j, k)
+          call local_ppm_trace(na, m0, nb, gamma, dtdx, fl, fr)
+          tsrc = prim_add(srcy, srcz)
+          call add_transverse_source(fl, tsrc, dtdx, m0)
+          call add_transverse_source(fr, tsrc, dtdx, m0)
+       else
+          fr%density=cell%density-slopes_x%density; fr%velocity_x=cell%velocity_x-slopes_x%velocity_x; fr%velocity_y=cell%velocity_y-slopes_x%velocity_y; fr%velocity_z=cell%velocity_z-slopes_x%velocity_z; fr%pressure=cell%pressure-slopes_x%pressure
+          fl%density=cell%density+slopes_x%density; fl%velocity_x=cell%velocity_x+slopes_x%velocity_x; fl%velocity_y=cell%velocity_y+slopes_x%velocity_y; fl%velocity_z=cell%velocity_z+slopes_x%velocity_z; fl%pressure=cell%pressure+slopes_x%pressure
+       end if
        if (i > 1 .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) then
-          right_interfaces_x%density   (i-2, j-2, k-2) = fxr%density
-          right_interfaces_x%velocity_x(i-2, j-2, k-2) = fxr%velocity_x
-          right_interfaces_x%velocity_y(i-2, j-2, k-2) = fxr%velocity_y
-          right_interfaces_x%velocity_z(i-2, j-2, k-2) = fxr%velocity_z
-          right_interfaces_x%pressure  (i-2, j-2, k-2) = fxr%pressure
-          ! Fallback to first order
+          right_interfaces_x%density(i-2, j-2, k-2) = fr%density
+          right_interfaces_x%velocity_x(i-2, j-2, k-2) = fr%velocity_x
+          right_interfaces_x%velocity_y(i-2, j-2, k-2) = fr%velocity_y
+          right_interfaces_x%velocity_z(i-2, j-2, k-2) = fr%velocity_z
+          right_interfaces_x%pressure(i-2, j-2, k-2) = fr%pressure
           if (right_interfaces_x%density (i-2, j-2, k-2) < smallr) right_interfaces_x%density (i-2, j-2, k-2) = local_subgrid%density (i, j, k)
           if (right_interfaces_x%pressure(i-2, j-2, k-2) < smallp) right_interfaces_x%pressure(i-2, j-2, k-2) = local_subgrid%pressure(i, j, k)
        end if
-
-       ! The left state at i+1/2
        if (i < work_size .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) then
-          left_interfaces_x%density   (i-1, j-2, k-2) = fxl%density
-          left_interfaces_x%velocity_x(i-1, j-2, k-2) = fxl%velocity_x
-          left_interfaces_x%velocity_y(i-1, j-2, k-2) = fxl%velocity_y
-          left_interfaces_x%velocity_z(i-1, j-2, k-2) = fxl%velocity_z
-          left_interfaces_x%pressure  (i-1, j-2, k-2) = fxl%pressure
-          ! Fallback to first order
+          left_interfaces_x%density(i-1, j-2, k-2) = fl%density
+          left_interfaces_x%velocity_x(i-1, j-2, k-2) = fl%velocity_x
+          left_interfaces_x%velocity_y(i-1, j-2, k-2) = fl%velocity_y
+          left_interfaces_x%velocity_z(i-1, j-2, k-2) = fl%velocity_z
+          left_interfaces_x%pressure(i-1, j-2, k-2) = fl%pressure
           if (left_interfaces_x%density (i-1, j-2, k-2) < smallr) left_interfaces_x%density (i-1, j-2, k-2) = local_subgrid%density (i, j, k)
           if (left_interfaces_x%pressure(i-1, j-2, k-2) < smallp) left_interfaces_x%pressure(i-1, j-2, k-2) = local_subgrid%pressure(i, j, k)
        end if
 
-       ! The right state at j-1/2
+       ! ----- Y faces (rotate (vx,vy,vz)<-(gy,gz,gx), un-rotate back) -----
+       if (use_ppm) then
+          na = sg_load(local_subgrid, i, j-1, k); nb = sg_load(local_subgrid, i, j+1, k)
+          rl%density=na%density; rl%velocity_x=na%velocity_y; rl%velocity_y=na%velocity_z; rl%velocity_z=na%velocity_x; rl%pressure=na%pressure
+          rm%density=m0%density; rm%velocity_x=m0%velocity_y; rm%velocity_y=m0%velocity_z; rm%velocity_z=m0%velocity_x; rm%pressure=m0%pressure
+          rr%density=nb%density; rr%velocity_x=nb%velocity_y; rr%velocity_y=nb%velocity_z; rr%velocity_z=nb%velocity_x; rr%pressure=nb%pressure
+          call local_ppm_trace(rl, rm, rr, gamma, dtdx, qp, qn)
+          fl%density=qp%density; fl%velocity_x=qp%velocity_z; fl%velocity_y=qp%velocity_x; fl%velocity_z=qp%velocity_y; fl%pressure=qp%pressure
+          fr%density=qn%density; fr%velocity_x=qn%velocity_z; fr%velocity_y=qn%velocity_x; fr%velocity_z=qn%velocity_y; fr%pressure=qn%pressure
+          tsrc = prim_add(srcx, srcz)
+          call add_transverse_source(fl, tsrc, dtdx, m0)
+          call add_transverse_source(fr, tsrc, dtdx, m0)
+       else
+          fr%density=cell%density-slopes_y%density; fr%velocity_x=cell%velocity_x-slopes_y%velocity_x; fr%velocity_y=cell%velocity_y-slopes_y%velocity_y; fr%velocity_z=cell%velocity_z-slopes_y%velocity_z; fr%pressure=cell%pressure-slopes_y%pressure
+          fl%density=cell%density+slopes_y%density; fl%velocity_x=cell%velocity_x+slopes_y%velocity_x; fl%velocity_y=cell%velocity_y+slopes_y%velocity_y; fl%velocity_z=cell%velocity_z+slopes_y%velocity_z; fl%pressure=cell%pressure+slopes_y%pressure
+       end if
        if ((i > 1 .and. i < work_size) .and. j > 1 .and. (k > 1 .and. k < work_size)) then
-          right_interfaces_y%density   (i-2, j-2, k-2) = fyr%density
-          right_interfaces_y%velocity_x(i-2, j-2, k-2) = fyr%velocity_x
-          right_interfaces_y%velocity_y(i-2, j-2, k-2) = fyr%velocity_y
-          right_interfaces_y%velocity_z(i-2, j-2, k-2) = fyr%velocity_z
-          right_interfaces_y%pressure  (i-2, j-2, k-2) = fyr%pressure
-          ! Fallback to first order
+          right_interfaces_y%density(i-2, j-2, k-2) = fr%density
+          right_interfaces_y%velocity_x(i-2, j-2, k-2) = fr%velocity_x
+          right_interfaces_y%velocity_y(i-2, j-2, k-2) = fr%velocity_y
+          right_interfaces_y%velocity_z(i-2, j-2, k-2) = fr%velocity_z
+          right_interfaces_y%pressure(i-2, j-2, k-2) = fr%pressure
           if (right_interfaces_y%density (i-2, j-2, k-2) < smallr) right_interfaces_y%density (i-2, j-2, k-2) = local_subgrid%density (i, j, k)
           if (right_interfaces_y%pressure(i-2, j-2, k-2) < smallp) right_interfaces_y%pressure(i-2, j-2, k-2) = local_subgrid%pressure(i, j, k)
        end if
-
-       ! The left state at j+1/2
        if ((i > 1 .and. i < work_size) .and. j < work_size .and. (k > 1 .and. k < work_size)) then
-          left_interfaces_y%density   (i-2, j-1, k-2) = fyl%density
-          left_interfaces_y%velocity_x(i-2, j-1, k-2) = fyl%velocity_x
-          left_interfaces_y%velocity_y(i-2, j-1, k-2) = fyl%velocity_y
-          left_interfaces_y%velocity_z(i-2, j-1, k-2) = fyl%velocity_z
-          left_interfaces_y%pressure  (i-2, j-1, k-2) = fyl%pressure
-          ! Fallback to first order
+          left_interfaces_y%density(i-2, j-1, k-2) = fl%density
+          left_interfaces_y%velocity_x(i-2, j-1, k-2) = fl%velocity_x
+          left_interfaces_y%velocity_y(i-2, j-1, k-2) = fl%velocity_y
+          left_interfaces_y%velocity_z(i-2, j-1, k-2) = fl%velocity_z
+          left_interfaces_y%pressure(i-2, j-1, k-2) = fl%pressure
           if (left_interfaces_y%density (i-2, j-1, k-2) < smallr) left_interfaces_y%density (i-2, j-1, k-2) = local_subgrid%density (i, j, k)
           if (left_interfaces_y%pressure(i-2, j-1, k-2) < smallp) left_interfaces_y%pressure(i-2, j-1, k-2) = local_subgrid%pressure(i, j, k)
        end if
 
-       ! The right state at k-1/2
+       ! ----- Z faces (rotate (vx,vy,vz)<-(gz,gx,gy), un-rotate back) -----
+       if (use_ppm) then
+          na = sg_load(local_subgrid, i, j, k-1); nb = sg_load(local_subgrid, i, j, k+1)
+          rl%density=na%density; rl%velocity_x=na%velocity_z; rl%velocity_y=na%velocity_x; rl%velocity_z=na%velocity_y; rl%pressure=na%pressure
+          rm%density=m0%density; rm%velocity_x=m0%velocity_z; rm%velocity_y=m0%velocity_x; rm%velocity_z=m0%velocity_y; rm%pressure=m0%pressure
+          rr%density=nb%density; rr%velocity_x=nb%velocity_z; rr%velocity_y=nb%velocity_x; rr%velocity_z=nb%velocity_y; rr%pressure=nb%pressure
+          call local_ppm_trace(rl, rm, rr, gamma, dtdx, qp, qn)
+          fl%density=qp%density; fl%velocity_x=qp%velocity_y; fl%velocity_y=qp%velocity_z; fl%velocity_z=qp%velocity_x; fl%pressure=qp%pressure
+          fr%density=qn%density; fr%velocity_x=qn%velocity_y; fr%velocity_y=qn%velocity_z; fr%velocity_z=qn%velocity_x; fr%pressure=qn%pressure
+          tsrc = prim_add(srcx, srcy)
+          call add_transverse_source(fl, tsrc, dtdx, m0)
+          call add_transverse_source(fr, tsrc, dtdx, m0)
+       else
+          fr%density=cell%density-slopes_z%density; fr%velocity_x=cell%velocity_x-slopes_z%velocity_x; fr%velocity_y=cell%velocity_y-slopes_z%velocity_y; fr%velocity_z=cell%velocity_z-slopes_z%velocity_z; fr%pressure=cell%pressure-slopes_z%pressure
+          fl%density=cell%density+slopes_z%density; fl%velocity_x=cell%velocity_x+slopes_z%velocity_x; fl%velocity_y=cell%velocity_y+slopes_z%velocity_y; fl%velocity_z=cell%velocity_z+slopes_z%velocity_z; fl%pressure=cell%pressure+slopes_z%pressure
+       end if
        if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k > 1) then
-          right_interfaces_z%density   (i-2, j-2, k-2) = fzr%density
-          right_interfaces_z%velocity_x(i-2, j-2, k-2) = fzr%velocity_x
-          right_interfaces_z%velocity_y(i-2, j-2, k-2) = fzr%velocity_y
-          right_interfaces_z%velocity_z(i-2, j-2, k-2) = fzr%velocity_z
-          right_interfaces_z%pressure  (i-2, j-2, k-2) = fzr%pressure
-          ! Fallback to first order
+          right_interfaces_z%density(i-2, j-2, k-2) = fr%density
+          right_interfaces_z%velocity_x(i-2, j-2, k-2) = fr%velocity_x
+          right_interfaces_z%velocity_y(i-2, j-2, k-2) = fr%velocity_y
+          right_interfaces_z%velocity_z(i-2, j-2, k-2) = fr%velocity_z
+          right_interfaces_z%pressure(i-2, j-2, k-2) = fr%pressure
           if (right_interfaces_z%density (i-2, j-2, k-2) < smallr) right_interfaces_z%density (i-2, j-2, k-2) = local_subgrid%density (i, j, k)
           if (right_interfaces_z%pressure(i-2, j-2, k-2) < smallp) right_interfaces_z%pressure(i-2, j-2, k-2) = local_subgrid%pressure(i, j, k)
        end if
-
-       ! The left state at k+1/2
        if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k < work_size) then
-          left_interfaces_z%density   (i-2, j-2, k-1) = fzl%density
-          left_interfaces_z%velocity_x(i-2, j-2, k-1) = fzl%velocity_x
-          left_interfaces_z%velocity_y(i-2, j-2, k-1) = fzl%velocity_y
-          left_interfaces_z%velocity_z(i-2, j-2, k-1) = fzl%velocity_z
-          left_interfaces_z%pressure  (i-2, j-2, k-1) = fzl%pressure
-          ! Fallback to first order
+          left_interfaces_z%density(i-2, j-2, k-1) = fl%density
+          left_interfaces_z%velocity_x(i-2, j-2, k-1) = fl%velocity_x
+          left_interfaces_z%velocity_y(i-2, j-2, k-1) = fl%velocity_y
+          left_interfaces_z%velocity_z(i-2, j-2, k-1) = fl%velocity_z
+          left_interfaces_z%pressure(i-2, j-2, k-1) = fl%pressure
           if (left_interfaces_z%density (i-2, j-2, k-1) < smallr) left_interfaces_z%density (i-2, j-2, k-1) = local_subgrid%density (i, j, k)
           if (left_interfaces_z%pressure(i-2, j-2, k-1) < smallp) left_interfaces_z%pressure(i-2, j-2, k-1) = local_subgrid%pressure(i, j, k)
        end if
@@ -1791,11 +1764,16 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  ! NOTE: this godunov kernel is register-limited. At full register pressure it
-  ! needs 119 regs/thread (fp32) -> only 2 blocks/SM (~33% occupancy), and the
-  ! arithmetic-heavy PPM path then cannot hide latency. The build caps it to
-  ! maxregcount:72 (-> 3 blocks/SM, ~50% occupancy) for ~+14% PPM / ~+12% PLM;
-  ! see the gpu_hydro.o rule in bin/Makefile. Tighter caps spill PPM and regress.
+  ! NOTE: this godunov kernel is register-limited (occupancy, not bandwidth, is
+  ! the wall). The PLM-only path needs ~55 regs/thread (fp32); the PPM trace adds
+  ! the rest. trace_3d's PPM branch is written per-direction -- only one axis'
+  ! face pair, stencil and rotation temporaries are live at once, and neighbours
+  ! are read on demand from shared memory (sg_load) -- which keeps the natural
+  ! footprint to ~96 regs (vs ~120 for a hold-everything version). The build then
+  ! caps to maxregcount:72 (~59% occupancy) for the measured optimum: ~+14% PPM,
+  ! up to +22% PLM+HLLC. See the gpu_hydro.o rule in bin/Makefile. Tighter caps
+  ! spill PPM's working set and regress; getting below ~64 natural needs the
+  ! trace's own internal state cut (or the pipeline split into separate kernels).
   attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, dt, dx, slope, riemann, constant_gravity)
