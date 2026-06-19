@@ -10,7 +10,7 @@ contains
 
 #ifdef TURB
   !=====================================================================================
-  ! Kernel A: time-interpolation of the acceleration field.
+  ! Time-interpolation of the acceleration field.
   ! afield_now = last_tfrac*afield_last + next_tfrac*afield_next, elementwise.
   ! Mirrors the host array statement in turb/turb_update.f90.
   ! Arrays are passed as assumed-size (flattened) -- one thread per element.
@@ -33,7 +33,7 @@ contains
   end subroutine turb_interp_field_kernel
 
   !=====================================================================================
-  ! Kernel B: turbulent driving force.
+  ! Turbulent driving force.
   ! Per (cell, oct): compute cell-centre position, read density from uold, apply the
   ! density filter, trilinearly interpolate the 64^3 afield_now onto the cell, and store
   ! the result in fturb. Fuses drive_turb (turb/turb_driving.f90) and turb_force_calc
@@ -100,7 +100,7 @@ contains
   end subroutine turb_drive_kernel
 
   !=====================================================================================
-  ! Kernel C: turbulent source term.
+  ! Turbulent source term.
   ! Per (cell, oct): subtract kinetic energy, add rho*fturb*dteff to momentum, recompute
   ! total energy. Direct port of turb_hydro (turb/turb_hydro.f90); operates on uold.
   !=====================================================================================

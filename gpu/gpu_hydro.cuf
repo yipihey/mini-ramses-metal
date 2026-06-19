@@ -166,10 +166,6 @@ module hydro_device
   end type subgrid_3x3x2edge_corner
 
 #endif
-
-  ! LLF-switch thresholds, published from the host before each integrator launch.
-  ! Read directly by riemann_driver to avoid threading them through device-routine
-  ! signatures (the 2D EMF path carries its own copies as arguments).
   real(kind=dp), device :: switch_llf_dmin_d
   real(kind=dp), device :: switch_llf_pmin_d
 

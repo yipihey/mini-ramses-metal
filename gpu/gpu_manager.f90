@@ -202,8 +202,7 @@ end subroutine gpu_turb_init_fields
 !###########################################################
 !###########################################################
 !###########################################################
-!> Device-side companion to turb_next_field: rotate next->last on the device (no H2D
-!> traffic) then upload only the freshly generated host afield_next.
+!> Device-side companion to turb_next_field.
 subroutine gpu_turb_next_field(pst)
   use ramses_commons, only: pst_t
   implicit none
@@ -221,10 +220,9 @@ end subroutine gpu_turb_next_field
 !###########################################################
 !###########################################################
 !###########################################################
-!> GPU turbulence update (replaces host turb_check_time on the leaf):
+!> GPU turbulence update:
 !> generate new field(s) on the host as time advances, mirror to the device, and
-!> time-interpolate afield_now on the device (Kernel A). The host afield_now is also
-!> updated so host-side diagnostics (e.g. current_turb_rms) stay correct.
+!> time-interpolate afield_now on the device. The host afield_now is also updated.
 subroutine gpu_update_turb(pst)
   use ramses_commons, only: pst_t
   use turb_commons, only: turb_next_field
@@ -242,7 +240,7 @@ subroutine gpu_update_turb(pst)
      end if
   end do
 
-  ! Device time-interpolation (Kernel A).
+  ! Device time-interpolation.
   call gpu_turb_interp(pst%s)
 
   ! Keep the host afield_now in sync for host-side diagnostics.

@@ -79,7 +79,7 @@ subroutine init_amr(r,g,m,type)
   use amr_commons, ONLY: run_t, global_t, mesh_t
   use hash
   use hilbert
-#ifdef TURB
+#if defined(_CUDA) && defined(TURB)
   use turb_commons, ONLY: TURB_GS
 #endif
 #ifdef _CUDA
@@ -224,9 +224,8 @@ subroutine init_amr(r,g,m,type)
      bold=0d0
      bnew=0d0
 #endif
-#ifdef TURB
-     ! Turbulent driving fields (generated on host, interpolated on device) and per-cell
-     ! turbulent forcing. afield extents match host (0:TGRID_* == 0:TURB_GS-1).
+#if defined(_CUDA) && defined(TURB)
+     ! Turbulent driving fields (generated on host, interpolated on device) and per-cell turbulent forcing.
      allocate(afield_last_d(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1))
      allocate(afield_next_d(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1))
      allocate(afield_now_d (1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1))

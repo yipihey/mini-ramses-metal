@@ -259,11 +259,11 @@ contains
 
 #ifdef TURB
   !> @brief
-  !> Time-interpolate the turbulent acceleration field on the device (Kernel A).
+  !> Time-interpolate the turbulent acceleration field on the device.
   !>
   !> @detail
   !> afield_now_d = last_tfrac*afield_last_d + next_tfrac*afield_next_d, computed from the
-  !> host turbulence times. Replaces the host array statement in turb_check_time.
+  !> host turbulence times.
   !>
   !> @param[in] sim : The simulation object
   !>
@@ -296,7 +296,7 @@ contains
   end subroutine gpu_turb_interp
 
   !> @brief
-  !> Compute the turbulent driving force on a level (Kernel B), filling fturb.
+  !> Compute the turbulent driving force on a level, filling fturb.
   !>
   !> @param[in] sim : The simulation object
   !> @param[in] ilevel : The refinement level to drive
@@ -332,7 +332,7 @@ contains
   end subroutine gpu_drive_turb
 
   !> @brief
-  !> Apply the turbulent source term to uold on a level (Kernel C).
+  !> Apply the turbulent source term to uold on a level.
   !>
   !> @param[in] sim : The simulation object
   !> @param[in] ilevel : The refinement level to update
