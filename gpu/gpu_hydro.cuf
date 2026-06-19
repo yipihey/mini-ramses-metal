@@ -3960,7 +3960,7 @@ contains
     real(kind=8), intent(in), value :: dt
 
     integer :: block_idx, cell_idx, oct_idx
-    real(kind=dp) :: d, mx, my, mz, e_prim, fact
+    real(kind=dp) :: d, mx, my, mz, e_prim, fact, d_old
 
     block_idx = blockIdx%x - 1
 
@@ -3978,7 +3978,8 @@ contains
     my = unew(cell_idx, 3, oct_idx)
     mz = unew(cell_idx, 4, oct_idx)
     e_prim = unew(cell_idx, 5, oct_idx) - 0.5_dp*(mx*mx + my*my + mz*mz)/d
-    fact = max(uold(cell_idx, 1, oct_idx), smallr)/d * dt
+    d_old = max(uold(cell_idx, 1, oct_idx), smallr)
+    fact = d_old / d * dt
 #ifdef GRAV
     mx = mx + d*f(cell_idx, 1, oct_idx)*fact
     my = my + d*f(cell_idx, 2, oct_idx)*fact
