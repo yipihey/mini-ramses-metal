@@ -166,6 +166,8 @@ module hydro_device
   end type subgrid_3x3x2edge_corner
 
 #endif
+  real(kind=dp), device :: switch_llf_dmin_d
+  real(kind=dp), device :: switch_llf_pmin_d
 
 contains
 
@@ -494,9 +496,10 @@ contains
   end function compute_emag
 
   ! 1D HLL MHD Riemann flux (x-normal; y/z via rotation in driver).
-  attributes(device) function hll_mhd_fluxes(left, right, gamma, smallr, smallc2) result(flux)
+  attributes(device) function hll_mhd_fluxes(left, right, gamma, smallr, smallc2, llf) result(flux)
     type(primitive_t), intent(in) :: left, right
     real(kind=dp), value :: gamma, smallr, smallc2
+    logical, value :: llf
     type(conserved_t) :: flux
     type(primitive_t) :: left_state, right_state
     type(conserved_t) :: left_state_c, right_state_c, left_fluxes, right_fluxes
@@ -580,8 +583,14 @@ contains
     d2r = 0.5_dp * (b2r / rr + c2r)
     cfright = sqrt(d2r + sqrt(d2r**2 - c2r * brx * brx / rr))
 
-    speed_l = min(min(ul, ur) - max(cfleft, cfright), 0.0_dp)
-    speed_r = max(max(ul, ur) + max(cfleft, cfright), 0.0_dp)
+    if (llf) then
+       ! Local Lax-Friedrich (Rusanov): symmetric maximum signal speed.
+       speed_r = max(abs(ul) + cfleft, abs(ur) + cfright)
+       speed_l = -speed_r
+    else
+       speed_l = min(min(ul, ur) - max(cfleft, cfright), 0.0_dp)
+       speed_r = max(max(ul, ur) + max(cfleft, cfright), 0.0_dp)
+    end if
 
     ! HLL combination of left/right fluxes.
     flux%density = hll_flux(speed_l, speed_r, left_fluxes%density, right_fluxes%density, &
@@ -1996,11 +2005,13 @@ contains
 #ifdef MHD
     if (riemann .eq. solver_hlld) then
        flux = hlld_mhd_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2)
+    else if (riemann .eq. solver_llf) then
+       flux = hll_mhd_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2, .true.)
     else if (riemann .eq. solver_hll) then
-       flux = hll_mhd_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2)
+       flux = hll_mhd_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2, .false.)
     else
        ! Unimplemented 1D solvers fall back to HLL.
-       flux = hll_mhd_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2)   ! fall back to HLL
+       flux = hll_mhd_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2, .false.)   ! fall back to HLL
     endif
 #else
     if(riemann .eq. solver_llf)then
@@ -2044,6 +2055,11 @@ contains
     integer :: work_idx, interface_array_size, i, j, k
     type(primitive_t) :: left_interface, right_interface
     type(conserved_t) :: flux
+    integer :: riemann_local
+#ifdef MHD
+    logical :: switch_to_llf
+    real(kind=dp) :: rmin, pmin
+#endif
 #if NVAR>5+NENER
     real(kind=dp) :: SL, SR
     real(kind=dp) :: sLin(1:nscalar), sRin(1:nscalar), fscal(1:nscalar)
@@ -2144,8 +2160,22 @@ contains
 #endif
        end if
 
+       ! Per-interface LLF switch for HLLD (matches CPU cmpflxm / riemann_llf_mhd):
+       ! drop to LLF where density/pressure fall below the configured floors.
+       riemann_local = riemann
+#ifdef MHD
+       if (riemann .eq. solver_hlld) then
+          rmin = min(left_interface%density, right_interface%density)
+          pmin = min(left_interface%pressure, right_interface%pressure)
+          switch_to_llf = .false.
+          if (switch_llf_dmin_d > 0.0_dp) switch_to_llf = rmin < switch_llf_dmin_d
+          if (switch_llf_pmin_d > 0.0_dp) switch_to_llf = pmin < switch_llf_pmin_d
+          if (switch_to_llf) riemann_local = solver_llf
+       end if
+#endif
+
        ! Call the Riemann Solver
-       flux = riemann_fluxes(left_interface, right_interface, gamma, smallr, smallc2, riemann)
+       flux = riemann_fluxes(left_interface, right_interface, gamma, smallr, smallc2, riemann_local)
 #if NVAR>5+NENER
 #ifdef MHD
        call hll_mhd_wavespeeds(left_interface, right_interface, gamma, smallr, smallc2, SL, SR)
@@ -2157,7 +2187,7 @@ contains
        rhoR = right_interface%density
 #endif
        do n = 1, nscalar
-          fscal(n) = scalar_flux(riemann, flux%density, SL, SR, &
+          fscal(n) = scalar_flux(riemann_local, flux%density, SL, SR, &
                & rhoL, left_interface%velocity_x, sLin(n), &
                & rhoR, right_interface%velocity_x, sRin(n))
        end do

@@ -30,6 +30,13 @@ module gpu_runner
   !> Device arrays for face-centred B (MHD).
   real(kind=dp), device, allocatable, dimension(:,:,:) :: bold, bnew
 
+#ifdef TURB
+  !> Turbulent acceleration fields on the device (64^3 x NDIM), generated on the host.
+  real(kind=8), device, allocatable, dimension(:,:,:,:) :: afield_last_d, afield_next_d, afield_now_d
+  !> Per-cell turbulent forcing on the device (mirrors host m%fturb).
+  real(kind=dp), device, allocatable, dimension(:,:,:) :: fturb
+#endif
+
   !> Arrays to hold the gravity variables on the device
   real(kind=dp), device, allocatable, dimension(:,:) :: phi, rho, nref, phi_old
   real(kind=dp), device, allocatable, dimension(:,:,:) :: f
@@ -250,6 +257,118 @@ contains
 
   end subroutine gpu_sync_hydro
 
+#ifdef TURB
+  !> @brief
+  !> Time-interpolate the turbulent acceleration field on the device.
+  !>
+  !> @detail
+  !> afield_now_d = last_tfrac*afield_last_d + next_tfrac*afield_next_d, computed from the
+  !> host turbulence times.
+  !>
+  !> @param[in] sim : The simulation object
+  !>
+  subroutine gpu_turb_interp(sim)
+    use nvtx
+    use turb_device, only: turb_interp_field_kernel
+    use turb_commons, only: TURB_GS
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout)::sim
+
+    integer(kind=4) :: ntot
+    integer :: num_threads, num_blocks
+    real(kind=8) :: last_tfrac, next_tfrac
+
+    last_tfrac = (sim%g%t - sim%turb%turb_last_time)/sim%turb%turb_dt
+    next_tfrac = 1d0 - last_tfrac
+
+    ntot = ndim*TURB_GS**ndim
+    num_threads = 256
+    num_blocks = (ntot + num_threads - 1)/num_threads
+
+    call nvtxStartRange("GPU turb_interp", color=0)!green
+    ! Pass element references so the flattened (assumed-size) kernel dummies bind to the
+    ! contiguous base address of each field.
+    call turb_interp_field_kernel<<<num_blocks, num_threads>>>(afield_last_d(1,0,0,0), &
+         & afield_next_d(1,0,0,0), afield_now_d(1,0,0,0), last_tfrac, next_tfrac, ntot)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    call nvtxEndRange()
+
+  end subroutine gpu_turb_interp
+
+  !> @brief
+  !> Compute the turbulent driving force on a level, filling fturb.
+  !>
+  !> @param[in] sim : The simulation object
+  !> @param[in] ilevel : The refinement level to drive
+  !>
+  subroutine gpu_drive_turb(sim, ilevel)
+    use nvtx
+    use turb_device, only: turb_drive_kernel
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout)::sim
+    integer, intent(in)::ilevel
+
+    integer(kind=4) :: head_idx, num_octs
+    integer :: threadsX_per_block, threadsY_per_block, num_blocks
+    real(kind=dp) :: dx, boxlen, turb_min_rho
+
+    dx = sim%r%boxlen/2**ilevel
+    boxlen = sim%r%boxlen
+    turb_min_rho = sim%r%turb_min_rho
+
+    head_idx = sim%m%head(ilevel)
+    num_octs = sim%m%noct(ilevel)
+    if (num_octs == 0) return
+    threadsX_per_block = twotondim
+    threadsY_per_block = 16
+    num_blocks = (num_octs + threadsY_per_block - 1)/threadsY_per_block
+
+    call nvtxStartRange("GPU drive_turb", color=0)!green
+    call turb_drive_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(grid, uold, &
+         & fturb, afield_now_d, d_skip, head_idx, num_octs, dx, boxlen, turb_min_rho)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    call nvtxEndRange()
+
+  end subroutine gpu_drive_turb
+
+  !> @brief
+  !> Apply the turbulent source term to uold on a level.
+  !>
+  !> @param[in] sim : The simulation object
+  !> @param[in] ilevel : The refinement level to update
+  !> @param[in] dteff : The effective time step
+  !>
+  subroutine gpu_turb_hydro(sim, ilevel, dteff)
+    use nvtx
+    use turb_device, only: turb_hydro_kernel
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout)::sim
+    integer, intent(in)::ilevel
+    real(kind=8)::dteff
+
+    integer(kind=4) :: head_idx, num_octs
+    integer :: threadsX_per_block, threadsY_per_block, num_blocks
+    real(kind=dp) :: smallr, smallc
+
+    smallr = sim%r%smallr
+    smallc = sim%r%smallc
+
+    head_idx = sim%m%head(ilevel)
+    num_octs = sim%m%noct(ilevel)
+    if (num_octs == 0) return
+    threadsX_per_block = twotondim
+    threadsY_per_block = 16
+    num_blocks = (num_octs + threadsY_per_block - 1)/threadsY_per_block
+
+    call nvtxStartRange("GPU turb_hydro", color=0)!green
+    call turb_hydro_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, fturb, &
+         & head_idx, num_octs, smallr, smallc, dteff)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    call nvtxEndRange()
+
+  end subroutine gpu_turb_hydro
+#endif
+
   !> @brief
   !> Predictor step of new hydro variables (unew) due to gravity
   !>
@@ -303,6 +422,7 @@ contains
 #else
     use hydro_device, only: hydro_integrator_kernel
 #endif
+    use hydro_device, only: switch_llf_dmin_d, switch_llf_pmin_d
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout)::sim
     integer, intent(in)::ilevel
@@ -326,6 +446,9 @@ contains
     riemann2d = sim%r%riemann2d
     switch_llf_dmin = sim%r%switch_llf_dmin
     switch_llf_pmin = sim%r%switch_llf_pmin
+    ! Publish LLF-switch thresholds to the device for the 1D Riemann path.
+    switch_llf_dmin_d = switch_llf_dmin
+    switch_llf_pmin_d = switch_llf_pmin
     induction = sim%r%induction
 
     head_idx = (sim%m%head(ilevel) - 1) / nsubgridtondim + 1
@@ -1141,10 +1264,11 @@ contains
        if(num_octs > 0)then
           call nvtxStartRange("GPU user_flag", color=2)!yellow
           call hydro_flag_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(flag1, grid, nbor, uold, bold, &
+               & head_idx, num_octs, &
 #ifdef MHD
                & err_grad_b2, floor_b2, err_grad_A, floor_A, err_grad_B, floor_B, err_grad_C, floor_C, &
 #endif
-               & head_idx, num_octs, gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p)
+               & gamma, smallr, smallc2, err_grad_d, err_grad_p, floor_d, floor_p)
           call nvtxEndRange()
        endif
     endif
