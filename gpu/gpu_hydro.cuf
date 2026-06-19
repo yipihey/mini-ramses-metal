@@ -325,6 +325,7 @@ contains
     integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
     integer :: cell_idx, source_idx, subgrid_idx
     integer :: work_size
+    integer :: s
 
     work_size = 2*nsubgrid+4
 
@@ -380,11 +381,249 @@ contains
        ! Store refinement map
        local_subgrid%refined   (i, j, k) = grid(source_idx)%refined(cell_idx)
 
+#if NVAR>5
+       ! Passive-scalar fractions sᵢ = (ρsᵢ)/ρ (vars 6..nvar), for mass-flux advection.
+       do s = 1, nvar-5
+          local_subgrid%scalar(i, j, k, s) = uold(cell_idx, 5+s, source_idx) / conserved%density
+       end do
+#endif
+
     end do
 
     call syncthreads()
 
   end subroutine subgrid_conserved_2_primitive
+  ! =========================================================================
+
+  ! =========================================================================
+  ! Local PPM reconstruction helpers (slope_type=10). Faithful transliteration
+  ! of the Metal reference (gpu/metal/hydro.h local_ppm_*). Compact three-cell
+  ! parabolic reconstruction + characteristic tracing with one ghost cell.
+  ! =========================================================================
+  attributes(device) function local_ppm_minmod3(a, b, c) result(res)
+    real(kind=dp), value :: a, b, c
+    real(kind=dp) :: res
+    if (a*b <= 0.0_dp .or. a*c <= 0.0_dp) then
+       res = 0.0_dp
+    else
+       res = sign(min(abs(a), min(abs(b), abs(c))), a)
+    end if
+  end function local_ppm_minmod3
+
+  attributes(device) function local_ppm_mc(l, m, r) result(res)
+    real(kind=dp), value :: l, m, r
+    real(kind=dp) :: res
+    res = local_ppm_minmod3(2.0_dp*(m - l), 2.0_dp*(r - m), 0.5_dp*(r - l))
+  end function local_ppm_mc
+
+  attributes(device) subroutine local_ppm_monotonize(ql, q0, qr, lo, hi)
+    real(kind=dp), value :: ql, q0, qr
+    real(kind=dp), intent(out) :: lo, hi
+    real(kind=dp) :: dq, diff
+    dq = qr - ql
+    diff = (q0 - 0.5_dp*(ql + qr))*dq
+    if ((qr - q0)*(q0 - ql) <= 0.0_dp) then
+       lo = q0; hi = q0
+    else if (diff > dq*dq/6.0_dp) then
+       lo = 3.0_dp*q0 - 2.0_dp*qr; hi = qr
+    else if (diff < -dq*dq/6.0_dp) then
+       lo = ql; hi = 3.0_dp*q0 - 2.0_dp*ql
+    else
+       lo = ql; hi = qr
+    end if
+  end subroutine local_ppm_monotonize
+
+  attributes(device) subroutine local_ppm_edges(qm, q0, qp, ql, qr)
+    real(kind=dp), value :: qm, q0, qp
+    real(kind=dp), intent(out) :: ql, qr
+    real(kind=dp) :: slope, curve
+    slope = 0.25_dp*(qp - qm)
+    curve = (qm - 2.0_dp*q0 + qp)/12.0_dp
+    call local_ppm_monotonize(q0 - slope + curve, q0, q0 + slope + curve, ql, qr)
+  end subroutine local_ppm_edges
+
+  attributes(device) function local_ppm_avg(ql, qa, qr, lo, hi) result(res)
+    real(kind=dp), value :: ql, qa, qr, lo, hi
+    real(kind=dp) :: res, b, c
+    b = -4.0_dp*ql + 6.0_dp*qa - 2.0_dp*qr
+    c = 3.0_dp*(ql - 2.0_dp*qa + qr)
+    res = ql + 0.5_dp*b*(lo + hi) + c*(lo*lo + lo*hi + hi*hi)/3.0_dp
+  end function local_ppm_avg
+
+  attributes(device) function strong_pressure_jump(a, b, c) result(res)
+    real(kind=dp), value :: a, b, c
+    logical :: res
+    real(kind=dp), parameter :: tiny = 1d-20
+    real(kind=dp) :: hi, lo
+    hi = max(a, max(b, c))
+    lo = max(min(a, min(b, c)), tiny)
+    res = hi/lo > 2.0_dp
+  end function strong_pressure_jump
+
+  attributes(device) function local_ppm_half_slope(l, m, r) result(s)
+    type(primitive_t), intent(in) :: l, m, r
+    type(primitive_t) :: s
+    s%density    = 0.5_dp*local_ppm_mc(l%density,    m%density,    r%density)
+    s%velocity_x = 0.5_dp*local_ppm_mc(l%velocity_x, m%velocity_x, r%velocity_x)
+    s%velocity_y = 0.5_dp*local_ppm_mc(l%velocity_y, m%velocity_y, r%velocity_y)
+    s%velocity_z = 0.5_dp*local_ppm_mc(l%velocity_z, m%velocity_z, r%velocity_z)
+    s%pressure   = 0.5_dp*local_ppm_mc(l%pressure,   m%pressure,   r%pressure)
+  end function local_ppm_half_slope
+
+  !> Transverse predictor source for a half-slope `s` along direction `dir`
+  !> (0=x,1=y,2=z); the pressure-gradient term lands only in the matching
+  !> velocity component (hydro.h transverse_source).
+  attributes(device) function transverse_source(m, s, gamma, dir) result(src)
+    type(primitive_t), intent(in) :: m, s
+    real(kind=dp), value :: gamma
+    integer, value :: dir
+    type(primitive_t) :: src
+    real(kind=dp) :: vdir, svel
+    if (dir == 0) then
+       vdir = m%velocity_x; svel = s%velocity_x
+    else if (dir == 1) then
+       vdir = m%velocity_y; svel = s%velocity_y
+    else
+       vdir = m%velocity_z; svel = s%velocity_z
+    end if
+    src%density    = -vdir*s%density - svel*m%density
+    src%velocity_x = -vdir*s%velocity_x
+    src%velocity_y = -vdir*s%velocity_y
+    src%velocity_z = -vdir*s%velocity_z
+    if (dir == 0) src%velocity_x = src%velocity_x - s%pressure/m%density
+    if (dir == 1) src%velocity_y = src%velocity_y - s%pressure/m%density
+    if (dir == 2) src%velocity_z = src%velocity_z - s%pressure/m%density
+    src%pressure   = -vdir*s%pressure - svel*gamma*m%pressure
+  end function transverse_source
+
+  attributes(device) subroutine add_transverse_source(q, src, dtdx, m)
+    type(primitive_t), intent(inout) :: q
+    type(primitive_t), intent(in) :: src, m
+    real(kind=dp), value :: dtdx
+    q%density    = q%density    + dtdx*src%density
+    q%velocity_x = q%velocity_x + dtdx*src%velocity_x
+    q%velocity_y = q%velocity_y + dtdx*src%velocity_y
+    q%velocity_z = q%velocity_z + dtdx*src%velocity_z
+    q%pressure   = q%pressure   + dtdx*src%pressure
+    if (q%density <= 0.0_dp .or. q%pressure <= 0.0_dp) q = m
+  end subroutine add_transverse_source
+
+  attributes(device) function prim_add(a, b) result(c)
+    type(primitive_t), intent(in) :: a, b
+    type(primitive_t) :: c
+    c%density    = a%density    + b%density
+    c%velocity_x = a%velocity_x + b%velocity_x
+    c%velocity_y = a%velocity_y + b%velocity_y
+    c%velocity_z = a%velocity_z + b%velocity_z
+    c%pressure   = a%pressure   + b%pressure
+  end function prim_add
+
+  ! Load one cell of the shared-memory subgrid into a primitive_t (by reference,
+  ! no copy of the whole subgrid). Lets the PPM trace read neighbours on demand
+  ! instead of materialising all six at once -> far lower register pressure.
+  attributes(device) function sg_load(sg, i, j, k) result(p)
+    type(subgrid_6x6x6cell_primitive), intent(in) :: sg
+    integer, value :: i, j, k
+    type(primitive_t) :: p
+    p%density    = sg%density   (i, j, k)
+    p%velocity_x = sg%velocity_x(i, j, k)
+    p%velocity_y = sg%velocity_y(i, j, k)
+    p%velocity_z = sg%velocity_z(i, j, k)
+    p%pressure   = sg%pressure  (i, j, k)
+  end function sg_load
+
+  !> Compact three-cell PPM reconstruction + characteristic trace along x.
+  !> qplus is the cell's +x face state, qminus its -x face state. Five-variable
+  !> core only (no passive scalars: CUDA primitive_t carries 5 fields).
+  attributes(device) subroutine local_ppm_trace(l, m, r, gamma, dtdx, qplus, qminus)
+    type(primitive_t), intent(in) :: l, m, r
+    real(kind=dp), value :: gamma, dtdx
+    type(primitive_t), intent(out) :: qplus, qminus
+    real(kind=dp), parameter :: smallr = 1d-10, smallp = 1d-30
+    real(kind=dp) :: dl, dr, ul, ur, vl, vr, wl, wr, pl, pr, cs
+    real(kind=dp) :: rg, ug, vg, wg, pg, od, ou, ov, ow, op
+    real(kind=dp) :: lambda(3), sigma, a, b, du, dpr, amp, aa, bb
+    type(primitive_t) :: q
+    integer :: side, wave
+    logical :: right
+
+    call local_ppm_edges(l%density,    m%density,    r%density,    dl, dr)
+    call local_ppm_edges(l%velocity_x, m%velocity_x, r%velocity_x, ul, ur)
+    call local_ppm_edges(l%velocity_y, m%velocity_y, r%velocity_y, vl, vr)
+    call local_ppm_edges(l%velocity_z, m%velocity_z, r%velocity_z, wl, wr)
+    call local_ppm_edges(l%pressure,   m%pressure,   r%pressure,   pl, pr)
+    cs = sqrt(gamma*max(m%pressure, smallp)/max(m%density, smallr))
+
+    ! Re-monotonize the parabolic edges (Metal BLEND_EDGES with alpha=0).
+    call local_ppm_monotonize(dl, m%density,    dr, aa, bb); dl = aa; dr = bb
+    call local_ppm_monotonize(ul, m%velocity_x, ur, aa, bb); ul = aa; ur = bb
+    call local_ppm_monotonize(vl, m%velocity_y, vr, aa, bb); vl = aa; vr = bb
+    call local_ppm_monotonize(wl, m%velocity_z, wr, aa, bb); wl = aa; wr = bb
+    call local_ppm_monotonize(pl, m%pressure,   pr, aa, bb); pl = aa; pr = bb
+
+    if (dl <= 0.0_dp .or. dr <= 0.0_dp) then
+       dl = m%density; dr = m%density
+    end if
+    if (pl <= 0.0_dp .or. pr <= 0.0_dp) then
+       pl = m%pressure; pr = m%pressure
+    end if
+    dl = max(dl, smallr); dr = max(dr, smallr)
+    pl = max(pl, smallp); pr = max(pr, smallp)
+
+    do side = 0, 1
+       right = (side == 0)
+       if (right) then
+          rg = dr; ug = ur; vg = vr; wg = wr; pg = pr
+       else
+          rg = dl; ug = ul; vg = vl; wg = wl; pg = pl
+       end if
+       od = 0.0_dp; ou = 0.0_dp; ov = 0.0_dp; ow = 0.0_dp; op = 0.0_dp
+       lambda(1) = m%velocity_x - cs
+       lambda(2) = m%velocity_x
+       lambda(3) = m%velocity_x + cs
+       do wave = 1, 3
+          if (right) then
+             if (.not. (lambda(wave) > 0.0_dp)) cycle
+          else
+             if (.not. (lambda(wave) < 0.0_dp)) cycle
+          end if
+          sigma = min(abs(lambda(wave))*dtdx, 1.0_dp)
+          if (right) then
+             a = 1.0_dp - sigma; b = 1.0_dp
+          else
+             a = 0.0_dp; b = sigma
+          end if
+          du  = local_ppm_avg(ul, m%velocity_x, ur, a, b) - ug
+          dpr = local_ppm_avg(pl, m%pressure,   pr, a, b) - pg
+          if (wave == 1 .or. wave == 3) then
+             if (wave == 1) then
+                amp = -m%density*du/(2.0_dp*cs) + dpr/(2.0_dp*cs*cs)
+                ou = ou + (-cs/m%density)*amp
+             else
+                amp =  m%density*du/(2.0_dp*cs) + dpr/(2.0_dp*cs*cs)
+                ou = ou + ( cs/m%density)*amp
+             end if
+             od = od + amp
+             op = op + cs*cs*amp
+          else
+             od = od + (local_ppm_avg(dl, m%density,    dr, a, b) - rg - dpr/(cs*cs))
+             ov = ov + (local_ppm_avg(vl, m%velocity_y, vr, a, b) - vg)
+             ow = ow + (local_ppm_avg(wl, m%velocity_z, wr, a, b) - wg)
+          end if
+       end do
+       q%density    = rg + od
+       q%velocity_x = ug + ou
+       q%velocity_y = vg + ov
+       q%velocity_z = wg + ow
+       q%pressure   = pg + op
+       if (q%density <= 0.0_dp .or. q%pressure <= 0.0_dp) q = m
+       if (right) then
+          qplus = q
+       else
+          qminus = q
+       end if
+    end do
+  end subroutine local_ppm_trace
   ! =========================================================================
 
   ! =========================================================================
@@ -416,6 +655,17 @@ contains
     type(primitive_t) :: cell ! The cell centered primitive variables and (eventually) predicted states
     type(primitive_t) :: slopes_x, slopes_y, slopes_z ! The limited slopes in the x, y, and z directions
     type(primitive_t) :: source_term ! The sources terms
+    ! Current-direction reconstructed face states, REUSED across x/y/z so only one
+    ! direction's pair is ever live (left = +1/2 face, right = -1/2 face), always
+    ! in the GLOBAL velocity frame (riemann_driver does the rotation).
+    type(primitive_t) :: fl, fr
+    ! Local PPM (slope_type=10) scratch: persistent transverse sources srcx/y/z,
+    ! plus per-direction stencil (na,nb), rotation (rl,rm,rr), trace out (qp,qn)
+    ! and combined transverse source (tsrc) -- all reused each direction to keep
+    ! the kernel's register footprint (and thus occupancy) low.
+    type(primitive_t) :: m0, na, nb, rl, rm, rr, qp, qn, tsrc, srcx, srcy, srcz
+    logical :: use_ppm
+    integer :: eff_slope
 
     real(kind=dp) :: smallp
     integer :: work_idx   ! Loop index for unit of work
@@ -435,131 +685,160 @@ contains
        call index_1Dto3D(work_idx, work_size, work_size, i, j, k)
        i = i + 1; j = j + 1; k = k + 1
 
-       ! Cell centered values
+       ! Cell centered (raw) values
        cell%density    = local_subgrid%density   (i, j, k)
        cell%velocity_x = local_subgrid%velocity_x(i, j, k)
        cell%velocity_y = local_subgrid%velocity_y(i, j, k)
        cell%velocity_z = local_subgrid%velocity_z(i, j, k)
        cell%pressure   = local_subgrid%pressure  (i, j, k)
+       m0 = cell
 
-       ! Compute the TVD Slopes
-       slopes_x%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i - 1, j, k), cell%density,    local_subgrid%density   (i + 1, j, k), slope)
-       slopes_x%velocity_x = 0.5_dp * slope_moncen(local_subgrid%velocity_x(i - 1, j, k), cell%velocity_x, local_subgrid%velocity_x(i + 1, j, k), slope)
-       slopes_x%velocity_y = 0.5_dp * slope_moncen(local_subgrid%velocity_y(i - 1, j, k), cell%velocity_y, local_subgrid%velocity_y(i + 1, j, k), slope)
-       slopes_x%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i - 1, j, k), cell%velocity_z, local_subgrid%velocity_z(i + 1, j, k), slope)
-       slopes_x%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i - 1, j, k), cell%pressure,   local_subgrid%pressure  (i + 1, j, k), slope)
+       ! Choose Local PPM (slope_type=10) unless a strong pressure jump on any
+       ! axis triggers the moncen (slope=2) shock fallback (hydro.h trace_cell_3d).
+       use_ppm = (slope == 10)
+       if (use_ppm) then
+          if ( strong_pressure_jump(local_subgrid%pressure(i-1,j,k), m0%pressure, local_subgrid%pressure(i+1,j,k)) .or. &
+             & strong_pressure_jump(local_subgrid%pressure(i,j-1,k), m0%pressure, local_subgrid%pressure(i,j+1,k)) .or. &
+             & strong_pressure_jump(local_subgrid%pressure(i,j,k-1), m0%pressure, local_subgrid%pressure(i,j,k+1)) ) then
+             use_ppm = .false.
+          end if
+       end if
 
-       slopes_y%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i, j - 1, k), cell%density,    local_subgrid%density(   i, j + 1, k), slope)
-       slopes_y%velocity_x = 0.5_dp * slope_moncen(local_subgrid%velocity_x(i, j - 1, k), cell%velocity_x, local_subgrid%velocity_x(i, j + 1, k), slope)
-       slopes_y%velocity_y = 0.5_dp * slope_moncen(local_subgrid%velocity_y(i, j - 1, k), cell%velocity_y, local_subgrid%velocity_y(i, j + 1, k), slope)
-       slopes_y%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i, j - 1, k), cell%velocity_z, local_subgrid%velocity_z(i, j + 1, k), slope)
-       slopes_y%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i, j - 1, k), cell%pressure,   local_subgrid%pressure(  i, j + 1, k), slope)
+       if (use_ppm) then
+          ! Three transverse predictor sources (each from one axis half-slope).
+          na = sg_load(local_subgrid, i-1, j, k); nb = sg_load(local_subgrid, i+1, j, k)
+          srcx = transverse_source(m0, local_ppm_half_slope(na, m0, nb), gamma, 0)
+          na = sg_load(local_subgrid, i, j-1, k); nb = sg_load(local_subgrid, i, j+1, k)
+          srcy = transverse_source(m0, local_ppm_half_slope(na, m0, nb), gamma, 1)
+          na = sg_load(local_subgrid, i, j, k-1); nb = sg_load(local_subgrid, i, j, k+1)
+          srcz = transverse_source(m0, local_ppm_half_slope(na, m0, nb), gamma, 2)
+       else
+          ! MUSCL-Hancock (moncen) slopes + half-step cell prediction.
+          eff_slope = slope
+          if (slope == 10) eff_slope = 2
+          slopes_x%density = 0.5 * slope_moncen(local_subgrid%density(i-1,j,k), cell%density, local_subgrid%density(i+1,j,k), eff_slope)
+          slopes_x%velocity_x = 0.5 * slope_moncen(local_subgrid%velocity_x(i-1,j,k), cell%velocity_x, local_subgrid%velocity_x(i+1,j,k), eff_slope)
+          slopes_x%velocity_y = 0.5 * slope_moncen(local_subgrid%velocity_y(i-1,j,k), cell%velocity_y, local_subgrid%velocity_y(i+1,j,k), eff_slope)
+          slopes_x%velocity_z = 0.5 * slope_moncen(local_subgrid%velocity_z(i-1,j,k), cell%velocity_z, local_subgrid%velocity_z(i+1,j,k), eff_slope)
+          slopes_x%pressure = 0.5 * slope_moncen(local_subgrid%pressure(i-1,j,k), cell%pressure, local_subgrid%pressure(i+1,j,k), eff_slope)
+          slopes_y%density = 0.5 * slope_moncen(local_subgrid%density(i,j-1,k), cell%density, local_subgrid%density(i,j+1,k), eff_slope)
+          slopes_y%velocity_x = 0.5 * slope_moncen(local_subgrid%velocity_x(i,j-1,k), cell%velocity_x, local_subgrid%velocity_x(i,j+1,k), eff_slope)
+          slopes_y%velocity_y = 0.5 * slope_moncen(local_subgrid%velocity_y(i,j-1,k), cell%velocity_y, local_subgrid%velocity_y(i,j+1,k), eff_slope)
+          slopes_y%velocity_z = 0.5 * slope_moncen(local_subgrid%velocity_z(i,j-1,k), cell%velocity_z, local_subgrid%velocity_z(i,j+1,k), eff_slope)
+          slopes_y%pressure = 0.5 * slope_moncen(local_subgrid%pressure(i,j-1,k), cell%pressure, local_subgrid%pressure(i,j+1,k), eff_slope)
+          slopes_z%density = 0.5 * slope_moncen(local_subgrid%density(i,j,k-1), cell%density, local_subgrid%density(i,j,k+1), eff_slope)
+          slopes_z%velocity_x = 0.5 * slope_moncen(local_subgrid%velocity_x(i,j,k-1), cell%velocity_x, local_subgrid%velocity_x(i,j,k+1), eff_slope)
+          slopes_z%velocity_y = 0.5 * slope_moncen(local_subgrid%velocity_y(i,j,k-1), cell%velocity_y, local_subgrid%velocity_y(i,j,k+1), eff_slope)
+          slopes_z%velocity_z = 0.5 * slope_moncen(local_subgrid%velocity_z(i,j,k-1), cell%velocity_z, local_subgrid%velocity_z(i,j,k+1), eff_slope)
+          slopes_z%pressure = 0.5 * slope_moncen(local_subgrid%pressure(i,j,k-1), cell%pressure, local_subgrid%pressure(i,j,k+1), eff_slope)
+          source_term%density    = -cell%velocity_x*slopes_x%density    -cell%velocity_y*slopes_y%density    -cell%velocity_z*slopes_z%density    - (slopes_x%velocity_x+slopes_y%velocity_y+slopes_z%velocity_z)*cell%density
+          source_term%velocity_x = -cell%velocity_x*slopes_x%velocity_x -cell%velocity_y*slopes_y%velocity_x -cell%velocity_z*slopes_z%velocity_x - slopes_x%pressure/cell%density
+          source_term%velocity_y = -cell%velocity_x*slopes_x%velocity_y -cell%velocity_y*slopes_y%velocity_y -cell%velocity_z*slopes_z%velocity_y - slopes_y%pressure/cell%density
+          source_term%velocity_z = -cell%velocity_x*slopes_x%velocity_z -cell%velocity_y*slopes_y%velocity_z -cell%velocity_z*slopes_z%velocity_z - slopes_z%pressure/cell%density
+          source_term%pressure   = -cell%velocity_x*slopes_x%pressure   -cell%velocity_y*slopes_y%pressure   -cell%velocity_z*slopes_z%pressure   - (slopes_x%velocity_x+slopes_y%velocity_y+slopes_z%velocity_z)*gamma*cell%pressure
+          cell%density = cell%density + dtdx*source_term%density
+          cell%velocity_x = cell%velocity_x + dtdx*source_term%velocity_x
+          cell%velocity_y = cell%velocity_y + dtdx*source_term%velocity_y
+          cell%velocity_z = cell%velocity_z + dtdx*source_term%velocity_z
+          cell%pressure = cell%pressure + dtdx*source_term%pressure
+       end if
 
-       slopes_z%density    = 0.5_dp * slope_moncen(local_subgrid%density   (i, j, k - 1), cell%density,    local_subgrid%density   (i, j, k + 1), slope)
-       slopes_z%velocity_x = 0.5_dp * slope_moncen(local_subgrid%velocity_x(i, j, k - 1), cell%velocity_x, local_subgrid%velocity_x(i, j, k + 1), slope)
-       slopes_z%velocity_y = 0.5_dp * slope_moncen(local_subgrid%velocity_y(i, j, k - 1), cell%velocity_y, local_subgrid%velocity_y(i, j, k + 1), slope)
-       slopes_z%velocity_z = 0.5_dp * slope_moncen(local_subgrid%velocity_z(i, j, k - 1), cell%velocity_z, local_subgrid%velocity_z(i, j, k + 1), slope)
-       slopes_z%pressure   = 0.5_dp * slope_moncen(local_subgrid%pressure  (i, j, k - 1), cell%pressure,   local_subgrid%pressure  (i, j, k + 1), slope)
-
-       ! Source terms
-       source_term%density    = -cell%velocity_x * slopes_x%density    &
-                                -cell%velocity_y * slopes_y%density    &
-                                -cell%velocity_z * slopes_z%density    &
-                                - (slopes_x%velocity_x + slopes_y%velocity_y + slopes_z%velocity_z) * cell%density
-       source_term%velocity_x = -cell%velocity_x * slopes_x%velocity_x &
-                                -cell%velocity_y * slopes_y%velocity_x &
-                                -cell%velocity_z * slopes_z%velocity_x &
-                                - (slopes_x%pressure) / cell%density
-       source_term%velocity_y = -cell%velocity_x * slopes_x%velocity_y &
-                                -cell%velocity_y * slopes_y%velocity_y &
-                                -cell%velocity_z * slopes_z%velocity_y &
-                                - (slopes_y%pressure) / cell%density
-       source_term%velocity_z = -cell%velocity_x * slopes_x%velocity_z &
-                                -cell%velocity_y * slopes_y%velocity_z &
-                                -cell%velocity_z * slopes_z%velocity_z &
-                                - (slopes_z%pressure) / cell%density
-       source_term%pressure   = -cell%velocity_x * slopes_x%pressure   &
-                                -cell%velocity_y * slopes_y%pressure   &
-                                -cell%velocity_z * slopes_z%pressure   &
-                                - (slopes_x%velocity_x + slopes_y%velocity_y + slopes_z%velocity_z) * gamma * cell%pressure
-
-       ! Cell-centered predicted states
-       cell%density    = cell%density    + dtdx * source_term%density
-       cell%velocity_x = cell%velocity_x + dtdx * source_term%velocity_x
-       cell%velocity_y = cell%velocity_y + dtdx * source_term%velocity_y
-       cell%velocity_z = cell%velocity_z + dtdx * source_term%velocity_z
-       cell%pressure   = cell%pressure   + dtdx * source_term%pressure
-
-       ! Compute and write out the interface states
-
-       ! The right state at i-1/2
+       ! ----- X faces (fr = state at i-1/2, fl = state at i+1/2) -----
+       if (use_ppm) then
+          na = sg_load(local_subgrid, i-1, j, k); nb = sg_load(local_subgrid, i+1, j, k)
+          call local_ppm_trace(na, m0, nb, gamma, dtdx, fl, fr)
+          tsrc = prim_add(srcy, srcz)
+          call add_transverse_source(fl, tsrc, dtdx, m0)
+          call add_transverse_source(fr, tsrc, dtdx, m0)
+       else
+          fr%density=cell%density-slopes_x%density; fr%velocity_x=cell%velocity_x-slopes_x%velocity_x; fr%velocity_y=cell%velocity_y-slopes_x%velocity_y; fr%velocity_z=cell%velocity_z-slopes_x%velocity_z; fr%pressure=cell%pressure-slopes_x%pressure
+          fl%density=cell%density+slopes_x%density; fl%velocity_x=cell%velocity_x+slopes_x%velocity_x; fl%velocity_y=cell%velocity_y+slopes_x%velocity_y; fl%velocity_z=cell%velocity_z+slopes_x%velocity_z; fl%pressure=cell%pressure+slopes_x%pressure
+       end if
        if (i > 1 .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) then
-          right_interfaces_x%density   (i-2, j-2, k-2) = cell%density    - slopes_x%density
-          right_interfaces_x%velocity_x(i-2, j-2, k-2) = cell%velocity_x - slopes_x%velocity_x
-          right_interfaces_x%velocity_y(i-2, j-2, k-2) = cell%velocity_y - slopes_x%velocity_y
-          right_interfaces_x%velocity_z(i-2, j-2, k-2) = cell%velocity_z - slopes_x%velocity_z
-          right_interfaces_x%pressure  (i-2, j-2, k-2) = cell%pressure   - slopes_x%pressure
-          ! Fallback to first order
+          right_interfaces_x%density(i-2, j-2, k-2) = fr%density
+          right_interfaces_x%velocity_x(i-2, j-2, k-2) = fr%velocity_x
+          right_interfaces_x%velocity_y(i-2, j-2, k-2) = fr%velocity_y
+          right_interfaces_x%velocity_z(i-2, j-2, k-2) = fr%velocity_z
+          right_interfaces_x%pressure(i-2, j-2, k-2) = fr%pressure
           if (right_interfaces_x%density (i-2, j-2, k-2) < smallr) right_interfaces_x%density (i-2, j-2, k-2) = local_subgrid%density (i, j, k)
           if (right_interfaces_x%pressure(i-2, j-2, k-2) < smallp) right_interfaces_x%pressure(i-2, j-2, k-2) = local_subgrid%pressure(i, j, k)
        end if
-
-       ! The left state at i+1/2
        if (i < work_size .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) then
-          left_interfaces_x%density   (i-1, j-2, k-2) = cell%density    + slopes_x%density
-          left_interfaces_x%velocity_x(i-1, j-2, k-2) = cell%velocity_x + slopes_x%velocity_x
-          left_interfaces_x%velocity_y(i-1, j-2, k-2) = cell%velocity_y + slopes_x%velocity_y
-          left_interfaces_x%velocity_z(i-1, j-2, k-2) = cell%velocity_z + slopes_x%velocity_z
-          left_interfaces_x%pressure  (i-1, j-2, k-2) = cell%pressure   + slopes_x%pressure
-          ! Fallback to first order
+          left_interfaces_x%density(i-1, j-2, k-2) = fl%density
+          left_interfaces_x%velocity_x(i-1, j-2, k-2) = fl%velocity_x
+          left_interfaces_x%velocity_y(i-1, j-2, k-2) = fl%velocity_y
+          left_interfaces_x%velocity_z(i-1, j-2, k-2) = fl%velocity_z
+          left_interfaces_x%pressure(i-1, j-2, k-2) = fl%pressure
           if (left_interfaces_x%density (i-1, j-2, k-2) < smallr) left_interfaces_x%density (i-1, j-2, k-2) = local_subgrid%density (i, j, k)
           if (left_interfaces_x%pressure(i-1, j-2, k-2) < smallp) left_interfaces_x%pressure(i-1, j-2, k-2) = local_subgrid%pressure(i, j, k)
        end if
 
-       ! The right state at j-1/2
+       ! ----- Y faces (rotate (vx,vy,vz)<-(gy,gz,gx), un-rotate back) -----
+       if (use_ppm) then
+          na = sg_load(local_subgrid, i, j-1, k); nb = sg_load(local_subgrid, i, j+1, k)
+          rl%density=na%density; rl%velocity_x=na%velocity_y; rl%velocity_y=na%velocity_z; rl%velocity_z=na%velocity_x; rl%pressure=na%pressure
+          rm%density=m0%density; rm%velocity_x=m0%velocity_y; rm%velocity_y=m0%velocity_z; rm%velocity_z=m0%velocity_x; rm%pressure=m0%pressure
+          rr%density=nb%density; rr%velocity_x=nb%velocity_y; rr%velocity_y=nb%velocity_z; rr%velocity_z=nb%velocity_x; rr%pressure=nb%pressure
+          call local_ppm_trace(rl, rm, rr, gamma, dtdx, qp, qn)
+          fl%density=qp%density; fl%velocity_x=qp%velocity_z; fl%velocity_y=qp%velocity_x; fl%velocity_z=qp%velocity_y; fl%pressure=qp%pressure
+          fr%density=qn%density; fr%velocity_x=qn%velocity_z; fr%velocity_y=qn%velocity_x; fr%velocity_z=qn%velocity_y; fr%pressure=qn%pressure
+          tsrc = prim_add(srcx, srcz)
+          call add_transverse_source(fl, tsrc, dtdx, m0)
+          call add_transverse_source(fr, tsrc, dtdx, m0)
+       else
+          fr%density=cell%density-slopes_y%density; fr%velocity_x=cell%velocity_x-slopes_y%velocity_x; fr%velocity_y=cell%velocity_y-slopes_y%velocity_y; fr%velocity_z=cell%velocity_z-slopes_y%velocity_z; fr%pressure=cell%pressure-slopes_y%pressure
+          fl%density=cell%density+slopes_y%density; fl%velocity_x=cell%velocity_x+slopes_y%velocity_x; fl%velocity_y=cell%velocity_y+slopes_y%velocity_y; fl%velocity_z=cell%velocity_z+slopes_y%velocity_z; fl%pressure=cell%pressure+slopes_y%pressure
+       end if
        if ((i > 1 .and. i < work_size) .and. j > 1 .and. (k > 1 .and. k < work_size)) then
-          right_interfaces_y%density   (i-2, j-2, k-2) = cell%density    - slopes_y%density
-          right_interfaces_y%velocity_x(i-2, j-2, k-2) = cell%velocity_x - slopes_y%velocity_x
-          right_interfaces_y%velocity_y(i-2, j-2, k-2) = cell%velocity_y - slopes_y%velocity_y
-          right_interfaces_y%velocity_z(i-2, j-2, k-2) = cell%velocity_z - slopes_y%velocity_z
-          right_interfaces_y%pressure  (i-2, j-2, k-2) = cell%pressure   - slopes_y%pressure
-          ! Fallback to first order
+          right_interfaces_y%density(i-2, j-2, k-2) = fr%density
+          right_interfaces_y%velocity_x(i-2, j-2, k-2) = fr%velocity_x
+          right_interfaces_y%velocity_y(i-2, j-2, k-2) = fr%velocity_y
+          right_interfaces_y%velocity_z(i-2, j-2, k-2) = fr%velocity_z
+          right_interfaces_y%pressure(i-2, j-2, k-2) = fr%pressure
           if (right_interfaces_y%density (i-2, j-2, k-2) < smallr) right_interfaces_y%density (i-2, j-2, k-2) = local_subgrid%density (i, j, k)
           if (right_interfaces_y%pressure(i-2, j-2, k-2) < smallp) right_interfaces_y%pressure(i-2, j-2, k-2) = local_subgrid%pressure(i, j, k)
        end if
-
-       ! The left state at j+1/2
        if ((i > 1 .and. i < work_size) .and. j < work_size .and. (k > 1 .and. k < work_size)) then
-          left_interfaces_y%density   (i-2, j-1, k-2) = cell%density    + slopes_y%density
-          left_interfaces_y%velocity_x(i-2, j-1, k-2) = cell%velocity_x + slopes_y%velocity_x
-          left_interfaces_y%velocity_y(i-2, j-1, k-2) = cell%velocity_y + slopes_y%velocity_y
-          left_interfaces_y%velocity_z(i-2, j-1, k-2) = cell%velocity_z + slopes_y%velocity_z
-          left_interfaces_y%pressure  (i-2, j-1, k-2) = cell%pressure   + slopes_y%pressure
-          ! Fallback to first order
+          left_interfaces_y%density(i-2, j-1, k-2) = fl%density
+          left_interfaces_y%velocity_x(i-2, j-1, k-2) = fl%velocity_x
+          left_interfaces_y%velocity_y(i-2, j-1, k-2) = fl%velocity_y
+          left_interfaces_y%velocity_z(i-2, j-1, k-2) = fl%velocity_z
+          left_interfaces_y%pressure(i-2, j-1, k-2) = fl%pressure
           if (left_interfaces_y%density (i-2, j-1, k-2) < smallr) left_interfaces_y%density (i-2, j-1, k-2) = local_subgrid%density (i, j, k)
           if (left_interfaces_y%pressure(i-2, j-1, k-2) < smallp) left_interfaces_y%pressure(i-2, j-1, k-2) = local_subgrid%pressure(i, j, k)
        end if
 
-       ! The right state at k-1/2
+       ! ----- Z faces (rotate (vx,vy,vz)<-(gz,gx,gy), un-rotate back) -----
+       if (use_ppm) then
+          na = sg_load(local_subgrid, i, j, k-1); nb = sg_load(local_subgrid, i, j, k+1)
+          rl%density=na%density; rl%velocity_x=na%velocity_z; rl%velocity_y=na%velocity_x; rl%velocity_z=na%velocity_y; rl%pressure=na%pressure
+          rm%density=m0%density; rm%velocity_x=m0%velocity_z; rm%velocity_y=m0%velocity_x; rm%velocity_z=m0%velocity_y; rm%pressure=m0%pressure
+          rr%density=nb%density; rr%velocity_x=nb%velocity_z; rr%velocity_y=nb%velocity_x; rr%velocity_z=nb%velocity_y; rr%pressure=nb%pressure
+          call local_ppm_trace(rl, rm, rr, gamma, dtdx, qp, qn)
+          fl%density=qp%density; fl%velocity_x=qp%velocity_y; fl%velocity_y=qp%velocity_z; fl%velocity_z=qp%velocity_x; fl%pressure=qp%pressure
+          fr%density=qn%density; fr%velocity_x=qn%velocity_y; fr%velocity_y=qn%velocity_z; fr%velocity_z=qn%velocity_x; fr%pressure=qn%pressure
+          tsrc = prim_add(srcx, srcy)
+          call add_transverse_source(fl, tsrc, dtdx, m0)
+          call add_transverse_source(fr, tsrc, dtdx, m0)
+       else
+          fr%density=cell%density-slopes_z%density; fr%velocity_x=cell%velocity_x-slopes_z%velocity_x; fr%velocity_y=cell%velocity_y-slopes_z%velocity_y; fr%velocity_z=cell%velocity_z-slopes_z%velocity_z; fr%pressure=cell%pressure-slopes_z%pressure
+          fl%density=cell%density+slopes_z%density; fl%velocity_x=cell%velocity_x+slopes_z%velocity_x; fl%velocity_y=cell%velocity_y+slopes_z%velocity_y; fl%velocity_z=cell%velocity_z+slopes_z%velocity_z; fl%pressure=cell%pressure+slopes_z%pressure
+       end if
        if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k > 1) then
-          right_interfaces_z%density   (i-2, j-2, k-2) = cell%density    - slopes_z%density
-          right_interfaces_z%velocity_x(i-2, j-2, k-2) = cell%velocity_x - slopes_z%velocity_x
-          right_interfaces_z%velocity_y(i-2, j-2, k-2) = cell%velocity_y - slopes_z%velocity_y
-          right_interfaces_z%velocity_z(i-2, j-2, k-2) = cell%velocity_z - slopes_z%velocity_z
-          right_interfaces_z%pressure  (i-2, j-2, k-2) = cell%pressure   - slopes_z%pressure
-          ! Fallback to first order
+          right_interfaces_z%density(i-2, j-2, k-2) = fr%density
+          right_interfaces_z%velocity_x(i-2, j-2, k-2) = fr%velocity_x
+          right_interfaces_z%velocity_y(i-2, j-2, k-2) = fr%velocity_y
+          right_interfaces_z%velocity_z(i-2, j-2, k-2) = fr%velocity_z
+          right_interfaces_z%pressure(i-2, j-2, k-2) = fr%pressure
           if (right_interfaces_z%density (i-2, j-2, k-2) < smallr) right_interfaces_z%density (i-2, j-2, k-2) = local_subgrid%density (i, j, k)
           if (right_interfaces_z%pressure(i-2, j-2, k-2) < smallp) right_interfaces_z%pressure(i-2, j-2, k-2) = local_subgrid%pressure(i, j, k)
        end if
-
-       ! The left state at k+1/2
        if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k < work_size) then
-          left_interfaces_z%density   (i-2, j-2, k-1) = cell%density    + slopes_z%density
-          left_interfaces_z%velocity_x(i-2, j-2, k-1) = cell%velocity_x + slopes_z%velocity_x
-          left_interfaces_z%velocity_y(i-2, j-2, k-1) = cell%velocity_y + slopes_z%velocity_y
-          left_interfaces_z%velocity_z(i-2, j-2, k-1) = cell%velocity_z + slopes_z%velocity_z
-          left_interfaces_z%pressure  (i-2, j-2, k-1) = cell%pressure   + slopes_z%pressure
-          ! Fallback to first order
+          left_interfaces_z%density(i-2, j-2, k-1) = fl%density
+          left_interfaces_z%velocity_x(i-2, j-2, k-1) = fl%velocity_x
+          left_interfaces_z%velocity_y(i-2, j-2, k-1) = fl%velocity_y
+          left_interfaces_z%velocity_z(i-2, j-2, k-1) = fl%velocity_z
+          left_interfaces_z%pressure(i-2, j-2, k-1) = fl%pressure
           if (left_interfaces_z%density (i-2, j-2, k-1) < smallr) left_interfaces_z%density (i-2, j-2, k-1) = local_subgrid%density (i, j, k)
           if (left_interfaces_z%pressure(i-2, j-2, k-1) < smallp) left_interfaces_z%pressure(i-2, j-2, k-1) = local_subgrid%pressure(i, j, k)
        end if
@@ -768,7 +1047,114 @@ contains
 
   ! =========================================================================
   !> @brief
-  !> Dispatch GPU hydro Riemann solvers (LLF, HLL, HLLC).
+  !> van Leer two-shock Riemann solver used by the Local PPM scheme.
+  !> Faithful transliteration of the Metal reference twoshock_fluxes
+  !> (gpu/metal/hydro.h). Falls back to HLLC on strong pressure jumps.
+  !>
+  !> @param[in,out] left_state_p  : Left primitive state (clamped in place)
+  !> @param[in,out] right_state_p : Right primitive state (clamped in place)
+  !> @param[in] gamma : The adiabatic index
+  !>
+  !> @return flux : The conserved_t of the two-shock Godunov fluxes
+  attributes(device) function twoshock_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2) result(flux)
+    type(primitive_t), intent(inout) :: left_state_p, right_state_p
+    real(kind=dp), value :: gamma, smallr, smallc2
+    type(conserved_t) :: flux
+    real(kind=dp), parameter :: tiny = 1d-20
+    real(kind=dp) :: pratio, qa, gp1, cl, cr, ps, old_ps, ubl, ubr, dpdul, dpdur
+    real(kind=dp) :: zl, zr, delta, pbar, ubar, sn, c0, z0, dbar, cbar, l0, lbar
+    real(kind=dp) :: width, frac, pbv, dbv, ubv, etot
+    type(primitive_t) :: q0, up
+    integer :: n
+    logical :: converged
+
+    left_state_p%density   = max(left_state_p%density,   smallr)
+    right_state_p%density  = max(right_state_p%density,  smallr)
+    left_state_p%pressure  = max(left_state_p%pressure,  tiny)
+    right_state_p%pressure = max(right_state_p%pressure, tiny)
+
+    pratio = max(left_state_p%pressure, right_state_p%pressure) / &
+         &   max(min(left_state_p%pressure, right_state_p%pressure), tiny)
+    if (pratio > 2.0_dp) then
+       flux = hllc_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2)
+       return
+    end if
+
+    qa  = (gamma + 1.0_dp) / (2.0_dp * gamma)
+    gp1 = gamma + 1.0_dp
+    cl  = sqrt(gamma * left_state_p%pressure  * left_state_p%density)
+    cr  = sqrt(gamma * right_state_p%pressure * right_state_p%density)
+    ps  = max((cr*left_state_p%pressure + cl*right_state_p%pressure + &
+         &     cr*cl*(left_state_p%velocity_x - right_state_p%velocity_x)) / (cr + cl), tiny)
+    old_ps = ps; ubl = 0.0_dp; ubr = 0.0_dp; dpdul = 0.0_dp; dpdur = 0.0_dp
+    converged = .false.
+    do n = 2, 8
+       if (.not. converged) then
+          zl = cl * sqrt(1.0_dp + qa*(ps/left_state_p%pressure  - 1.0_dp))
+          zr = cr * sqrt(1.0_dp + qa*(ps/right_state_p%pressure - 1.0_dp))
+          ubl = left_state_p%velocity_x  - (ps - left_state_p%pressure)  / zl
+          ubr = right_state_p%velocity_x + (ps - right_state_p%pressure) / zr
+          dpdul = -4.0_dp*zl**3 / left_state_p%density  / (4.0_dp*zl**2/left_state_p%density  - gp1*(ps - left_state_p%pressure))
+          dpdur =  4.0_dp*zr**3 / right_state_p%density / (4.0_dp*zr**2/right_state_p%density - gp1*(ps - right_state_p%pressure))
+          ps = max(ps + (ubr - ubl)*dpdur*dpdul/(dpdur - dpdul), tiny)
+          delta = ps - old_ps; old_ps = ps
+          converged = abs(delta/ps) < 1d-7
+       end if
+    end do
+
+    pbar = ps
+    ubar = ubl + (ubr - ubl)*dpdur/(dpdur - dpdul)
+    if (-ubar >= 0.0_dp) then
+       sn = 1.0_dp
+    else
+       sn = -1.0_dp
+    end if
+    if (sn < 0.0_dp) then
+       q0 = left_state_p
+    else
+       q0 = right_state_p
+    end if
+    c0 = sqrt(max(gamma*q0%pressure/q0%density, tiny))
+    z0 = c0*q0%density*sqrt(max(1.0_dp + qa*(pbar/q0%pressure - 1.0_dp), tiny))
+    dbar = 1.0_dp/(1.0_dp/q0%density - (pbar - q0%pressure)/max(z0*z0, tiny))
+    cbar = sqrt(max(gamma*pbar/dbar, tiny))
+    if (pbar < q0%pressure) then
+       l0 = q0%velocity_x*sn + c0
+       lbar = sn*ubar + cbar
+    else
+       l0 = q0%velocity_x*sn + z0/q0%density
+       lbar = l0
+    end if
+    width = max(l0 - lbar, tiny)
+    frac = min(max((0.0_dp - lbar)/width, 0.0_dp), 1.0_dp)
+    pbv = q0%pressure*frac   + pbar*(1.0_dp - frac)
+    dbv = q0%density*frac    + dbar*(1.0_dp - frac)
+    ubv = q0%velocity_x*frac + ubar*(1.0_dp - frac)
+    if (lbar >= 0.0_dp) then
+       pbv = pbar; dbv = dbar; ubv = ubar
+    end if
+    if (l0 < 0.0_dp) then
+       pbv = q0%pressure; dbv = q0%density; ubv = q0%velocity_x
+    end if
+    if (ubv > 0.0_dp) then
+       up = left_state_p
+    else
+       up = right_state_p
+    end if
+    etot = pbv/(gamma - 1.0_dp) + 0.5_dp*dbv*magnitude_squared(ubv, up%velocity_y, up%velocity_z)
+
+    flux%density    = dbv*ubv
+    flux%momentum_x = flux%density*ubv + pbv
+    flux%momentum_y = flux%density*up%velocity_y
+    flux%momentum_z = flux%density*up%velocity_z
+    flux%energy     = (etot + pbv)*ubv
+
+  end function twoshock_fluxes
+  ! =========================================================================
+
+  ! =========================================================================
+  !> @brief
+  !> Dispatch GPU hydro Riemann solvers (LLF, HLL, HLLC, two-shock).
   !>
   !> @param[in] left_state_p : The state on the left side of the interface in primitive variables
   !> @param[in] right_state_p : The state on the right side of the interface in primitive variables
@@ -789,6 +1175,8 @@ contains
        flux = hll_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2, .false.)
     else if (riemann .eq. solver_hllc) then
        flux = hllc_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2)
+    else if (riemann .eq. solver_twoshock) then
+       flux = twoshock_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2)
     else
        ! Unsupported: LLF
        flux = hll_fluxes(left_state_p, right_state_p, gamma, smallr, smallc2, .true.)
@@ -974,12 +1362,13 @@ contains
 
   ! =========================================================================
   attributes(device) subroutine conservative_update(unew, nbor, fluxes_x, fluxes_y, fluxes_z, &
-       & head_idx, block_idx, thread_idx, dtdx)
+       & local_subgrid, head_idx, block_idx, thread_idx, dtdx)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
     type(subgrid_3x2x2cell_primitive), intent(in) :: fluxes_x
     type(subgrid_2x3x2cell_primitive), intent(in) :: fluxes_y
     type(subgrid_2x2x3cell_primitive), intent(in) :: fluxes_z
+    type(subgrid_6x6x6cell_primitive), intent(in) :: local_subgrid
     integer(kind=4), value :: head_idx
     integer, value :: block_idx, thread_idx
     real(kind=dp), value :: dtdx
@@ -988,6 +1377,8 @@ contains
     integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
     integer :: work_idx, subgrid_idx, oct_idx, cell_idx, ind_nbor
     type(conserved_t) :: update_term
+    integer :: s, li, lj, lk
+    real(kind=dp) :: fl, fr, supd
 
     ! Compute the size of the section of the subgrid to operate on
     work_size = 2*nsubgrid
@@ -1049,6 +1440,31 @@ contains
        unew(cell_idx, 3, oct_idx) = unew(cell_idx, 3, oct_idx) + update_term%momentum_y
        unew(cell_idx, 4, oct_idx) = unew(cell_idx, 4, oct_idx) + update_term%momentum_z
        unew(cell_idx, 5, oct_idx) = unew(cell_idx, 5, oct_idx) + update_term%energy
+
+#if NVAR>5
+       ! Passive-scalar (vars 6..nvar) advection: F(ρsᵢ) = (mass flux)·s_upwind (donor cell),
+       ! using the SAME mass flux as the density update so ρsᵢ/ρ is conserved consistently.
+       ! local_subgrid index = flux index + 2 for the central oct (li=i+2, etc.).
+       li = i + 2; lj = j + 2; lk = k + 2
+       do s = 1, nvar-5
+          ! X
+          fl = fluxes_x%density(i,   j, k)
+          fr = fluxes_x%density(i+1, j, k)
+          supd = ( fl*merge(local_subgrid%scalar(li-1,lj,lk,s), local_subgrid%scalar(li,lj,lk,s), fl>0.0_dp) &
+                 - fr*merge(local_subgrid%scalar(li,  lj,lk,s), local_subgrid%scalar(li+1,lj,lk,s), fr>0.0_dp) ) * dtdx
+          ! Y
+          fl = fluxes_y%density(i, j,   k)
+          fr = fluxes_y%density(i, j+1, k)
+          supd = supd + ( fl*merge(local_subgrid%scalar(li,lj-1,lk,s), local_subgrid%scalar(li,lj,lk,s), fl>0.0_dp) &
+                        - fr*merge(local_subgrid%scalar(li,lj,  lk,s), local_subgrid%scalar(li,lj+1,lk,s), fr>0.0_dp) ) * dtdx
+          ! Z
+          fl = fluxes_z%density(i, j, k  )
+          fr = fluxes_z%density(i, j, k+1)
+          supd = supd + ( fl*merge(local_subgrid%scalar(li,lj,lk-1,s), local_subgrid%scalar(li,lj,lk,s), fl>0.0_dp) &
+                        - fr*merge(local_subgrid%scalar(li,lj,lk,  s), local_subgrid%scalar(li,lj,lk+1,s), fr>0.0_dp) ) * dtdx
+          unew(cell_idx, 5+s, oct_idx) = unew(cell_idx, 5+s, oct_idx) + supd
+       end do
+#endif
 
     end do
 
@@ -1349,6 +1765,16 @@ contains
 
   ! =========================================================================
 #ifndef PAPER
+  ! NOTE: this godunov kernel is register-limited (occupancy, not bandwidth, is
+  ! the wall). The PLM-only path needs ~55 regs/thread (fp32); the PPM trace adds
+  ! the rest. trace_3d's PPM branch is written per-direction -- only one axis'
+  ! face pair, stencil and rotation temporaries are live at once, and neighbours
+  ! are read on demand from shared memory (sg_load) -- which keeps the natural
+  ! footprint to ~96 regs (vs ~120 for a hold-everything version). The build then
+  ! caps to maxregcount:72 (~59% occupancy) for the measured optimum: ~+14% PPM,
+  ! up to +22% PLM+HLLC. See the gpu_hydro.o rule in bin/Makefile. Tighter caps
+  ! spill PPM's working set and regress; getting below ~64 natural needs the
+  ! trace's own internal state cut (or the pipeline split into separate kernels).
   attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, smallr, smallc2, dt, dx, slope, riemann, constant_gravity)
@@ -1421,8 +1847,8 @@ contains
     ! =======================================================================
     ! Update the conserved variables at current level.
     ! =======================================================================
-    call conservative_update(unew, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, head_idx, block_idx, &
-         & thread_idx, dtdx)
+    call conservative_update(unew, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, local_subgrid, &
+         & head_idx, block_idx, thread_idx, dtdx)
 
     ! =======================================================================
     ! Update the conserved variables at coarser level.
@@ -1669,6 +2095,14 @@ contains
     uold(cell_idx, 3, oct_idx) = unew(cell_idx, 3, oct_idx)
     uold(cell_idx, 4, oct_idx) = unew(cell_idx, 4, oct_idx)
     uold(cell_idx, 5, oct_idx) = unew(cell_idx, 5, oct_idx)
+#if NVAR>5
+    block
+      integer :: iv
+      do iv = 6, nvar
+         uold(cell_idx, iv, oct_idx) = unew(cell_idx, iv, oct_idx)
+      end do
+    end block
+#endif
 
   end subroutine set_uold_kernel
   ! =========================================================================
@@ -1699,6 +2133,16 @@ contains
     unew(cell_idx, 3, oct_idx) = uold(cell_idx, 3, oct_idx)
     unew(cell_idx, 4, oct_idx) = uold(cell_idx, 4, oct_idx)
     unew(cell_idx, 5, oct_idx) = uold(cell_idx, 5, oct_idx)
+#if NVAR>5
+    ! Carry the passive-scalar base value (vars 6..nvar): conservative_update adds the
+    ! flux divergence to unew, so unew must start equal to uold for these too.
+    block
+      integer :: iv
+      do iv = 6, nvar
+         unew(cell_idx, iv, oct_idx) = uold(cell_idx, iv, oct_idx)
+      end do
+    end block
+#endif
 
   end subroutine set_unew_kernel
   ! =========================================================================

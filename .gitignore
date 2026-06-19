@@ -34,6 +34,8 @@ bin_mpi*/
 bin32*/
 bin64*/
 bin_cpu*/
+bin_ppm*/
+bin_verify*/
 
 # run directories (ICs + large simulation outputs/data)
 runs/

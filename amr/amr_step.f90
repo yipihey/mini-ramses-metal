@@ -69,8 +69,17 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   real(kind=8), external :: wallclock
   logical, save :: bkp_last_done=.false.
   logical :: gpu_hydro, resident
+  logical, save :: skip_first_kick=.false., skip_fk_init=.false.
+  character(len=8) :: skfk_str
+  integer :: skfk_ist
 
   associate(r=>pst%s%r, g=>pst%s%g, m=>pst%s%m, mdl=>pst%s%mdl)
+
+  if(.not.skip_fk_init)then
+     call get_environment_variable("CIC_SKIP_FIRST_KICK",skfk_str,status=skfk_ist)
+     if(skfk_ist==0 .and. trim(skfk_str)=="1") skip_first_kick=.true.
+     skip_fk_init=.true.
+  end if
 
   gpu_hydro = .false.; resident = .false.
 #ifdef _METAL
@@ -273,9 +282,16 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
 #endif
 
   ! Perform second kick for particles
+  ! TEST (CIC_SKIP_FIRST_KICK): the kick_only completes the PREVIOUS step's velocity.
+  ! At the very first step (nstep==0) there is no previous step, so this half-kick
+  ! treats the IC velocity as staggered (t-½dt).  CICASS/grafic provide it synchronized
+  ! (t0, Zeldovich); skipping the nstep==0 kick_only makes the leapfrog start from a
+  ! synchronized IC instead.  Env-gated so it's a clean A/B for the growth-tilt test.
   if(r%pic)then
      call m_timer('particle - kickdrift','start')
-     call m_kick_drift_part(pst,ilevel,action_kick_only)
+     if(.not.(skip_first_kick .and. g%nstep==0)) then
+        call m_kick_drift_part(pst,ilevel,action_kick_only)
+     end if
      call m_part_trace(pst,ilevel,icount,'pst')   ! DIAG: per-particle vp AFTER the kick, by idp (Δvp=ff*0.5*dt)
   endif
 

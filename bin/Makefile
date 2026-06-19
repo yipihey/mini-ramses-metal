@@ -33,7 +33,11 @@ NPSCAL = 0
 NRTGRP = 0
 NHILBERT = 1
 NVECTOR = 32
-NPRE = 8
+# Default precision of `dp` (4=single, 8=double). fp32 is the default: on the GPU
+# (esp. consumer/workstation GA10x with 1:64 fp64) the hydro/gravity kernels are
+# compute-bound, and fp32 is ~6-14x faster while tracking fp64 to the chaos floor.
+# Override with NPRE=8 for a double-precision reference build.
+NPRE = 4
 PATCH =
 CUDA_PROFILE = 0
 PAPER = 0
@@ -126,7 +130,7 @@ endif
 #############################################################################
 # GNU compiler (gfortran)
 ifeq ($(COMPILER),GNU)
-   FFLAGS = -cpp $(DEFINES)
+   FFLAGS = -cpp $(DEFINES) -fPIC
    ifeq ($(MPI),1)
       F90 = $(MPIF90)
       FC = gfortran
@@ -181,7 +185,8 @@ ifeq ($(COMPILER),NVHPC)
    ifneq ($(CUB_SCAN_REFINE),0)
       DEFINES += -DCUB_SCAN_REFINE
    endif
-   FFLAGS = -cpp -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx,curand $(DEFINES)
+   # -fpic: objects must be position-independent for the C-API shared lib (libramses).
+   FFLAGS = -cpp -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx,curand -fpic $(DEFINES)
    LIBS = -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx,curand -lstdc++
    GPU_PATH = ../gpu
    ifeq ($(CUDA_PROFILE),1)
@@ -307,8 +312,9 @@ ramses:	$(MODOBJ) ramses.o $(EXTRADEP)
 # C-API in ../julia/ramses_capi.f90.  CPU:   make GRAV=1 libramses
 #                                     Metal: make COMPILER=METAL GRAV=1 libramses
 # Output: libramses<NDIM>d.dylib (CPU) or libramses<NDIM>d_metal.dylib (Metal).
+SHARED_EXT := $(if $(filter Darwin,$(shell uname -s)),dylib,so)
 libramses:	$(MODOBJ) ramses_capi.o $(EXTRADEP)
-	$(F90) $(FFLAGS) -shared -fPIC $(MODOBJ) ramses_capi.o -o libramses$(NDIM)d$(LIBSUF).dylib $(LIBS)
+	$(F90) $(FFLAGS) -shared -fPIC $(MODOBJ) ramses_capi.o -o libramses$(NDIM)d$(LIBSUF).$(SHARED_EXT) $(LIBS)
 #############################################################################
 # Metal kernel library (Apple Silicon).  Compiles gpu/metal/*.metal -> .metallib.
 # Depend on the sources + shared headers so an edit to any kernel (or header)
@@ -328,24 +334,34 @@ ramses_kernels.metallib: $(addprefix ../gpu/metal/,$(addsuffix .metal,$(METAL_KE
 test_cooling:	$(MODOBJ) test_cooling.o
 	$(F90) $(FFLAGS) $(MODOBJ) test_cooling.o -o test_cooling $(LIBS)
 #############################################################################
+PIC_FLAG = $(if $(filter NVHPC,$(COMPILER)),-fpic,-fPIC)
 write_gitinfo.o: FORCE
-	$(FC) -O0 -cpp -DPATCH=\'"$(PATCH)"\' -DGITBRANCH=\'"$(GITBRANCH)"\' -DGITHASH=\'"$(GITHASH)"\' \
+	$(FC) -O0 $(PIC_FLAG) -cpp -DPATCH=\'"$(PATCH)"\' -DGITBRANCH=\'"$(GITBRANCH)"\' -DGITHASH=\'"$(GITHASH)"\' \
                 -DGITREPO=\'"$(GITREPO)"\' -DBUILDDATE=\'"$(BUILDDATE)"\' -DBUILDCOMMAND=\'"$(BUILDCOMMAND)"\' -c ../amr/write_gitinfo.f90 -o $@
 #############################################################################
 cub_inclusive_scan_c.o: cub_inclusive_scan.h cub_inclusive_scan.cu
-	nvcc -arch=$(CUDA_ARCH) -O3 -lineinfo -c $(GPU_PATH)/cub_inclusive_scan.cu -o cub_inclusive_scan_c.o
+	nvcc -arch=$(CUDA_ARCH) -O3 -lineinfo -Xcompiler -fPIC -c $(GPU_PATH)/cub_inclusive_scan.cu -o cub_inclusive_scan_c.o
 #############################################################################
 cub_inclusive_scan_f.o: cub_inclusive_scan.cuf cub_inclusive_scan_c.o
 	nvfortran $(FFLAGS) -c cub_inclusive_scan_c.o $(GPU_PATH)/cub_inclusive_scan.cuf -o cub_inclusive_scan_f.o
 #############################################################################
 cub_module_radix_sort_c.o: cub_module_radix_sort.h cub_module_radix_sort.cu
-	nvcc -arch=$(CUDA_ARCH) -O3 -lineinfo -c $(GPU_PATH)/cub_module_radix_sort.cu -o cub_module_radix_sort_c.o
+	nvcc -arch=$(CUDA_ARCH) -O3 -lineinfo -Xcompiler -fPIC -c $(GPU_PATH)/cub_module_radix_sort.cu -o cub_module_radix_sort_c.o
 #############################################################################
 cub_module_radix_sort_f.o: cub_module_radix_sort.cuf cub_module_radix_sort_c.o
 	nvfortran $(FFLAGS) -c cub_module_radix_sort_c.o $(GPU_PATH)/cub_module_radix_sort.cuf -o cub_module_radix_sort_f.o
 
 %.o:%.cuf
 	$(F90) $(FFLAGS) -c $< -o $@ $(LIBS)
+# Occupancy tuning (NVHPC/CUDA): the monolithic per-oct godunov kernel is
+# register-limited (~96 regs/thread fp32 after the per-direction PPM trace ->
+# only 2 blocks/SM), which starves the arithmetic-heavy PPM path of latency-
+# hiding warps. Capping to maxregcount:72 (~59% occupancy) is the measured
+# optimum: ~+14% PPM, up to +22% PLM+HLLC. Harmless to the simple kernels in
+# this file (they use < 72 regs); tighter caps spill PPM's working set.
+ifeq ($(COMPILER),NVHPC)
+gpu_hydro.o: FFLAGS += -gpu=maxregcount:72
+endif
 %.o:%.f90
 	$(F90) $(FFLAGS) -c $< -o $@ $(LIBS)
 %.o:%.c

@@ -27,6 +27,11 @@ module gpu_utils
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: velocity_z
      real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: pressure
      logical      , dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3) :: refined
+#if NVAR>5
+     ! Passive-scalar FRACTIONS (ρsᵢ/ρ) for vars 6..nvar, carried through the subgrid
+     ! and advected with the godunov mass flux (donor-cell upwind).
+     real(kind=dp), dimension(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:(NVAR)-5) :: scalar
+#endif
   end type subgrid_6x6x6cell_primitive
 
   !> @brief

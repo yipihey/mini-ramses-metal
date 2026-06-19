@@ -94,6 +94,19 @@ recursive subroutine r_set_grid_device(pst)
 
 end subroutine r_set_grid_device
 !###########################################################
+! Upload ONLY uold (gas state) host->device, leaving the device grid/hash and the
+! device-resident particles untouched.  Used by the capi after an operator-split
+! chemistry/cooling step writes the host uold back, so the next device hydro step
+! sees the updated gas energy + species.  (uold/pst from gpu_runner/ramses_commons.)
+!###########################################################
+subroutine set_uold_device(pst)
+  use ramses_commons, only: pst_t
+  implicit none
+  type(pst_t)::pst
+  uold = pst%s%m%uold      ! host -> device (CUDA Fortran array copy)
+  call GPU_Error_Check(__FILE__, __LINE__)
+end subroutine set_uold_device
+!###########################################################
 !###########################################################
 !###########################################################
 !###########################################################

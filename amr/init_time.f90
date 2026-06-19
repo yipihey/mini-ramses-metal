@@ -65,9 +65,15 @@ end subroutine r_init_time
 
   if(r%cosmo)then
 
-     ! Compute Friedman model look up table
+     ! Compute Friedman model look up table.  Include radiation EXACTLY as CICASS
+     ! (vbc_transfer/main.cc:170): Omega_r = 4.15e-5/h^2 (T_cmb=2.726, 3 nu species);
+     ! Omega_r/Omega_m ~ 0.27 at z=900, so omitting it (the old matter+Lambda H(z))
+     ! drifted from CICASS at high z.  Keep the universe flat: take Omega_r out of
+     ! Omega_Lambda (Om + (OL-Or) + Ok + Or = 1), Omega_k unchanged.
      if(g%myid==1)write(*,*)'Computing Friedman model'
-     call friedman(mdl,dble(g%omega_m),dble(g%omega_l),dble(g%omega_k), &
+     call friedman(mdl,dble(g%omega_m), &
+          & dble(g%omega_l) - 4.15d-5/(g%h0/100.0d0)**2, &
+          & dble(g%omega_k), 4.15d-5/(g%h0/100.0d0)**2, &
           & 1.d-6,dble(g%aexp_ini), &
           & g%aexp_frw,g%hexp_frw,g%tau_frw,g%t_frw,n_frw)
 
@@ -429,14 +435,14 @@ subroutine init_cosmo(mdl,r,g)
 
 end subroutine init_cosmo
 !cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-subroutine friedman(mdl,O_mat_0,O_vac_0,O_k_0,alpha,axp_min, &
+subroutine friedman(mdl,O_mat_0,O_vac_0,O_k_0,O_rad_0,alpha,axp_min, &
      & axp_out,hexp_out,tau_out,t_out,ntable)
   use amr_parameters
   use mdl_module
   implicit none
   type(mdl_t)::mdl
   integer::ntable
-  real(kind=8)::O_mat_0, O_vac_0, O_k_0
+  real(kind=8)::O_mat_0, O_vac_0, O_k_0, O_rad_0
   real(kind=8)::alpha,axp_min
   real(kind=8),dimension(0:ntable)::axp_out,hexp_out,tau_out,t_out
   ! ######################################################!
@@ -455,11 +461,13 @@ subroutine friedman(mdl,O_mat_0,O_vac_0,O_k_0,alpha,axp_min, &
   real(kind=8)::tau,t
   integer::nstep,nout,nskip
 
-  if( (O_mat_0+O_vac_0+O_k_0) .ne. 1.0D0 )then
+  ! flatness incl. radiation: Om + OL + Ok + Or = 1 (tolerance, not exact equality —
+  ! the Or split off Omega_Lambda introduces ~1e-16 float round-off).
+  if( abs(O_mat_0+O_vac_0+O_k_0+O_rad_0 - 1.0D0) .gt. 1.0D-6 )then
      write(*,*)'Error: non-physical cosmological constants'
-     write(*,*)'O_mat_0,O_vac_0,O_k_0=',O_mat_0,O_vac_0,O_k_0
+     write(*,*)'O_mat_0,O_vac_0,O_k_0,O_rad_0=',O_mat_0,O_vac_0,O_k_0,O_rad_0
      write(*,*)'The sum must be equal to 1.0, but '
-     write(*,*)'O_mat_0+O_vac_0+O_k_0=',O_mat_0+O_vac_0+O_k_0
+     write(*,*)'O_mat_0+O_vac_0+O_k_0+O_rad_0=',O_mat_0+O_vac_0+O_k_0+O_rad_0
      call mdl_abort(mdl)
   end if
 
@@ -472,14 +480,14 @@ subroutine friedman(mdl,O_mat_0,O_vac_0,O_k_0,alpha,axp_min, &
   do while ( (axp_tau .ge. axp_min) .or. (axp_t .ge. axp_min) ) 
      
      nstep = nstep + 1
-     dtau = alpha * axp_tau / dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)
-     axp_tau_pre = axp_tau - dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)*dtau/2.d0
-     axp_tau = axp_tau - dadtau(axp_tau_pre,O_mat_0,O_vac_0,O_k_0)*dtau
+     dtau = alpha * axp_tau / dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,O_rad_0)
+     axp_tau_pre = axp_tau - dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,O_rad_0)*dtau/2.d0
+     axp_tau = axp_tau - dadtau(axp_tau_pre,O_mat_0,O_vac_0,O_k_0,O_rad_0)*dtau
      tau = tau - dtau
      
-     dt = alpha * axp_t / dadt(axp_t,O_mat_0,O_vac_0,O_k_0)
-     axp_t_pre = axp_t - dadt(axp_t,O_mat_0,O_vac_0,O_k_0)*dt/2.d0
-     axp_t = axp_t - dadt(axp_t_pre,O_mat_0,O_vac_0,O_k_0)*dt
+     dt = alpha * axp_t / dadt(axp_t,O_mat_0,O_vac_0,O_k_0,O_rad_0)
+     axp_t_pre = axp_t - dadt(axp_t,O_mat_0,O_vac_0,O_k_0,O_rad_0)*dt/2.d0
+     axp_t = axp_t - dadt(axp_t_pre,O_mat_0,O_vac_0,O_k_0,O_rad_0)*dt
      t = t - dt
      
   end do
@@ -498,19 +506,19 @@ subroutine friedman(mdl,O_mat_0,O_vac_0,O_k_0,alpha,axp_min, &
   t_out(nout)=t
   tau_out(nout)=tau
   axp_out(nout)=axp_tau
-  hexp_out(nout)=dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)/axp_tau
+  hexp_out(nout)=dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,O_rad_0)/axp_tau
 
   do while ( (axp_tau .ge. axp_min) .or. (axp_t .ge. axp_min) ) 
      
      nstep = nstep + 1
-     dtau = alpha * axp_tau / dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)
-     axp_tau_pre = axp_tau - dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)*dtau/2.d0
-     axp_tau = axp_tau - dadtau(axp_tau_pre,O_mat_0,O_vac_0,O_k_0)*dtau
+     dtau = alpha * axp_tau / dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,O_rad_0)
+     axp_tau_pre = axp_tau - dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,O_rad_0)*dtau/2.d0
+     axp_tau = axp_tau - dadtau(axp_tau_pre,O_mat_0,O_vac_0,O_k_0,O_rad_0)*dtau
      tau = tau - dtau
 
-     dt = alpha * axp_t / dadt(axp_t,O_mat_0,O_vac_0,O_k_0)
-     axp_t_pre = axp_t - dadt(axp_t,O_mat_0,O_vac_0,O_k_0)*dt/2.d0
-     axp_t = axp_t - dadt(axp_t_pre,O_mat_0,O_vac_0,O_k_0)*dt
+     dt = alpha * axp_t / dadt(axp_t,O_mat_0,O_vac_0,O_k_0,O_rad_0)
+     axp_t_pre = axp_t - dadt(axp_t,O_mat_0,O_vac_0,O_k_0,O_rad_0)*dt/2.d0
+     axp_t = axp_t - dadt(axp_t_pre,O_mat_0,O_vac_0,O_k_0,O_rad_0)*dt
      t = t - dt
      
      if(mod(nstep,nskip)==0)then
@@ -518,35 +526,40 @@ subroutine friedman(mdl,O_mat_0,O_vac_0,O_k_0,alpha,axp_min, &
         t_out(nout)=t
         tau_out(nout)=tau
         axp_out(nout)=axp_tau
-        hexp_out(nout)=dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)/axp_tau
+        hexp_out(nout)=dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,O_rad_0)/axp_tau
      end if
 
   end do
   t_out(ntable)=t
   tau_out(ntable)=tau
   axp_out(ntable)=axp_tau
-  hexp_out(ntable)=dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)/axp_tau
+  hexp_out(ntable)=dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,O_rad_0)/axp_tau
 
 end subroutine friedman
 !cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-function dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0) 
+function dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,O_rad_0) 
   use amr_parameters
-  real(kind=8)::dadtau,axp_tau,O_mat_0,O_vac_0,O_k_0
+  real(kind=8)::dadtau,axp_tau,O_mat_0,O_vac_0,O_k_0,O_rad_0
+  ! superconformal da/dtau (dtau=dt/a^2): a^3*(Om + OL*a^3 + Ok*a + Or/a);
+  ! the Or/a term is the radiation density (a^3 * Or/a = Or*a^2 = the a^-4 source).
   dadtau = axp_tau*axp_tau*axp_tau *  &
        &   ( O_mat_0 + &
        &     O_vac_0 * axp_tau*axp_tau*axp_tau + &
-       &     O_k_0   * axp_tau )
+       &     O_k_0   * axp_tau + &
+       &     O_rad_0 / axp_tau )
   dadtau = sqrt(dadtau)
   return
 end function dadtau
 !cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-function dadt(axp_t,O_mat_0,O_vac_0,O_k_0)
+function dadt(axp_t,O_mat_0,O_vac_0,O_k_0,O_rad_0)
   use amr_parameters
-  real(kind=8)::dadt,axp_t,O_mat_0,O_vac_0,O_k_0
+  real(kind=8)::dadt,axp_t,O_mat_0,O_vac_0,O_k_0,O_rad_0
+  ! proper-time da/dt: (1/a)*(Om + OL*a^3 + Ok*a + Or/a) = Om/a + OL*a^2 + Ok + Or/a^2.
   dadt   = (1.0D0/axp_t)* &
        &   ( O_mat_0 + &
        &     O_vac_0 * axp_t*axp_t*axp_t + &
-       &     O_k_0   * axp_t )
+       &     O_k_0   * axp_t + &
+       &     O_rad_0 / axp_t )
   dadt = sqrt(dadt)
   return
 end function dadt
