@@ -202,7 +202,3 @@ def main() -> None:
     print(f"turb_norm = {turb_norm:.6g}")
     print(f"M(harness turb_rms={HARNESS_TURB_RMS}) empirical = {mach_empirical(np.array([HARNESS_TURB_RMS]))[0]:.3f}")
     print(f"M(L8 turb_rms={L8_TURB_RMS}) empirical = {mach_empirical(np.array([L8_TURB_RMS]))[0]:.3f}")
-
-
-if __name__ == "__main__":
-    main()
