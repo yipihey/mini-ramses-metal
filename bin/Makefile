@@ -375,8 +375,11 @@ ifeq ($(GLM),1)
 # The characteristic-PPM kernel wants ~186 regs; capping below that spills its
 # working set. It is a SEPARATE kernel from the lean PLM integrator (~96 regs),
 # so this ceiling only relaxes the char kernel -- PLM keeps its high occupancy.
-# GLMREG overridable to tune occupancy vs spills.
-GLMREG ?= 200
+# GLMREG empirically tuned: a fine sweep (152..255) showed a sharp, reproducible
+# throughput peak at 168 (127 Mcell/s vs 97 at 200) -- a ptxas register-allocator
+# sweet spot at fixed 1-block/SM occupancy, not an occupancy effect. Re-sweep if
+# the char kernel or compiler changes; the optimum is allocator-specific.
+GLMREG ?= 168
 gpu_hydro.o: FFLAGS += -gpu=maxregcount:$(GLMREG)
 else
 gpu_hydro.o: FFLAGS += -gpu=maxregcount:72
