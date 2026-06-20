@@ -479,13 +479,93 @@ contains
     return
   end function hll_mhd_fluxes
 
-  !> HLLD MHD flux + GLM cleaning. (Stub: falls back to HLL until the full 5-state
-  !> Miyoshi-Kusano solver is transliterated from godunov_utils.f90:riemann_hlld.)
-  attributes(device) function hlld_mhd_fluxes(L, R, gamma, smallr, smallc2, ch) result(flux)
-    type(mhd_primitive_t), intent(in) :: L, R
+  !> HLLD MHD flux + GLM cleaning. Faithful transliteration of the CPU
+  !> riemann_hlld (godunov_utils.f90, Miyoshi & Kusano 2005), 5 states
+  !> (L, L*, **, R*, R), with the GLM-cleaned normal field Bn* used as A.
+  attributes(device) function hlld_mhd_fluxes(Lin, Rin, gamma, smallr, smallc2, ch) result(flux)
+    type(mhd_primitive_t), intent(in) :: Lin, Rin
     real(kind=dp), value :: gamma, smallr, smallc2, ch
     type(mhd_conserved_t) :: flux
-    flux = hll_mhd_fluxes(L, R, gamma, smallr, smallc2, ch)
+    type(mhd_primitive_t) :: L, R
+    real(kind=dp) :: SL, SR, SAL, SAR, A, sgnm, entho, bn_star, fbn, fpsi
+    real(kind=dp) :: rl, pl, ul, vl, wl, ekinl, emagl, etotl, ptotl, vdotbl, bl, cl, el
+    real(kind=dp) :: rr, pr, ur, vr, wr, ekinr, emagr, etotr, ptotr, vdotbr, br, cr, er
+    real(kind=dp) :: cfastl, cfastr, calfvenl, calfvenr, rcl, rcr, rstarl, rstarr, estar
+    real(kind=dp) :: vstarl, wstarl, bstarl, cstarl, vdotbstarl, sqrrstarl, etotstarl
+    real(kind=dp) :: vstarr, wstarr, bstarr, cstarr, vdotbstarr, sqrrstarr, etotstarr
+    real(kind=dp) :: ustar, ptotstar, vstarstar, wstarstar, bstarstar, cstarstar
+    real(kind=dp) :: vdotbstarstar, etotstarstarl, etotstarstarr
+    real(kind=dp) :: ro, uo, vo, wo, bo, co, ptoto, etoto, vdotbo
+    L = Lin; R = Rin
+    L%density = max(L%density, smallr); R%density = max(R%density, smallr)
+    entho = 1.0_dp/(gamma - 1.0_dp)
+    ! GLM: cleaned normal field A = Bn* replaces the simple average; F[Bn],F[psi] overlaid.
+    call glm_pair(L%bx, R%bx, L%psi, R%psi, ch, bn_star, fbn, fpsi)
+    A = bn_star; sgnm = sign(1.0_dp, A); L%bx = A; R%bx = A
+    rl=L%density; ul=L%velocity_x; vl=L%velocity_y; wl=L%velocity_z; pl=L%pressure; bl=L%by; cl=L%bz
+    ekinl=0.5_dp*(ul*ul+vl*vl+wl*wl)*rl; emagl=0.5_dp*(A*A+bl*bl+cl*cl)
+    etotl=pl*entho+ekinl+emagl; ptotl=pl+emagl; vdotbl=ul*A+vl*bl+wl*cl
+    rr=R%density; ur=R%velocity_x; vr=R%velocity_y; wr=R%velocity_z; pr=R%pressure; br=R%by; cr=R%bz
+    ekinr=0.5_dp*(ur*ur+vr*vr+wr*wr)*rr; emagr=0.5_dp*(A*A+br*br+cr*cr)
+    etotr=pr*entho+ekinr+emagr; ptotr=pr+emagr; vdotbr=ur*A+vr*br+wr*cr
+    cfastl = mhd_fast_speed_x(L, gamma); cfastr = mhd_fast_speed_x(R, gamma)
+    SL = min(ul,ur) - max(cfastl,cfastr); SR = max(ul,ur) + max(cfastl,cfastr)
+    rcl = rl*(ul-SL); rcr = rr*(SR-ur)
+    ustar    = (rcr*ur+rcl*ul+(ptotl-ptotr))/(rcr+rcl)
+    ptotstar = (rcr*ptotl+rcl*ptotr+rcl*rcr*(ul-ur))/(rcr+rcl)
+    ! Left star
+    rstarl = rl*(SL-ul)/(SL-ustar); estar = rl*(SL-ul)*(SL-ustar)-A*A; el = rl*(SL-ul)*(SL-ul)-A*A
+    if (abs(estar) < 1d-4*A*A) then
+       vstarl=vl; bstarl=bl; wstarl=wl; cstarl=cl
+    else
+       vstarl=vl-A*bl*(ustar-ul)/estar; bstarl=bl*el/estar
+       wstarl=wl-A*cl*(ustar-ul)/estar; cstarl=cl*el/estar
+    end if
+    vdotbstarl = ustar*A+vstarl*bstarl+wstarl*cstarl
+    etotstarl  = ((SL-ul)*etotl-ptotl*ul+ptotstar*ustar+A*(vdotbl-vdotbstarl))/(SL-ustar)
+    sqrrstarl  = sqrt(rstarl); calfvenl = abs(A)/sqrrstarl; SAL = ustar-calfvenl
+    ! Right star
+    rstarr = rr*(SR-ur)/(SR-ustar); estar = rr*(SR-ur)*(SR-ustar)-A*A; er = rr*(SR-ur)*(SR-ur)-A*A
+    if (abs(estar) < 1d-4*A*A) then
+       vstarr=vr; bstarr=br; wstarr=wr; cstarr=cr
+    else
+       vstarr=vr-A*br*(ustar-ur)/estar; bstarr=br*er/estar
+       wstarr=wr-A*cr*(ustar-ur)/estar; cstarr=cr*er/estar
+    end if
+    vdotbstarr = ustar*A+vstarr*bstarr+wstarr*cstarr
+    etotstarr  = ((SR-ur)*etotr-ptotr*ur+ptotstar*ustar+A*(vdotbr-vdotbstarr))/(SR-ustar)
+    sqrrstarr  = sqrt(rstarr); calfvenr = abs(A)/sqrrstarr; SAR = ustar+calfvenr
+    ! Double star
+    vstarstar=(sqrrstarl*vstarl+sqrrstarr*vstarr+sgnm*(bstarr-bstarl))/(sqrrstarl+sqrrstarr)
+    wstarstar=(sqrrstarl*wstarl+sqrrstarr*wstarr+sgnm*(cstarr-cstarl))/(sqrrstarl+sqrrstarr)
+    bstarstar=(sqrrstarl*bstarr+sqrrstarr*bstarl+sgnm*sqrrstarl*sqrrstarr*(vstarr-vstarl))/(sqrrstarl+sqrrstarr)
+    cstarstar=(sqrrstarl*cstarr+sqrrstarr*cstarl+sgnm*sqrrstarl*sqrrstarr*(wstarr-wstarl))/(sqrrstarl+sqrrstarr)
+    vdotbstarstar=ustar*A+vstarstar*bstarstar+wstarstar*cstarstar
+    etotstarstarl=etotstarl-sgnm*sqrrstarl*(vdotbstarl-vdotbstarstar)
+    etotstarstarr=etotstarr+sgnm*sqrrstarr*(vdotbstarr-vdotbstarstar)
+    ! Sample at x/t=0
+    if (SL > 0.0_dp) then
+       ro=rl; uo=ul; vo=vl; wo=wl; bo=bl; co=cl; ptoto=ptotl; etoto=etotl; vdotbo=vdotbl
+    else if (SAL > 0.0_dp) then
+       ro=rstarl; uo=ustar; vo=vstarl; wo=wstarl; bo=bstarl; co=cstarl; ptoto=ptotstar; etoto=etotstarl; vdotbo=vdotbstarl
+    else if (ustar > 0.0_dp) then
+       ro=rstarl; uo=ustar; vo=vstarstar; wo=wstarstar; bo=bstarstar; co=cstarstar; ptoto=ptotstar; etoto=etotstarstarl; vdotbo=vdotbstarstar
+    else if (SAR > 0.0_dp) then
+       ro=rstarr; uo=ustar; vo=vstarstar; wo=wstarstar; bo=bstarstar; co=cstarstar; ptoto=ptotstar; etoto=etotstarstarr; vdotbo=vdotbstarstar
+    else if (SR > 0.0_dp) then
+       ro=rstarr; uo=ustar; vo=vstarr; wo=wstarr; bo=bstarr; co=cstarr; ptoto=ptotstar; etoto=etotstarr; vdotbo=vdotbstarr
+    else
+       ro=rr; uo=ur; vo=vr; wo=wr; bo=br; co=cr; ptoto=ptotr; etoto=etotr; vdotbo=vdotbr
+    end if
+    flux%density    = ro*uo
+    flux%momentum_x = ro*uo*uo + ptoto - A*A
+    flux%momentum_y = ro*uo*vo - A*bo
+    flux%momentum_z = ro*uo*wo - A*co
+    flux%energy     = (etoto+ptoto)*uo - A*vdotbo
+    flux%bx  = fbn
+    flux%by  = bo*uo - A*vo
+    flux%bz  = co*uo - A*wo
+    flux%psi = fpsi
     return
   end function hlld_mhd_fluxes
 #endif
