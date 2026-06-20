@@ -2643,23 +2643,28 @@ contains
        i = i+1; j = j+1; k = k+1
        m0 = sg_load_mhd(ls, i, j, k)
        lrho = m0%density; lp = m0%pressure
-       sx = mhd_slope(sg_load_mhd(ls,i-1,j,k), m0, sg_load_mhd(ls,i+1,j,k), es)
-       sy = mhd_slope(sg_load_mhd(ls,i,j-1,k), m0, sg_load_mhd(ls,i,j+1,k), es)
-       sz = mhd_slope(sg_load_mhd(ls,i,j,k-1), m0, sg_load_mhd(ls,i,j,k+1), es)
-       u0 = mhd_primitive_2_conserved(m0, gamma)
-       du = mhd_hancock_dir(m0, sx, 1, gamma, ch, 0.5_dp*dtdx)
-       du = mhd_cadd(du, mhd_hancock_dir(m0, sy, 2, gamma, ch, 0.5_dp*dtdx))
-       du = mhd_cadd(du, mhd_hancock_dir(m0, sz, 3, gamma, ch, 0.5_dp*dtdx))
-       mh = mhd_conserved_2_primitive(mhd_cadd(u0, du), gamma, smallr, smallc2)
-       ! Positivity safeguard: if the half-step predicted a non-positive state,
-       ! fall back to the unpredicted cell (locally 1st order in time).
-       if (mh%density <= smallr .or. mh%pressure <= smallp) mh = m0
        ! PPM (parabolic) faces unless a strong pressure jump -> PLM/moncen fallback.
        use_ppm = (slope == 10)
        if (use_ppm) then
           if ( strong_pressure_jump(ls%pressure(i-1,j,k), m0%pressure, ls%pressure(i+1,j,k)) .or. &
              & strong_pressure_jump(ls%pressure(i,j-1,k), m0%pressure, ls%pressure(i,j+1,k)) .or. &
              & strong_pressure_jump(ls%pressure(i,j,k-1), m0%pressure, ls%pressure(i,j,k+1)) ) use_ppm = .false.
+       end if
+       ! MUSCL-Hancock predictor: only consumed by the PLM fallback stores below
+       ! (use_ppm=.false.). Computing it lazily keeps sx/sy/sz/u0/du/mh OUT of the live
+       ! register set during the heavy characteristic trace, cutting register pressure
+       ! (and spill at the 128-reg/2-block cap) in the common PPM path. Numerically
+       ! identical -- the predictor was always discarded when use_ppm held.
+       if (.not. use_ppm) then
+          sx = mhd_slope(sg_load_mhd(ls,i-1,j,k), m0, sg_load_mhd(ls,i+1,j,k), es)
+          sy = mhd_slope(sg_load_mhd(ls,i,j-1,k), m0, sg_load_mhd(ls,i,j+1,k), es)
+          sz = mhd_slope(sg_load_mhd(ls,i,j,k-1), m0, sg_load_mhd(ls,i,j,k+1), es)
+          u0 = mhd_primitive_2_conserved(m0, gamma)
+          du = mhd_hancock_dir(m0, sx, 1, gamma, ch, 0.5_dp*dtdx)
+          du = mhd_cadd(du, mhd_hancock_dir(m0, sy, 2, gamma, ch, 0.5_dp*dtdx))
+          du = mhd_cadd(du, mhd_hancock_dir(m0, sz, 3, gamma, ch, 0.5_dp*dtdx))
+          mh = mhd_conserved_2_primitive(mhd_cadd(u0, du), gamma, smallr, smallc2)
+          if (mh%density <= smallr .or. mh%pressure <= smallp) mh = m0
        end if
        ! X faces  (PPM: characteristic trace -> pm = -x face, pp = +x face)
        if (use_ppm) call mhd_char_faces(sg_load_mhd(ls,i-1,j,k), m0, sg_load_mhd(ls,i+1,j,k), 1, gamma, dtdx, pm, pp)
