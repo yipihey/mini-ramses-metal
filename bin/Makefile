@@ -372,7 +372,12 @@ cub_module_radix_sort_f.o: cub_module_radix_sort.cuf cub_module_radix_sort_c.o
 ifeq ($(COMPILER),NVHPC)
 ifeq ($(GLM),1)
 # The 9-var GLM-MHD kernel is much heavier; the 72 cap would spill it badly.
-gpu_hydro.o: FFLAGS += -gpu=maxregcount:128
+# The characteristic-PPM kernel wants ~186 regs; capping below that spills its
+# working set. It is a SEPARATE kernel from the lean PLM integrator (~96 regs),
+# so this ceiling only relaxes the char kernel -- PLM keeps its high occupancy.
+# GLMREG overridable to tune occupancy vs spills.
+GLMREG ?= 200
+gpu_hydro.o: FFLAGS += -gpu=maxregcount:$(GLMREG)
 else
 gpu_hydro.o: FFLAGS += -gpu=maxregcount:72
 endif

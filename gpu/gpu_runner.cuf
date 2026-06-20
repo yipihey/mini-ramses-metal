@@ -317,7 +317,7 @@ contains
   subroutine gpu_godunov(sim, ilevel)
     use nvtx
 #ifdef GLMMHD
-    use hydro_device, only: mhd_integrator_kernel
+    use hydro_device, only: mhd_integrator_kernel, mhd_integrator_kernel_ppm
 #elif defined(PAPER)
     use hydro_device, only: hydro_integrator_paper_kernel
 #else
@@ -352,9 +352,15 @@ contains
     if(nsubgrid == 2)threads_per_block = 256
     ! Dedner cleaning speed = max signal speed implied by the CFL condition.
     ch = sim%r%courant_factor*dx/dt/real(ndim,dp)
-    call mhd_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
-         & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
-         & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
+    if (slope == 10) then
+       call mhd_integrator_kernel_ppm<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
+            & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
+            & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
+    else
+       call mhd_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
+            & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
+            & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
+    end if
 #elif defined(PAPER)
     threads_per_block = (2*nsubgrid + 4)**2
     threads_per_block = ((threads_per_block + 31) / 32) * 32
