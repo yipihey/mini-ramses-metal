@@ -370,27 +370,27 @@ cub_module_radix_sort_f.o: cub_module_radix_sort.cuf cub_module_radix_sort_c.o
 # optimum: ~+14% PPM, up to +22% PLM+HLLC. Harmless to the simple kernels in
 # this file (they use < 72 regs); tighter caps spill PPM's working set.
 ifeq ($(COMPILER),NVHPC)
+# fastmath: the godunov kernels were profiler-confirmed latency-bound on the IEEE
+# sqrt/divide dependency chain (`Stall Wait`), and occupancy is register-capped by the
+# physics so it can't rise to hide it; -gpu=fastmath swaps the correctly-rounded
+# sqrt/divide sequences for the SFU approximations (~22-bit), nearly DOUBLING throughput.
+#   GLM-MHD: PLM 953->1523, par 525->1083, char 230->405 Mcell/s
+#   Hydro  : PLM 1678->~2700, PPM 607->~1100 Mcell/s
+# The ~22-bit rounding is ~5 orders below the scheme's truncation error: validated
+# bit-comparable on Orszag-Tang (div.B/positivity to 4 digits), CP-Alfven (invariant +
+# step count to 3-4 sig figs), and hydro Sod (shock position/states). Applies to BOTH
+# solvers (same sqrt/divide-bound profile); scoped to gpu_hydro.o (godunov + dt calc).
+gpu_hydro.o: FFLAGS += -gpu=fastmath
 ifeq ($(GLM),1)
-# The 9-var GLM-MHD kernels are heavy. At nsubgrid=2 (256 thr/block) register
-# pressure sets blocks/SM in DISCRETE steps, and the three integrators want
-# DIFFERENT optima, so each carries its own per-kernel launch_bounds() in
-# gpu_hydro.cuf (ptxinfo-verified register counts):
+# The 9-var GLM-MHD kernels are heavy. At nsubgrid=2 (256 thr/block) register pressure
+# sets blocks/SM in DISCRETE steps, and the three integrators want DIFFERENT optima, so
+# each carries its own per-kernel launch_bounds() in gpu_hydro.cuf (ptxinfo-verified):
 #   PLM  launch_bounds(256,2)   96 regs, shared-limited at 2 blocks/SM
 #   par  launch_bounds(256,2)  128 regs -> 2 blocks/SM (+44%: 364 -> 525 Mcell/s)
 #   char launch_bounds(256,1)  208 regs, 1 block/SM, 0 spill (222 -> 230 Mcell/s)
-# Do NOT add a file-level -gpu=maxregcount here: an explicit maxregcount flag
-# OVERRIDES the per-kernel launch_bounds register limit (ptxas honors the flag over
-# the attribute), pinning par back to 168 regs / 1 block. Confirmed by ncu Occupancy
-# + a GLMREG sweep at nsubgrid=2 (96..255). launch_bounds is the sole control now.
-#
-# fastmath: the godunov kernels were profiler-confirmed latency-bound on the IEEE
-# sqrt/divide dependency chain (`Stall Wait`); -gpu=fastmath swaps the correctly-
-# rounded sequences for the SFU approximations (~22-bit), nearly DOUBLING throughput
-# (PLM 953->1527, par 525->1086, char 230->405 Mcell/s). The ~22-bit rounding is ~5
-# orders below the scheme's truncation error: validated bit-comparable on Orszag-Tang
-# (div.B/positivity match to 4 digits) and CP-Alfven (invariant + step count identical
-# to 3-4 sig figs across PLM/par/char). Scoped to gpu_hydro.o (all godunov + dt calc).
-gpu_hydro.o: FFLAGS += -gpu=fastmath
+# Do NOT add a file-level -gpu=maxregcount here: an explicit maxregcount flag OVERRIDES
+# the per-kernel launch_bounds register limit (ptxas honors the flag over the attribute),
+# pinning par back to 168 regs / 1 block. launch_bounds is the sole register control now.
 else
 gpu_hydro.o: FFLAGS += -gpu=maxregcount:72
 endif
