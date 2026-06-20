@@ -2264,14 +2264,16 @@ contains
   end function mhd_cadd
 
   !> Conserved increment of the MUSCL-Hancock half-step from one direction:
-  !> -hdtdx*(Fglm(m0+s) - Fglm(m0-s)), with the flux taken in the dir-normal frame.
+  !> -hdtdx*(F(m0+s) - F(m0-s)) with the IDEAL-MHD flux (no GLM coupling in the
+  !> predictor -- cleaning is applied only at the Riemann interface + the split
+  !> damping, which is the standard, robust GLM-MUSCL approach). dir-normal frame.
   attributes(device) function mhd_hancock_dir(m0, s, dir, gamma, ch, hdtdx) result(du)
     type(mhd_primitive_t), intent(in) :: m0, s
     integer, value :: dir
     real(kind=dp), value :: gamma, ch, hdtdx
     type(mhd_conserved_t) :: du, fp, fm
-    fp = mhd_rot_flux_from(mhd_flux_glm(mhd_rot_to(mhd_padd(m0,s, 1.0_dp),dir), gamma, ch), dir)
-    fm = mhd_rot_flux_from(mhd_flux_glm(mhd_rot_to(mhd_padd(m0,s,-1.0_dp),dir), gamma, ch), dir)
+    fp = mhd_rot_flux_from(mhd_phys_flux(mhd_rot_to(mhd_padd(m0,s, 1.0_dp),dir), gamma), dir)
+    fm = mhd_rot_flux_from(mhd_phys_flux(mhd_rot_to(mhd_padd(m0,s,-1.0_dp),dir), gamma), dir)
     du%density   = -hdtdx*(fp%density   -fm%density)
     du%momentum_x= -hdtdx*(fp%momentum_x-fm%momentum_x)
     du%momentum_y= -hdtdx*(fp%momentum_y-fm%momentum_y)
@@ -2357,6 +2359,9 @@ contains
        du = mhd_cadd(du, mhd_hancock_dir(m0, sy, 2, gamma, ch, 0.5_dp*dtdx))
        du = mhd_cadd(du, mhd_hancock_dir(m0, sz, 3, gamma, ch, 0.5_dp*dtdx))
        mh = mhd_conserved_2_primitive(mhd_cadd(u0, du), gamma, smallr, smallc2)
+       ! Positivity safeguard: if the half-step predicted a non-positive state,
+       ! fall back to the unpredicted cell (locally 1st order in time).
+       if (mh%density <= smallr .or. mh%pressure <= smallp) mh = m0
        ! X faces
        if (i > 1 .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) then
           fr = mhd_padd(mh, sx, -1.0_dp); call store_mhd_x(rx, i-2, j-2, k-2, fr, smallr, smallp, lrho, lp)
