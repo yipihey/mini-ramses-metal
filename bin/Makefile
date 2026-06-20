@@ -371,16 +371,17 @@ cub_module_radix_sort_f.o: cub_module_radix_sort.cuf cub_module_radix_sort_c.o
 # this file (they use < 72 regs); tighter caps spill PPM's working set.
 ifeq ($(COMPILER),NVHPC)
 ifeq ($(GLM),1)
-# The 9-var GLM-MHD kernel is much heavier; the 72 cap would spill it badly.
-# The characteristic-PPM kernel wants ~186 regs; capping below that spills its
-# working set. It is a SEPARATE kernel from the lean PLM integrator (~96 regs),
-# so this ceiling only relaxes the char kernel -- PLM keeps its high occupancy.
-# GLMREG empirically tuned: a fine sweep (152..255) showed a sharp, reproducible
-# throughput peak at 168 (127 Mcell/s vs 97 at 200) -- a ptxas register-allocator
-# sweet spot at fixed 1-block/SM occupancy, not an occupancy effect. Re-sweep if
-# the char kernel or compiler changes; the optimum is allocator-specific.
-GLMREG ?= 168
-gpu_hydro.o: FFLAGS += -gpu=maxregcount:$(GLMREG)
+# The 9-var GLM-MHD kernels are heavy. At nsubgrid=2 (256 thr/block) register
+# pressure sets blocks/SM in DISCRETE steps, and the three integrators want
+# DIFFERENT optima, so each carries its own per-kernel launch_bounds() in
+# gpu_hydro.cuf (ptxinfo-verified register counts):
+#   PLM  launch_bounds(256,2)   96 regs, shared-limited at 2 blocks/SM
+#   par  launch_bounds(256,2)  128 regs -> 2 blocks/SM (+44%: 364 -> 525 Mcell/s)
+#   char launch_bounds(256,1)  208 regs, 1 block/SM, 0 spill (222 -> 230 Mcell/s)
+# Do NOT add a file-level -gpu=maxregcount here: an explicit maxregcount flag
+# OVERRIDES the per-kernel launch_bounds register limit (ptxas honors the flag over
+# the attribute), pinning par back to 168 regs / 1 block. Confirmed by ncu Occupancy
+# + a GLMREG sweep at nsubgrid=2 (96..255). launch_bounds is the sole control now.
 else
 gpu_hydro.o: FFLAGS += -gpu=maxregcount:72
 endif

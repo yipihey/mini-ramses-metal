@@ -2895,7 +2895,9 @@ contains
   end subroutine mhd_conservative_update
 
   ! ----- MHD godunov kernel (uniform grid) -----------------------------------
-  attributes(global) subroutine mhd_integrator_kernel(grid, uold, unew, f, father, nbor, &
+  ! launch_bounds(256,2): nsubgrid=2 -> 256 thr/block; request 2 blocks/SM. PLM is
+  ! shared-mem-limited at 2 blocks anyway (~100 regs); this just pins the intent.
+  attributes(global) launch_bounds(256,2) subroutine mhd_integrator_kernel(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
     type(oct), device :: grid(*)
@@ -2928,7 +2930,10 @@ contains
 
   !> Characteristic-PPM integrator (slope_type=10). Separate kernel so its heavy
   !> register footprint (~186) doesn't penalise the lean PLM kernel's occupancy.
-  attributes(global) subroutine mhd_integrator_kernel_ppm(grid, uold, unew, f, father, nbor, &
+  ! launch_bounds(256,1): the characteristic-PPM kernel needs ~206 regs (eigensystem
+  ! working set). Forcing 2 blocks/SM (<=128 regs) spills it catastrophically and LOSES
+  ! throughput (ncu+sweep @ nsubgrid=2: 230 -> 173 Mcell/s). Keep 1 block/SM, no cap.
+  attributes(global) launch_bounds(256,1) subroutine mhd_integrator_kernel_ppm(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
     type(oct), device :: grid(*)
@@ -2961,7 +2966,10 @@ contains
 
   !> Parabolic-PPM integrator (slope_type=11): lean kernel (no eigensystem) calling
   !> trace_3d_mhd_par -- higher-order spatial than PLM, much cheaper than char-PPM.
-  attributes(global) subroutine mhd_integrator_kernel_par(grid, uold, unew, f, father, nbor, &
+  ! launch_bounds(256,2): the parabolic-PPM kernel naturally wants 168 regs = 1 block/SM.
+  ! Forcing 2 blocks/SM (<=128 regs) costs a small 144 B spill but DOUBLES occupancy
+  ! (16.7% -> 33%), net +44% throughput (sweep @ nsubgrid=2: 364 -> 525 Mcell/s).
+  attributes(global) launch_bounds(256,2) subroutine mhd_integrator_kernel_par(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
     type(oct), device :: grid(*)
