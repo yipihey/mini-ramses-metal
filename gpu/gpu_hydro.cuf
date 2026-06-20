@@ -2933,7 +2933,7 @@ contains
   ! launch_bounds(256,1): the characteristic-PPM kernel needs ~206 regs (eigensystem
   ! working set). Forcing 2 blocks/SM (<=128 regs) spills it catastrophically and LOSES
   ! throughput (ncu+sweep @ nsubgrid=2: 230 -> 173 Mcell/s). Keep 1 block/SM, no cap.
-  attributes(global) launch_bounds(256,1) subroutine mhd_integrator_kernel_ppm(grid, uold, unew, f, father, nbor, &
+  attributes(global) launch_bounds(256,2) subroutine mhd_integrator_kernel_ppm(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
     type(oct), device :: grid(*)
