@@ -2410,7 +2410,42 @@ contains
     if (a%pressure(i,j,k) < smallp) a%pressure(i,j,k)=lp
   end subroutine store_mhd_z
 
-  ! ----- MHD reconstruction (PLM; slope_type=10 falls back to PLM for now) -----
+  !> Parabolic (PPM) edge reconstruction of every MHD primitive from a 3-cell
+  !> stencil. qm = left (-) edge, qp = right (+) edge; monotonized per variable
+  !> (reuses the hydro local_ppm_edges). This is PPM spatial reconstruction; the
+  !> time update is the shared MUSCL-Hancock predictor (not full characteristic
+  !> tracing -- the 7-wave eigenvector projection is a further enhancement).
+  attributes(device) subroutine mhd_ppm_faces(l, m, r, qm, qp)
+    type(mhd_primitive_t), intent(in) :: l, m, r
+    type(mhd_primitive_t), intent(out) :: qm, qp
+    call local_ppm_edges(l%density,    m%density,    r%density,    qm%density,    qp%density)
+    call local_ppm_edges(l%velocity_x, m%velocity_x, r%velocity_x, qm%velocity_x, qp%velocity_x)
+    call local_ppm_edges(l%velocity_y, m%velocity_y, r%velocity_y, qm%velocity_y, qp%velocity_y)
+    call local_ppm_edges(l%velocity_z, m%velocity_z, r%velocity_z, qm%velocity_z, qp%velocity_z)
+    call local_ppm_edges(l%pressure,   m%pressure,   r%pressure,   qm%pressure,   qp%pressure)
+    call local_ppm_edges(l%bx, m%bx, r%bx, qm%bx, qp%bx)
+    call local_ppm_edges(l%by, m%by, r%by, qm%by, qp%by)
+    call local_ppm_edges(l%bz, m%bz, r%bz, qm%bz, qp%bz)
+    call local_ppm_edges(l%psi, m%psi, r%psi, qm%psi, qp%psi)
+  end subroutine mhd_ppm_faces
+
+  !> Face state = half-step cell + (parabolic edge - raw cell): combines the PPM
+  !> spatial edge with the MUSCL-Hancock time prediction (reduces to mh+/-slope
+  !> for the linear case).
+  attributes(device) function mhd_face(mh, edge, m0) result(f)
+    type(mhd_primitive_t), intent(in) :: mh, edge, m0
+    type(mhd_primitive_t) :: f
+    f%density   = mh%density   + edge%density   - m0%density
+    f%velocity_x= mh%velocity_x+ edge%velocity_x- m0%velocity_x
+    f%velocity_y= mh%velocity_y+ edge%velocity_y- m0%velocity_y
+    f%velocity_z= mh%velocity_z+ edge%velocity_z- m0%velocity_z
+    f%pressure  = mh%pressure  + edge%pressure  - m0%pressure
+    f%bx = mh%bx + edge%bx - m0%bx; f%by = mh%by + edge%by - m0%by
+    f%bz = mh%bz + edge%bz - m0%bz; f%psi = mh%psi + edge%psi - m0%psi
+    return
+  end function mhd_face
+
+  ! ----- MHD reconstruction: PLM (slope<10) or parabolic PPM (slope==10) -------
   attributes(device) subroutine trace_3d_mhd(ls, thread_idx, lx, rx, ly, ry, lz, rz, &
        & gamma, smallr, smallc2, ch, dtdx, slope)
     type(subgrid_6x6x6cell_mhd), intent(inout) :: ls
@@ -2419,13 +2454,14 @@ contains
     type(subgrid_3x2x2cell_mhd) :: lx, rx
     type(subgrid_2x3x2cell_mhd) :: ly, ry
     type(subgrid_2x2x3cell_mhd) :: lz, rz
-    type(mhd_primitive_t) :: m0, sx, sy, sz, mh, fl, fr
+    type(mhd_primitive_t) :: m0, sx, sy, sz, mh, fl, fr, pm, pp
     type(mhd_conserved_t) :: u0, du
     real(kind=dp) :: smallp, lrho, lp
     integer :: work_idx, i, j, k, work_size, es
+    logical :: use_ppm
     work_size = 2*nsubgrid+2
     smallp = smallr*smallc2
-    es = slope; if (slope == 10) es = 2     ! TODO: characteristic PPM-MHD
+    es = slope; if (slope == 10) es = 2     ! predictor slopes always moncen
     do work_idx = thread_idx, work_size**3 - 1, blockDim%x
        call index_1Dto3D(work_idx, work_size, work_size, i, j, k)
        i = i+1; j = j+1; k = k+1
@@ -2442,26 +2478,42 @@ contains
        ! Positivity safeguard: if the half-step predicted a non-positive state,
        ! fall back to the unpredicted cell (locally 1st order in time).
        if (mh%density <= smallr .or. mh%pressure <= smallp) mh = m0
+       ! PPM (parabolic) faces unless a strong pressure jump -> PLM/moncen fallback.
+       use_ppm = (slope == 10)
+       if (use_ppm) then
+          if ( strong_pressure_jump(ls%pressure(i-1,j,k), m0%pressure, ls%pressure(i+1,j,k)) .or. &
+             & strong_pressure_jump(ls%pressure(i,j-1,k), m0%pressure, ls%pressure(i,j+1,k)) .or. &
+             & strong_pressure_jump(ls%pressure(i,j,k-1), m0%pressure, ls%pressure(i,j,k+1)) ) use_ppm = .false.
+       end if
        ! X faces
+       if (use_ppm) call mhd_ppm_faces(sg_load_mhd(ls,i-1,j,k), m0, sg_load_mhd(ls,i+1,j,k), pm, pp)
        if (i > 1 .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) then
-          fr = mhd_padd(mh, sx, -1.0_dp); call store_mhd_x(rx, i-2, j-2, k-2, fr, smallr, smallp, lrho, lp)
+          if (use_ppm) then; fr = mhd_face(mh, pm, m0); else; fr = mhd_padd(mh, sx, -1.0_dp); end if
+          call store_mhd_x(rx, i-2, j-2, k-2, fr, smallr, smallp, lrho, lp)
        end if
        if (i < work_size .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) then
-          fl = mhd_padd(mh, sx, 1.0_dp); call store_mhd_x(lx, i-1, j-2, k-2, fl, smallr, smallp, lrho, lp)
+          if (use_ppm) then; fl = mhd_face(mh, pp, m0); else; fl = mhd_padd(mh, sx, 1.0_dp); end if
+          call store_mhd_x(lx, i-1, j-2, k-2, fl, smallr, smallp, lrho, lp)
        end if
        ! Y faces
+       if (use_ppm) call mhd_ppm_faces(sg_load_mhd(ls,i,j-1,k), m0, sg_load_mhd(ls,i,j+1,k), pm, pp)
        if ((i > 1 .and. i < work_size) .and. j > 1 .and. (k > 1 .and. k < work_size)) then
-          fr = mhd_padd(mh, sy, -1.0_dp); call store_mhd_y(ry, i-2, j-2, k-2, fr, smallr, smallp, lrho, lp)
+          if (use_ppm) then; fr = mhd_face(mh, pm, m0); else; fr = mhd_padd(mh, sy, -1.0_dp); end if
+          call store_mhd_y(ry, i-2, j-2, k-2, fr, smallr, smallp, lrho, lp)
        end if
        if ((i > 1 .and. i < work_size) .and. j < work_size .and. (k > 1 .and. k < work_size)) then
-          fl = mhd_padd(mh, sy, 1.0_dp); call store_mhd_y(ly, i-2, j-1, k-2, fl, smallr, smallp, lrho, lp)
+          if (use_ppm) then; fl = mhd_face(mh, pp, m0); else; fl = mhd_padd(mh, sy, 1.0_dp); end if
+          call store_mhd_y(ly, i-2, j-1, k-2, fl, smallr, smallp, lrho, lp)
        end if
        ! Z faces
+       if (use_ppm) call mhd_ppm_faces(sg_load_mhd(ls,i,j,k-1), m0, sg_load_mhd(ls,i,j,k+1), pm, pp)
        if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k > 1) then
-          fr = mhd_padd(mh, sz, -1.0_dp); call store_mhd_z(rz, i-2, j-2, k-2, fr, smallr, smallp, lrho, lp)
+          if (use_ppm) then; fr = mhd_face(mh, pm, m0); else; fr = mhd_padd(mh, sz, -1.0_dp); end if
+          call store_mhd_z(rz, i-2, j-2, k-2, fr, smallr, smallp, lrho, lp)
        end if
        if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k < work_size) then
-          fl = mhd_padd(mh, sz, 1.0_dp); call store_mhd_z(lz, i-2, j-2, k-1, fl, smallr, smallp, lrho, lp)
+          if (use_ppm) then; fl = mhd_face(mh, pp, m0); else; fl = mhd_padd(mh, sz, 1.0_dp); end if
+          call store_mhd_z(lz, i-2, j-2, k-1, fl, smallr, smallp, lrho, lp)
        end if
     end do
     call syncthreads()
