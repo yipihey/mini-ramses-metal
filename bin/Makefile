@@ -382,6 +382,15 @@ ifeq ($(GLM),1)
 # OVERRIDES the per-kernel launch_bounds register limit (ptxas honors the flag over
 # the attribute), pinning par back to 168 regs / 1 block. Confirmed by ncu Occupancy
 # + a GLMREG sweep at nsubgrid=2 (96..255). launch_bounds is the sole control now.
+#
+# fastmath: the godunov kernels were profiler-confirmed latency-bound on the IEEE
+# sqrt/divide dependency chain (`Stall Wait`); -gpu=fastmath swaps the correctly-
+# rounded sequences for the SFU approximations (~22-bit), nearly DOUBLING throughput
+# (PLM 953->1527, par 525->1086, char 230->405 Mcell/s). The ~22-bit rounding is ~5
+# orders below the scheme's truncation error: validated bit-comparable on Orszag-Tang
+# (div.B/positivity match to 4 digits) and CP-Alfven (invariant + step count identical
+# to 3-4 sig figs across PLM/par/char). Scoped to gpu_hydro.o (all godunov + dt calc).
+gpu_hydro.o: FFLAGS += -gpu=fastmath
 else
 gpu_hydro.o: FFLAGS += -gpu=maxregcount:72
 endif
