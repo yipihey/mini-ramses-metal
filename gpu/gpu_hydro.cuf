@@ -2577,14 +2577,14 @@ contains
              inc(1)=inc(1)+amp
           end select
        end do
-       ! Overshoot guard: the cross-variable characteristic projection can create
-       ! new extrema even though each variable's parabola is monotone. Clip every
-       ! traced face value back into its own parabola-edge range [min,max of eL,c0,eR].
+       ! Density/pressure are clipped to their parabola-edge range for positivity
+       ! and robustness; velocity/B keep the full characteristic correction (clipping
+       ! them would erase the 3rd-order accuracy at smooth extrema, e.g. Alfven waves).
        do v = 1, 7
           qs7(v) = ref(v) + inc(v)
-          qs7(v) = max(qs7(v), min(eL(v), min(c0(v), eR(v))))
-          qs7(v) = min(qs7(v), max(eL(v), max(c0(v), eR(v))))
        end do
+       qs7(1) = min(max(qs7(1), min(eL(1),min(c0(1),eR(1)))), max(eL(1),max(c0(1),eR(1))))
+       qs7(5) = min(max(qs7(5), min(eL(5),min(c0(5),eR(5)))), max(eL(5),max(c0(5),eR(5))))
        if (qs7(1) <= smallr .or. qs7(5) <= smallp) then
           do v = 1, 7; qs7(v) = c0(v); end do
        end if
