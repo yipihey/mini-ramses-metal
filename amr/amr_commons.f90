@@ -264,7 +264,7 @@ module amr_commons
 #if NVAR>5+NENER
      real(kind=8),dimension(1:MAXREGION,1:NVAR-5-NENER)::var_region=0.0
 #endif
-#ifdef MHD
+#if defined(MHD) || defined(GLMMHD)
      real(kind=8),dimension(1:MAXREGION)::B_region=0.
      real(kind=8),dimension(1:MAXREGION)::C_region=0.
      real(kind=8)::A_ave=0.,B_ave=0.,C_ave=0.

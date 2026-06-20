@@ -81,6 +81,16 @@ subroutine condinit(r,g,x,q,dx,nn)
 #else
   ! Call built-in initial condition generator
   call region_condinit(r,g,x,q,dx,nn)
+#ifdef GLMMHD
+  ! GLM cell-centred B from the uniform-field namelist seeds (A_ave/B_ave/C_ave =
+  ! uniform Bx/By/Bz). region_condinit leaves B=0 for GLM (the bold/vector-potential
+  ! path is MHD-only), so set it here. Defaults to 0 -> unchanged for non-magnetised
+  ! region ICs (e.g. Sod). Used by the magnetised driven-turbulence benchmark.
+  q(1:nn,6) = r%A_ave
+  q(1:nn,7) = r%B_ave
+  q(1:nn,8) = r%C_ave
+  q(1:nn,9) = 0.0d0
+#endif
 #endif
   
   ! Add here, if you wish, some user-defined initial conditions
