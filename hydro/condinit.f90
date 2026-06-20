@@ -41,6 +41,7 @@ subroutine condinit(r,g,x,q,dx,nn)
 #define PANCAKE 9
 #define ALFVENWAVE 10
 #define BRIOWU 11
+#define TURB 12
 
   integer::i
 #if INIT==COEUR
@@ -69,6 +70,11 @@ subroutine condinit(r,g,x,q,dx,nn)
 #elif INIT==ALFVENWAVE
   real(kind=8)::pi,del_ini
   real(kind=8)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,scale_m
+#elif INIT==TURB
+  integer::nx,ny,nz,kk
+  real(kind=8)::twopi,cs,rho0,p0,b0,norm,sumsq
+  real(kind=8)::ax,ay,az,cx,cy,cz,csq,amp,ph,phase,vx,vy,vz
+  real(kind=8)::hx,hy,hz,hp
 #else
   ! Call built-in initial condition generator
   call region_condinit(r,g,x,q,dx,nn)
@@ -336,6 +342,71 @@ subroutine condinit(r,g,x,q,dx,nn)
      q(i,5) = 0.1 ! Pressure
      q(i,6) = 0.1*SIN(2.0d0*pi*x(i,1)) ! By
      q(i,7) = 0.1*COS(2.0d0*pi*x(i,1)) ! Bz
+  end do
+#endif
+
+#if INIT==TURB
+  ! Reproducible decaying-turbulence IC. Solenoidal velocity from a fixed set of
+  ! transverse Fourier modes (|k| in [1,2]*2pi/L), normalized to v_rms = cs (Mach~1).
+  ! Velocity/rho/p are byte-identical for HD and MHD builds; GLMMHD adds a uniform
+  ! guide field with Alfven speed vA = cs (plasma beta ~ 1).
+  twopi=2.0d0*acos(-1.0d0)
+  rho0=1.0d0
+  cs=1.0d0
+  p0=rho0*cs*cs/r%gamma                  ! so cs = sqrt(gamma p/rho) = 1
+  b0=cs*sqrt(rho0)                        ! vA = |B|/sqrt(rho) = cs
+  ! normalization so that <v^2> = sum_hemisphere amp^2 |c|^2 / 2 = cs^2
+  sumsq=0.0d0
+  do nx=-2,2
+   do ny=-2,2
+    do nz=-2,2
+     kk=nx*nx+ny*ny+nz*nz
+     if(kk<1.or.kk>4)cycle
+     if(.not.(nz>0.or.(nz==0.and.ny>0).or.(nz==0.and.ny==0.and.nx>0)))cycle
+     hp=dble(100*nx+17*ny+3*nz+211)
+     ax=2.0d0*(sin(hp+1.0d0)*43758.5453d0-floor(sin(hp+1.0d0)*43758.5453d0))-1.0d0
+     ay=2.0d0*(sin(hp+2.0d0)*43758.5453d0-floor(sin(hp+2.0d0)*43758.5453d0))-1.0d0
+     az=2.0d0*(sin(hp+3.0d0)*43758.5453d0-floor(sin(hp+3.0d0)*43758.5453d0))-1.0d0
+     cx=dble(ny)*az-dble(nz)*ay; cy=dble(nz)*ax-dble(nx)*az; cz=dble(nx)*ay-dble(ny)*ax
+     amp=1.0d0/sqrt(dble(kk))
+     sumsq=sumsq+amp*amp*(cx*cx+cy*cy+cz*cz)*0.5d0
+    enddo
+   enddo
+  enddo
+  norm=cs/sqrt(sumsq)
+  do i=1,nn
+     vx=0.0d0; vy=0.0d0; vz=0.0d0
+     do nx=-2,2
+      do ny=-2,2
+       do nz=-2,2
+        kk=nx*nx+ny*ny+nz*nz
+        if(kk<1.or.kk>4)cycle
+        if(.not.(nz>0.or.(nz==0.and.ny>0).or.(nz==0.and.ny==0.and.nx>0)))cycle
+        hp=dble(100*nx+17*ny+3*nz+211)
+        ax=2.0d0*(sin(hp+1.0d0)*43758.5453d0-floor(sin(hp+1.0d0)*43758.5453d0))-1.0d0
+        ay=2.0d0*(sin(hp+2.0d0)*43758.5453d0-floor(sin(hp+2.0d0)*43758.5453d0))-1.0d0
+        az=2.0d0*(sin(hp+3.0d0)*43758.5453d0-floor(sin(hp+3.0d0)*43758.5453d0))-1.0d0
+        ph=twopi*(sin(hp+4.0d0)*43758.5453d0-floor(sin(hp+4.0d0)*43758.5453d0))
+        cx=dble(ny)*az-dble(nz)*ay; cy=dble(nz)*ax-dble(nx)*az; cz=dble(nx)*ay-dble(ny)*ax
+        amp=norm/sqrt(dble(kk))
+        phase=twopi*(dble(nx)*x(i,1)+dble(ny)*x(i,2)+dble(nz)*x(i,3))/r%box_size(1)+ph
+        vx=vx+amp*cx*cos(phase)
+        vy=vy+amp*cy*cos(phase)
+        vz=vz+amp*cz*cos(phase)
+       enddo
+      enddo
+     enddo
+     q(i,1)=rho0
+     q(i,2)=vx
+     q(i,3)=vy
+     q(i,4)=vz
+     q(i,5)=p0
+#ifdef GLMMHD
+     q(i,6)=0.0d0      ! Bx
+     q(i,7)=0.0d0      ! By
+     q(i,8)=b0         ! Bz: uniform guide field, vA = cs
+     q(i,9)=0.0d0      ! psi
+#endif
   end do
 #endif
 
