@@ -2748,6 +2748,73 @@ contains
     call syncthreads()
   end subroutine trace_3d_mhd_plm
 
+  ! Parabolic-PPM trace (slope_type=11): parabolic edges + MUSCL-Hancock predictor,
+  ! NO characteristic eigensystem -> lean registers like PLM, sharper (3rd-order
+  ! spatial) faces, PLM fallback on strong pressure jumps. Cheaper than char-PPM but
+  ! more div(B)/small-scale noise (no characteristic projection to keep waves clean).
+  attributes(device) subroutine trace_3d_mhd_par(ls, thread_idx, lx, rx, ly, ry, lz, rz, &
+       & gamma, smallr, smallc2, ch, dtdx, slope)
+    type(subgrid_6x6x6cell_mhd), intent(inout) :: ls
+    integer, value :: thread_idx, slope
+    real(kind=dp), value :: gamma, smallr, smallc2, ch, dtdx
+    type(subgrid_3x2x2cell_mhd) :: lx, rx
+    type(subgrid_2x3x2cell_mhd) :: ly, ry
+    type(subgrid_2x2x3cell_mhd) :: lz, rz
+    type(mhd_primitive_t) :: m0, sx, sy, sz, mh, fl, fr, pm, pp
+    type(mhd_conserved_t) :: u0, du
+    real(kind=dp) :: smallp, lrho, lp
+    integer :: work_idx, i, j, k, work_size
+    logical :: up
+    work_size = 2*nsubgrid+2
+    smallp = smallr*smallc2
+    do work_idx = thread_idx, work_size**3 - 1, blockDim%x
+       call index_1Dto3D(work_idx, work_size, work_size, i, j, k)
+       i = i+1; j = j+1; k = k+1
+       m0 = sg_load_mhd(ls, i, j, k)
+       lrho = m0%density; lp = m0%pressure
+       sx = mhd_slope(sg_load_mhd(ls,i-1,j,k), m0, sg_load_mhd(ls,i+1,j,k), 2)
+       sy = mhd_slope(sg_load_mhd(ls,i,j-1,k), m0, sg_load_mhd(ls,i,j+1,k), 2)
+       sz = mhd_slope(sg_load_mhd(ls,i,j,k-1), m0, sg_load_mhd(ls,i,j,k+1), 2)
+       u0 = mhd_primitive_2_conserved(m0, gamma)
+       du = mhd_hancock_dir(m0, sx, 1, gamma, ch, 0.5_dp*dtdx)
+       du = mhd_cadd(du, mhd_hancock_dir(m0, sy, 2, gamma, ch, 0.5_dp*dtdx))
+       du = mhd_cadd(du, mhd_hancock_dir(m0, sz, 3, gamma, ch, 0.5_dp*dtdx))
+       mh = mhd_conserved_2_primitive(mhd_cadd(u0, du), gamma, smallr, smallc2)
+       if (mh%density <= smallr .or. mh%pressure <= smallp) mh = m0
+       up = .not. ( strong_pressure_jump(ls%pressure(i-1,j,k), m0%pressure, ls%pressure(i+1,j,k)) .or. &
+          & strong_pressure_jump(ls%pressure(i,j-1,k), m0%pressure, ls%pressure(i,j+1,k)) .or. &
+          & strong_pressure_jump(ls%pressure(i,j,k-1), m0%pressure, ls%pressure(i,j,k+1)) )
+       if (up) call mhd_ppm_faces(sg_load_mhd(ls,i-1,j,k), m0, sg_load_mhd(ls,i+1,j,k), pm, pp)
+       if (i > 1 .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) then
+          if (up) then; fr = mhd_face(mh, pm, m0); else; fr = mhd_padd(mh, sx, -1.0_dp); end if
+          call store_mhd_x(rx, i-2, j-2, k-2, fr, smallr, smallp, lrho, lp)
+       end if
+       if (i < work_size .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) then
+          if (up) then; fl = mhd_face(mh, pp, m0); else; fl = mhd_padd(mh, sx, 1.0_dp); end if
+          call store_mhd_x(lx, i-1, j-2, k-2, fl, smallr, smallp, lrho, lp)
+       end if
+       if (up) call mhd_ppm_faces(sg_load_mhd(ls,i,j-1,k), m0, sg_load_mhd(ls,i,j+1,k), pm, pp)
+       if ((i > 1 .and. i < work_size) .and. j > 1 .and. (k > 1 .and. k < work_size)) then
+          if (up) then; fr = mhd_face(mh, pm, m0); else; fr = mhd_padd(mh, sy, -1.0_dp); end if
+          call store_mhd_y(ry, i-2, j-2, k-2, fr, smallr, smallp, lrho, lp)
+       end if
+       if ((i > 1 .and. i < work_size) .and. j < work_size .and. (k > 1 .and. k < work_size)) then
+          if (up) then; fl = mhd_face(mh, pp, m0); else; fl = mhd_padd(mh, sy, 1.0_dp); end if
+          call store_mhd_y(ly, i-2, j-1, k-2, fl, smallr, smallp, lrho, lp)
+       end if
+       if (up) call mhd_ppm_faces(sg_load_mhd(ls,i,j,k-1), m0, sg_load_mhd(ls,i,j,k+1), pm, pp)
+       if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k > 1) then
+          if (up) then; fr = mhd_face(mh, pm, m0); else; fr = mhd_padd(mh, sz, -1.0_dp); end if
+          call store_mhd_z(rz, i-2, j-2, k-2, fr, smallr, smallp, lrho, lp)
+       end if
+       if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k < work_size) then
+          if (up) then; fl = mhd_face(mh, pp, m0); else; fl = mhd_padd(mh, sz, 1.0_dp); end if
+          call store_mhd_z(lz, i-2, j-2, k-1, fl, smallr, smallp, lrho, lp)
+       end if
+    end do
+    call syncthreads()
+  end subroutine trace_3d_mhd_par
+
   ! ----- MHD Riemann driver: rotate B with v, solve, un-rotate, store flux ----
   attributes(device) subroutine riemann_driver_mhd(lx, rx, ly, ry, lz, rz, thread_idx, &
        & gamma, smallr, smallc2, ch, riemann)
@@ -2891,6 +2958,39 @@ contains
     call riemann_driver_mhd(lx, rx, ly, ry, lz, rz, thread_idx, gamma, smallr, smallc2, ch, riemann)
     call mhd_conservative_update(unew, nbor, lx, ly, lz, head_idx, block_idx, thread_idx, dtdx)
   end subroutine mhd_integrator_kernel_ppm
+
+  !> Parabolic-PPM integrator (slope_type=11): lean kernel (no eigensystem) calling
+  !> trace_3d_mhd_par -- higher-order spatial than PLM, much cheaper than char-PPM.
+  attributes(global) subroutine mhd_integrator_kernel_par(grid, uold, unew, f, father, nbor, &
+       & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
+       & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
+    type(oct), device :: grid(*)
+    integer, device :: father(*)
+    integer, device :: nbor(1:subgridsize,*)
+    real(kind=8), device :: constant_gravity(1:3)
+    real(kind=dp), device :: f(1:twotondim,1:ndim,*)
+    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    integer(kind=4), value :: head_idx, num_subgrids, ngridmax
+    integer, value :: ilevel, levelmin, levelmax
+    real(kind=dp), value :: gamma, smallr, smallc2, ch, dt, dx
+    integer, value :: slope, riemann
+    type(subgrid_3x2x2cell_mhd), shared :: lx, rx
+    type(subgrid_2x3x2cell_mhd), shared :: ly, ry
+    type(subgrid_2x2x3cell_mhd), shared :: lz, rz
+    type(subgrid_6x6x6cell_mhd), shared :: ls
+    real(kind=dp) :: dtdx
+    integer :: block_idx, thread_idx
+    dtdx = dt/dx
+    block_idx = blockIdx%x - 1
+    thread_idx = threadIdx%x - 1
+    if (block_idx >= num_subgrids) return
+    call subgrid_conserved_2_primitive_mhd(grid, uold, f, constant_gravity, nbor, &
+         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, ls)
+    call trace_3d_mhd_par(ls, thread_idx, lx, rx, ly, ry, lz, rz, gamma, smallr, smallc2, ch, dtdx, slope)
+    call riemann_driver_mhd(lx, rx, ly, ry, lz, rz, thread_idx, gamma, smallr, smallc2, ch, riemann)
+    call mhd_conservative_update(unew, nbor, lx, ly, lz, head_idx, block_idx, thread_idx, dtdx)
+  end subroutine mhd_integrator_kernel_par
 
   ! ----- MHD timestep: fast-magnetosonic CFL + emag ---------------------------
   attributes(global) subroutine cmpdt_kernel_mhd(grid, uold, f, constant_gravity, &
