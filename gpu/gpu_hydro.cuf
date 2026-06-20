@@ -2481,7 +2481,7 @@ contains
     real(kind=dp) :: bco(7), cco(7), P1, P2
     real(kind=dp) :: bxl, bxr, psl, psr, aa, bb
     real(kind=dp) :: d, id, sqd, isqd, a2, a, ca2, ca, b2, bt, byh, bzh
-    real(kind=dp) :: q, disc, cf2, cs2, cf, cs, af2, as2, af, as, S, N, vx0
+    real(kind=dp) :: q, disc, cf2, cs2, cf, cs, af2, as2, af, as, S, N, vx0, inv_a2, ibt, iden
     real(kind=dp) :: lam(7), sigma, lo, hi, amp, ef
     integer :: v, w, side
     logical :: rt
@@ -2507,12 +2507,12 @@ contains
     call local_ppm_edges(l%psi, m%psi, r%psi, psl, psr)
 
     ! --- MHD eigensystem at the cell center m ---
-    d = max(m%density, smallr); id = 1.0_dp/d; sqd = sqrt(d); isqd = 1.0_dp/sqd
+    d = max(m%density, smallr); id = 1.0_dp/d; sqd = sqrt(d); isqd = sqd*id   ! 1/sqrt(d)=sqrt(d)/d
     a2 = gamma*max(m%pressure, smallp)*id; a = sqrt(a2)
     ca2 = m%bx*m%bx*id; ca = sqrt(ca2)
     b2  = (m%bx*m%bx + m%by*m%by + m%bz*m%bz)*id
     bt  = sqrt(m%by*m%by + m%bz*m%bz)
-    if (bt > tiny) then; byh = m%by/bt; bzh = m%bz/bt
+    if (bt > tiny) then; ibt = 1.0_dp/bt; byh = m%by*ibt; bzh = m%bz*ibt
     else; byh = sqrt(0.5_dp); bzh = sqrt(0.5_dp); end if
     q = a2 + b2
     disc = sqrt(max(q*q - 4.0_dp*a2*ca2, 0.0_dp))
@@ -2521,10 +2521,11 @@ contains
     if (cf2 - cs2 <= tiny) then
        af = 1.0_dp; as = 0.0_dp
     else
-       af2 = (a2 - cs2)/(cf2 - cs2); as2 = (cf2 - a2)/(cf2 - cs2)
-       af = sqrt(min(max(af2,0.0_dp),1.0_dp)); as = sqrt(min(max(as2,0.0_dp),1.0_dp))
+       iden = 1.0_dp/(cf2 - cs2)
+       af2 = min(max((a2 - cs2)*iden, 0.0_dp), 1.0_dp)
+       af = sqrt(af2); as = sqrt(1.0_dp - af2)        ! as2 = 1 - af2 (exact)
     end if
-    S = sign(1.0_dp, m%bx); N = 0.5_dp/a2; vx0 = m%velocity_x
+    S = sign(1.0_dp, m%bx); inv_a2 = 1.0_dp/a2; N = 0.5_dp*inv_a2; vx0 = m%velocity_x
     lam(1)=vx0-cf; lam(2)=vx0-ca; lam(3)=vx0-cs; lam(4)=vx0
     lam(5)=vx0+cs; lam(6)=vx0+ca; lam(7)=vx0+cf
 
@@ -2579,7 +2580,7 @@ contains
              inc(6)=inc(6)-amp*ef*S*sqd*bzh
              inc(7)=inc(7)+amp*ef*S*sqd*byh
           case default                       ! entropy (vx)
-             amp = dW(1) - dW(5)/a2
+             amp = dW(1) - dW(5)*inv_a2
              inc(1)=inc(1)+amp
           end select
        end do
