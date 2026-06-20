@@ -2194,6 +2194,24 @@ contains
     return
   end function mhd_rot_to
 
+  !> Inverse of mhd_rot_to for a primitive state: rotate the `dir`-normal frame
+  !> back to global. (rot_to(dir=2) and rot_to(dir=3) are mutual inverses.)
+  attributes(device) function mhd_rot_from(p, dir) result(r)
+    type(mhd_primitive_t), intent(in) :: p
+    integer, value :: dir
+    type(mhd_primitive_t) :: r
+    r = p
+    ! inverse of rot_to(dir=2) is the dir=3 cyclic shift, and vice versa.
+    if (dir == 2) then
+       r%velocity_x = p%velocity_z; r%velocity_y = p%velocity_x; r%velocity_z = p%velocity_y
+       r%bx = p%bz; r%by = p%bx; r%bz = p%by
+    else if (dir == 3) then
+       r%velocity_x = p%velocity_y; r%velocity_y = p%velocity_z; r%velocity_z = p%velocity_x
+       r%bx = p%by; r%by = p%bz; r%bz = p%bx
+    end if
+    return
+  end function mhd_rot_from
+
   !> Inverse rotation of a flux computed in the `dir`-normal frame back to global.
   attributes(device) function mhd_rot_flux_from(f, dir) result(g)
     type(mhd_conserved_t), intent(in) :: f
@@ -2445,7 +2463,158 @@ contains
     return
   end function mhd_face
 
-  ! ----- MHD reconstruction: PLM (slope<10) or parabolic PPM (slope==10) -------
+  ! =========================================================================
+  !> 7-wave characteristic PPM-MHD trace along x (rotated frame; Bx = normal).
+  !> Parabolic edges of the 7 primitive vars (rho,vx,vy,vz,p,By,Bz) are projected
+  !> onto the MHD eigensystem (Stone et al. 2008, ApJS 178, 137; Roe-Balsara
+  !> normalized eigenvectors, L_k.R_k=1) and traced over each wave's domain of
+  !> dependence -- the standard PPM characteristic tracing extended from 3 acoustic
+  !> waves to the 7 MHD waves (2 fast, 2 Alfven, 2 slow, 1 entropy). Bx and psi are
+  !> carried at their parabolic spatial edge (the GLM pair acts at the interface).
+  !> All math in real(kind=dp). qminus = -x face, qplus = +x face.
+  attributes(device) subroutine mhd_char_trace_x(l, m, r, gamma, dtdx, qminus, qplus)
+    type(mhd_primitive_t), intent(in) :: l, m, r
+    real(kind=dp), value :: gamma, dtdx
+    type(mhd_primitive_t), intent(out) :: qminus, qplus
+    real(kind=dp), parameter :: smallr = 1d-10, smallp = 1d-30, tiny = 1d-40
+    real(kind=dp) :: eL(7), eR(7), c0(7), ref(7), inc(7), dW(7), qs7(7)
+    real(kind=dp) :: bxl, bxr, psl, psr, aa, bb
+    real(kind=dp) :: d, id, sqd, isqd, a2, a, ca2, ca, b2, bt, byh, bzh
+    real(kind=dp) :: q, disc, cf2, cs2, cf, cs, af2, as2, af, as, S, N, vx0
+    real(kind=dp) :: lam(7), sigma, lo, hi, amp, ef
+    integer :: v, w, side
+    logical :: rt
+
+    ! --- parabolic edges (monotonized) for the 7 traced primitives ---
+    call local_ppm_edges(l%density,   m%density,   r%density,   eL(1), eR(1)); c0(1)=m%density
+    call local_ppm_edges(l%velocity_x,m%velocity_x,r%velocity_x,eL(2), eR(2)); c0(2)=m%velocity_x
+    call local_ppm_edges(l%velocity_y,m%velocity_y,r%velocity_y,eL(3), eR(3)); c0(3)=m%velocity_y
+    call local_ppm_edges(l%velocity_z,m%velocity_z,r%velocity_z,eL(4), eR(4)); c0(4)=m%velocity_z
+    call local_ppm_edges(l%pressure,  m%pressure,  r%pressure,  eL(5), eR(5)); c0(5)=m%pressure
+    call local_ppm_edges(l%by,        m%by,        r%by,        eL(6), eR(6)); c0(6)=m%by
+    call local_ppm_edges(l%bz,        m%bz,        r%bz,        eL(7), eR(7)); c0(7)=m%bz
+    do v = 1, 7
+       call local_ppm_monotonize(eL(v), c0(v), eR(v), aa, bb); eL(v)=aa; eR(v)=bb
+    end do
+    if (eL(1) <= 0.0_dp .or. eR(1) <= 0.0_dp) then; eL(1)=c0(1); eR(1)=c0(1); end if
+    if (eL(5) <= 0.0_dp .or. eR(5) <= 0.0_dp) then; eL(5)=c0(5); eR(5)=c0(5); end if
+    call local_ppm_edges(l%bx,  m%bx,  r%bx,  bxl, bxr)
+    call local_ppm_edges(l%psi, m%psi, r%psi, psl, psr)
+
+    ! --- MHD eigensystem at the cell center m ---
+    d = max(m%density, smallr); id = 1.0_dp/d; sqd = sqrt(d); isqd = 1.0_dp/sqd
+    a2 = gamma*max(m%pressure, smallp)*id; a = sqrt(a2)
+    ca2 = m%bx*m%bx*id; ca = sqrt(ca2)
+    b2  = (m%bx*m%bx + m%by*m%by + m%bz*m%bz)*id
+    bt  = sqrt(m%by*m%by + m%bz*m%bz)
+    if (bt > tiny) then; byh = m%by/bt; bzh = m%bz/bt
+    else; byh = sqrt(0.5_dp); bzh = sqrt(0.5_dp); end if
+    q = a2 + b2
+    disc = sqrt(max(q*q - 4.0_dp*a2*ca2, 0.0_dp))
+    cf2 = 0.5_dp*(q + disc); cs2 = 0.5_dp*(q - disc)
+    cf = sqrt(max(cf2, 0.0_dp)); cs = sqrt(max(cs2, 0.0_dp))
+    if (cf2 - cs2 <= tiny) then
+       af = 1.0_dp; as = 0.0_dp
+    else
+       af2 = (a2 - cs2)/(cf2 - cs2); as2 = (cf2 - a2)/(cf2 - cs2)
+       af = sqrt(min(max(af2,0.0_dp),1.0_dp)); as = sqrt(min(max(as2,0.0_dp),1.0_dp))
+    end if
+    S = sign(1.0_dp, m%bx); N = 0.5_dp/a2; vx0 = m%velocity_x
+    lam(1)=vx0-cf; lam(2)=vx0-ca; lam(3)=vx0-cs; lam(4)=vx0
+    lam(5)=vx0+cs; lam(6)=vx0+ca; lam(7)=vx0+cf
+
+    do side = 0, 1
+       rt = (side == 0)                     ! side 0 = +x face (qplus); 1 = -x face
+       do v = 1, 7
+          if (rt) then; ref(v)=eR(v); else; ref(v)=eL(v); end if
+          inc(v) = 0.0_dp
+       end do
+       do w = 1, 7
+          if (rt) then
+             if (.not. (lam(w) > 0.0_dp)) cycle
+          else
+             if (.not. (lam(w) < 0.0_dp)) cycle
+          end if
+          sigma = min(abs(lam(w))*dtdx, 1.0_dp)
+          if (rt) then; lo = 1.0_dp - sigma; hi = 1.0_dp
+          else;         lo = 0.0_dp;          hi = sigma; end if
+          do v = 1, 7
+             dW(v) = local_ppm_avg(eL(v), c0(v), eR(v), lo, hi) - ref(v)
+          end do
+          select case (w)
+          case (1, 7)                        ! fast (vx -+ cf)
+             ef = merge(1.0_dp, -1.0_dp, w == 7)
+             amp = N*( ef*cf*af*dW(2) - ef*cs*as*S*(byh*dW(3)+bzh*dW(4)) &
+                  &  + (af*id)*dW(5) + a*as*isqd*(byh*dW(6)+bzh*dW(7)) )
+             inc(1)=inc(1)+amp*d*af
+             inc(2)=inc(2)+amp*ef*cf*af
+             inc(3)=inc(3)-amp*ef*cs*as*S*byh
+             inc(4)=inc(4)-amp*ef*cs*as*S*bzh
+             inc(5)=inc(5)+amp*d*a2*af
+             inc(6)=inc(6)+amp*a*as*byh*sqd
+             inc(7)=inc(7)+amp*a*as*bzh*sqd
+          case (3, 5)                        ! slow (vx -+ cs)
+             ef = merge(1.0_dp, -1.0_dp, w == 5)
+             amp = N*( ef*cs*as*dW(2) + ef*cf*af*S*(byh*dW(3)+bzh*dW(4)) &
+                  &  + (as*id)*dW(5) - a*af*isqd*(byh*dW(6)+bzh*dW(7)) )
+             inc(1)=inc(1)+amp*d*as
+             inc(2)=inc(2)+amp*ef*cs*as
+             inc(3)=inc(3)+amp*ef*cf*af*S*byh
+             inc(4)=inc(4)+amp*ef*cf*af*S*bzh
+             inc(5)=inc(5)+amp*d*a2*as
+             inc(6)=inc(6)-amp*a*af*byh*sqd
+             inc(7)=inc(7)-amp*a*af*bzh*sqd
+          case (2, 6)                        ! Alfven (vx -+ ca)
+             ef = merge(1.0_dp, -1.0_dp, w == 6)
+             amp = 0.5_dp*(-bzh*dW(3) + byh*dW(4)) &
+                  & + 0.5_dp*ef*S*isqd*(-bzh*dW(6) + byh*dW(7))
+             inc(3)=inc(3)-amp*bzh
+             inc(4)=inc(4)+amp*byh
+             inc(6)=inc(6)-amp*ef*S*sqd*bzh
+             inc(7)=inc(7)+amp*ef*S*sqd*byh
+          case default                       ! entropy (vx)
+             amp = dW(1) - dW(5)/a2
+             inc(1)=inc(1)+amp
+          end select
+       end do
+       ! Overshoot guard: the cross-variable characteristic projection can create
+       ! new extrema even though each variable's parabola is monotone. Clip every
+       ! traced face value back into its own parabola-edge range [min,max of eL,c0,eR].
+       do v = 1, 7
+          qs7(v) = ref(v) + inc(v)
+          qs7(v) = max(qs7(v), min(eL(v), min(c0(v), eR(v))))
+          qs7(v) = min(qs7(v), max(eL(v), max(c0(v), eR(v))))
+       end do
+       if (qs7(1) <= smallr .or. qs7(5) <= smallp) then
+          do v = 1, 7; qs7(v) = c0(v); end do
+       end if
+       if (rt) then
+          qplus%density=qs7(1); qplus%velocity_x=qs7(2); qplus%velocity_y=qs7(3)
+          qplus%velocity_z=qs7(4); qplus%pressure=qs7(5); qplus%by=qs7(6); qplus%bz=qs7(7)
+          qplus%bx=bxr; qplus%psi=psr
+       else
+          qminus%density=qs7(1); qminus%velocity_x=qs7(2); qminus%velocity_y=qs7(3)
+          qminus%velocity_z=qs7(4); qminus%pressure=qs7(5); qminus%by=qs7(6); qminus%bz=qs7(7)
+          qminus%bx=bxl; qminus%psi=psl
+       end if
+    end do
+  end subroutine mhd_char_trace_x
+
+  !> Characteristic PPM faces along direction dir: rotate the 3-cell stencil into
+  !> the dir-normal frame, trace, rotate the two face states back to global.
+  attributes(device) subroutine mhd_char_faces(lN, m0, rN, dir, gamma, dtdx, qminus, qplus)
+    type(mhd_primitive_t), intent(in) :: lN, m0, rN
+    integer, value :: dir
+    real(kind=dp), value :: gamma, dtdx
+    type(mhd_primitive_t), intent(out) :: qminus, qplus
+    type(mhd_primitive_t) :: qm, qp
+    call mhd_char_trace_x(mhd_rot_to(lN,dir), mhd_rot_to(m0,dir), mhd_rot_to(rN,dir), &
+         & gamma, dtdx, qm, qp)
+    qminus = mhd_rot_from(qm, dir)
+    qplus  = mhd_rot_from(qp, dir)
+  end subroutine mhd_char_faces
+
+  ! ----- MHD reconstruction: PLM (slope<10) or characteristic PPM (slope==10) ---
   attributes(device) subroutine trace_3d_mhd(ls, thread_idx, lx, rx, ly, ry, lz, rz, &
        & gamma, smallr, smallc2, ch, dtdx, slope)
     type(subgrid_6x6x6cell_mhd), intent(inout) :: ls
@@ -2485,34 +2654,34 @@ contains
              & strong_pressure_jump(ls%pressure(i,j-1,k), m0%pressure, ls%pressure(i,j+1,k)) .or. &
              & strong_pressure_jump(ls%pressure(i,j,k-1), m0%pressure, ls%pressure(i,j,k+1)) ) use_ppm = .false.
        end if
-       ! X faces
-       if (use_ppm) call mhd_ppm_faces(sg_load_mhd(ls,i-1,j,k), m0, sg_load_mhd(ls,i+1,j,k), pm, pp)
+       ! X faces  (PPM: characteristic trace -> pm = -x face, pp = +x face)
+       if (use_ppm) call mhd_char_faces(sg_load_mhd(ls,i-1,j,k), m0, sg_load_mhd(ls,i+1,j,k), 1, gamma, dtdx, pm, pp)
        if (i > 1 .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) then
-          if (use_ppm) then; fr = mhd_face(mh, pm, m0); else; fr = mhd_padd(mh, sx, -1.0_dp); end if
+          if (use_ppm) then; fr = pm; else; fr = mhd_padd(mh, sx, -1.0_dp); end if
           call store_mhd_x(rx, i-2, j-2, k-2, fr, smallr, smallp, lrho, lp)
        end if
        if (i < work_size .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) then
-          if (use_ppm) then; fl = mhd_face(mh, pp, m0); else; fl = mhd_padd(mh, sx, 1.0_dp); end if
+          if (use_ppm) then; fl = pp; else; fl = mhd_padd(mh, sx, 1.0_dp); end if
           call store_mhd_x(lx, i-1, j-2, k-2, fl, smallr, smallp, lrho, lp)
        end if
        ! Y faces
-       if (use_ppm) call mhd_ppm_faces(sg_load_mhd(ls,i,j-1,k), m0, sg_load_mhd(ls,i,j+1,k), pm, pp)
+       if (use_ppm) call mhd_char_faces(sg_load_mhd(ls,i,j-1,k), m0, sg_load_mhd(ls,i,j+1,k), 2, gamma, dtdx, pm, pp)
        if ((i > 1 .and. i < work_size) .and. j > 1 .and. (k > 1 .and. k < work_size)) then
-          if (use_ppm) then; fr = mhd_face(mh, pm, m0); else; fr = mhd_padd(mh, sy, -1.0_dp); end if
+          if (use_ppm) then; fr = pm; else; fr = mhd_padd(mh, sy, -1.0_dp); end if
           call store_mhd_y(ry, i-2, j-2, k-2, fr, smallr, smallp, lrho, lp)
        end if
        if ((i > 1 .and. i < work_size) .and. j < work_size .and. (k > 1 .and. k < work_size)) then
-          if (use_ppm) then; fl = mhd_face(mh, pp, m0); else; fl = mhd_padd(mh, sy, 1.0_dp); end if
+          if (use_ppm) then; fl = pp; else; fl = mhd_padd(mh, sy, 1.0_dp); end if
           call store_mhd_y(ly, i-2, j-1, k-2, fl, smallr, smallp, lrho, lp)
        end if
        ! Z faces
-       if (use_ppm) call mhd_ppm_faces(sg_load_mhd(ls,i,j,k-1), m0, sg_load_mhd(ls,i,j,k+1), pm, pp)
+       if (use_ppm) call mhd_char_faces(sg_load_mhd(ls,i,j,k-1), m0, sg_load_mhd(ls,i,j,k+1), 3, gamma, dtdx, pm, pp)
        if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k > 1) then
-          if (use_ppm) then; fr = mhd_face(mh, pm, m0); else; fr = mhd_padd(mh, sz, -1.0_dp); end if
+          if (use_ppm) then; fr = pm; else; fr = mhd_padd(mh, sz, -1.0_dp); end if
           call store_mhd_z(rz, i-2, j-2, k-2, fr, smallr, smallp, lrho, lp)
        end if
        if ((i > 1 .and. i < work_size) .and. (j > 1 .and. j < work_size) .and. k < work_size) then
-          if (use_ppm) then; fl = mhd_face(mh, pp, m0); else; fl = mhd_padd(mh, sz, 1.0_dp); end if
+          if (use_ppm) then; fl = pp; else; fl = mhd_padd(mh, sz, 1.0_dp); end if
           call store_mhd_z(lz, i-2, j-2, k-1, fl, smallr, smallp, lrho, lp)
        end if
     end do

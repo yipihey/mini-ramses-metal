@@ -42,6 +42,7 @@ subroutine condinit(r,g,x,q,dx,nn)
 #define ALFVENWAVE 10
 #define BRIOWU 11
 #define TURB 12
+#define CPALFVEN 13
 
   integer::i
 #if INIT==COEUR
@@ -75,6 +76,8 @@ subroutine condinit(r,g,x,q,dx,nn)
   real(kind=8)::twopi,cs,rho0,p0,b0,norm,sumsq
   real(kind=8)::ax,ay,az,cx,cy,cz,csq,amp,ph,phase,vx,vy,vz
   real(kind=8)::hx,hy,hz,hp
+#elif INIT==CPALFVEN
+  real(kind=8)::twopi,kx,bperp
 #else
   ! Call built-in initial condition generator
   call region_condinit(r,g,x,q,dx,nn)
@@ -406,6 +409,28 @@ subroutine condinit(r,g,x,q,dx,nn)
      q(i,7)=0.0d0      ! By
      q(i,8)=b0         ! Bz: uniform guide field, vA = cs
      q(i,9)=0.0d0      ! psi
+#endif
+  end do
+#endif
+
+#if INIT==CPALFVEN
+  ! Circularly-polarized Alfven wave (Toth 2000) along x, +x traveling at v_A=Bx/sqrt(rho).
+  ! Exact standing solution: |B_perp| and |v_perp| stay constant; returns to IC each
+  ! period (t = L/v_A). The definitive test of the Alfven eigenvectors (waves 2,6).
+  twopi=2.0d0*acos(-1.0d0)
+  bperp=0.1d0
+  do i=1,nn
+     kx=twopi*x(i,1)/r%box_size(1)
+     q(i,1)=1.0d0           ! rho
+     q(i,5)=0.1d0           ! p
+     q(i,2)=0.0d0           ! vx
+     q(i,3)=-bperp*sin(kx)  ! vy = -By/sqrt(rho)  (+x traveling)
+     q(i,4)=-bperp*cos(kx)  ! vz = -Bz/sqrt(rho)
+#ifdef GLMMHD
+     q(i,6)=1.0d0           ! Bx (guide field, v_A = 1)
+     q(i,7)=bperp*sin(kx)   ! By
+     q(i,8)=bperp*cos(kx)   ! Bz
+     q(i,9)=0.0d0           ! psi
 #endif
   end do
 #endif
