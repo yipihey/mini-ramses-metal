@@ -6,7 +6,7 @@ module gpu_utils
 
   integer, parameter :: nthreads_y = 16
 
-  integer, parameter :: nsubgrid = 1
+  integer, parameter :: nsubgrid = 2
   integer, parameter :: nsubgridsq = nsubgrid**2
   integer, parameter :: nsubgridtondim = nsubgrid**ndim
   integer, parameter :: nsubgridp2 = nsubgrid+2
