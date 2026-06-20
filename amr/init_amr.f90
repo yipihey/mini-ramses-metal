@@ -77,6 +77,10 @@ subroutine init_amr(r,g,m,type)
   use hydro_parameters, ONLY: nvar
   use rt_parameters, ONLY: nrtvar, nrtgrp
   use amr_commons, ONLY: run_t, global_t, mesh_t
+#if defined(_CUDA) && defined(TURB)
+  use turb_commons, only: TURB_GS
+  use gpu_runner, only: afield_last_d, afield_next_d, afield_now_d, fturb
+#endif
   use hash
   use hilbert
 #ifdef _CUDA
@@ -184,6 +188,13 @@ subroutine init_amr(r,g,m,type)
      allocate(m%unew(1:twotondim,1:nvar,1:m%ngridmax+m%ncachemax))
      m%uold=0d0
      m%unew=0d0
+#endif
+#if defined(_CUDA) && defined(TURB)
+     allocate(afield_last_d(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1))
+     allocate(afield_next_d(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1))
+     allocate(afield_now_d (1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1))
+     allocate(fturb(1:twotondim,1:3,1:m%ngridmax+m%ncachemax))
+     afield_last_d=0d0; afield_next_d=0d0; afield_now_d=0d0; fturb=0d0
 #endif
 #ifdef MHD
      allocate(m%bold(1:twotondim,1:6,1:m%ngridmax+m%ncachemax))

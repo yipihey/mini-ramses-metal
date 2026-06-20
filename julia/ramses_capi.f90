@@ -1198,4 +1198,16 @@ contains
     twotondim_out = twotondim
   end subroutine ramses_precision_bytes
 
+  ! Cumulative wallclock (GPU-synced) of the 'hydro - godunov' timer slot, for
+  ! apples-to-apples solver benchmarking vs upstream's identical m_timer slot.
+  function ramses_get_timer_godunov() result(secs) bind(C, name="ramses_get_timer_godunov")
+    use timer_module, only: time, labels, ntimer
+    real(c_double) :: secs
+    integer :: i
+    secs = 0.0_c_double
+    do i = 1, ntimer
+       if (trim(labels(i)) == 'hydro - godunov') secs = real(time(i), c_double)
+    end do
+  end function ramses_get_timer_godunov
+
 end module ramses_capi

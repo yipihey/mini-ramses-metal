@@ -10,6 +10,9 @@ contains
   recursive subroutine r_init_turb(pst)
     use mdl_module
     use mdl_parameters
+#if defined(_CUDA) && defined(TURB)
+    use gpu_manager, only: gpu_turb_init_fields
+#endif
     implicit none
     type(pst_t)::pst
 
@@ -21,6 +24,10 @@ contains
        call mdl_get_reply(pst%s%mdl,rID,0)
     else
        call init_turb(pst%s%r,pst%s%g, pst%s%turb)
+#if defined(_CUDA) && defined(TURB)
+       ! Seed both device fields from the host once, before the first amr_step.
+       call gpu_turb_init_fields(pst)
+#endif
     endif
 
   end subroutine r_init_turb
