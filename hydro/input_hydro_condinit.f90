@@ -331,6 +331,12 @@ subroutine cons_from_prim(r,g,m,ilevel)
         bz=0.5d0*(m%bold(ind,3,igrid)+m%bold(ind,6,igrid))
         emag=0.5d0*(bx**2+by**2+bz**2)
 #endif
+#ifdef GLMMHD
+        ! Dedner: B,psi are cell-centered primitives at 6..9; add their magnetic
+        ! energy to Etot and keep them RAW (not mass-weighted) in uold.
+        bx=m%uold(ind,6,igrid); by=m%uold(ind,7,igrid); bz=m%uold(ind,8,igrid)
+        emag=0.5d0*(bx**2+by**2+bz**2)
+#endif
         erad=0.0d0
 #if NENER>0
         ! Compute non-thermal energy densities
@@ -346,8 +352,12 @@ subroutine cons_from_prim(r,g,m,ilevel)
            m%uold(ind,idim+1,igrid)=rr*m%uold(ind,idim+1,igrid)
         end do
 #if NVAR>5+NENER
-        ! Compute passive scalar density
+        ! Compute passive scalar density (GLM-MHD: B,psi at 6..9 stay raw)
+#ifdef GLMMHD
+        do ivar=10,nvar
+#else
         do ivar=6+nener,nvar
+#endif
            m%uold(ind,ivar,igrid)=rr*m%uold(ind,ivar,igrid)
         enddo
 #endif
@@ -403,6 +413,10 @@ subroutine prim_from_cons(r,g,m,ilevel)
         bz=0.5d0*(m%bold(ind,3,igrid)+m%bold(ind,6,igrid))
         emag=0.5d0*(bx**2+by**2+bz**2)
 #endif
+#ifdef GLMMHD
+        bx=m%uold(ind,6,igrid); by=m%uold(ind,7,igrid); bz=m%uold(ind,8,igrid)
+        emag=0.5d0*(bx**2+by**2+bz**2)
+#endif
         erad=0.0d0
 #if NENER>0
         ! Compute non-thermal pressures
@@ -418,8 +432,12 @@ subroutine prim_from_cons(r,g,m,ilevel)
         pp=(r%gamma-1.0)*eint
         m%uold(ind,5,igrid)=pp
 #if NVAR>5+NENER
-        ! Compute passive scalar mass fraction
+        ! Compute passive scalar mass fraction (GLM-MHD: B,psi at 6..9 stay raw)
+#ifdef GLMMHD
+        do ivar=10,nvar
+#else
         do ivar=6+nener,nvar
+#endif
            m%uold(ind,ivar,igrid)=m%uold(ind,ivar,igrid)/rr
         enddo
 #endif

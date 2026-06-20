@@ -104,7 +104,11 @@ contains
   !>
   subroutine gpu_cmpdt(sim, ilevel, mass, ekin, eint, emag, dt)
     use nvtx
+#ifdef GLMMHD
+    use hydro_device, only: cmpdt_kernel_mhd
+#else
     use hydro_device, only: cmpdt_kernel
+#endif
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout) :: sim
     integer(kind=4), intent(in) :: ilevel
@@ -132,9 +136,15 @@ contains
     num_threads = 256
     num_blocks = (num_octs * twotondim + num_threads - 1 ) / num_threads
     call nvtxStartRange("GPU cmpdt", color=0)!green
+#ifdef GLMMHD
+    call cmpdt_kernel_mhd<<<num_blocks, num_threads>>>(grid, uold, f, &
+        & constant_gravity, head_idx, num_octs, d_data, dx, gamma, &
+        & smallr, smallc2, courant_factor)
+#else
     call cmpdt_kernel<<<num_blocks, num_threads>>>(grid, uold, f, &
         & constant_gravity, head_idx, num_octs, d_data, dx, gamma, &
         & smallr, smallc2, courant_factor)
+#endif
     call nvtxEndRange()
 
     ! move results to host
@@ -160,12 +170,18 @@ contains
   subroutine gpu_set_uold(sim, ilevel)
     use nvtx
     use hydro_device, only: set_uold_kernel
+#ifdef GLMMHD
+    use hydro_device, only: glm_damp_psi_kernel
+#endif
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout)::sim
     integer, intent(in)::ilevel
 
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
+#ifdef GLMMHD
+    real(dp) :: ch, dt, dx, divb_len
+#endif
 
     head_idx = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
@@ -174,6 +190,14 @@ contains
     num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
     call nvtxStartRange("GPU Set_uold", color=0)!green
     call set_uold_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, unew, head_idx, num_octs)
+#ifdef GLMMHD
+    ! Operator-split GLM parabolic damping of psi (after uold <- unew).
+    dt = sim%g%dtnew(ilevel)
+    dx = sim%r%boxlen/2**ilevel
+    ch = sim%r%courant_factor*dx/dt
+    divb_len = sim%r%boxlen
+    call glm_damp_psi_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, head_idx, num_octs, ch, dt, divb_len)
+#endif
     call GPU_Error_Check(__FILE__, __LINE__)
     call nvtxEndRange()
 
@@ -292,7 +316,9 @@ contains
   !>
   subroutine gpu_godunov(sim, ilevel)
     use nvtx
-#ifdef PAPER
+#ifdef GLMMHD
+    use hydro_device, only: mhd_integrator_kernel
+#elif defined(PAPER)
     use hydro_device, only: hydro_integrator_paper_kernel
 #else
     use hydro_device, only: hydro_integrator_kernel
@@ -303,7 +329,7 @@ contains
     !
     integer(kind=4) :: head_idx, num_subgrids
     integer :: threads_per_block, num_blocks
-    real(dp) :: dt, dx, gamma, smallr, smallc2
+    real(dp) :: dt, dx, gamma, smallr, smallc2, ch
     integer :: slope, riemann
 
     if(sim%r%verbose.and.sim%g%myid==1)write(*,'("   Entering gpu_godunov for level ",I2)')ilevel
@@ -321,7 +347,15 @@ contains
     num_blocks = num_subgrids
 
     call nvtxStartRange("GPU Godunov", color=0)!green
-#ifdef PAPER
+#ifdef GLMMHD
+    if(nsubgrid == 1)threads_per_block = 64
+    if(nsubgrid == 2)threads_per_block = 256
+    ! Dedner cleaning speed = max signal speed implied by the CFL condition.
+    ch = sim%r%courant_factor*dx/dt
+    call mhd_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
+         & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
+         & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
+#elif defined(PAPER)
     threads_per_block = (2*nsubgrid + 4)**2
     threads_per_block = ((threads_per_block + 31) / 32) * 32
     call hydro_integrator_paper_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &

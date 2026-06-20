@@ -40,6 +40,7 @@ subroutine condinit(r,g,x,q,dx,nn)
 #define RTZEQM 8
 #define PANCAKE 9
 #define ALFVENWAVE 10
+#define BRIOWU 11
 
   integer::i
 #if INIT==COEUR
@@ -196,7 +197,32 @@ subroutine condinit(r,g,x,q,dx,nn)
      q(i,3)=+sin(2.0*pi*xc)
      q(i,4)=0.0
      q(i,5)=5.0/(12.0*pi)
+#ifdef GLMMHD
+     ! Dedner cell-centered B = curl(A_z), A_z = B0(cos4pix/4pi + cos2piy/2pi),
+     ! B0 = 1/sqrt(4pi): Bx=-B0 sin(2pi y), By=B0 sin(4pi x), Bz=0, psi=0.
+     q(i,6)=-sin(2.0*pi*yc)/sqrt(4.0*pi)
+     q(i,7)= sin(4.0*pi*xc)/sqrt(4.0*pi)
+     q(i,8)=0.0
+     q(i,9)=0.0
+#else
      q(i,nvar+1)=0.0 ! Bz
+#endif
+  end do
+#endif
+
+#if INIT==BRIOWU
+  ! Brio-Wu (Wu) MHD shock tube (gamma=2). Discontinuity at x=boxlen/2.
+  ! Left: rho=1, p=1, By=1 ; Right: rho=0.125, p=0.1, By=-1 ; Bx=0.75 both ; psi=0.
+  do i=1,nn
+     if (x(i,1) < 0.5d0*r%box_size(1)) then
+        q(i,1)=1.0d0;   q(i,5)=1.0d0;   q(i,7)= 1.0d0
+     else
+        q(i,1)=0.125d0; q(i,5)=0.1d0;   q(i,7)=-1.0d0
+     end if
+     q(i,2)=0.0d0; q(i,3)=0.0d0; q(i,4)=0.0d0
+     q(i,6)=0.75d0    ! Bx (continuous normal field)
+     q(i,8)=0.0d0     ! Bz
+     q(i,9)=0.0d0     ! psi
   end do
 #endif
 

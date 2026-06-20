@@ -370,7 +370,12 @@ cub_module_radix_sort_f.o: cub_module_radix_sort.cuf cub_module_radix_sort_c.o
 # optimum: ~+14% PPM, up to +22% PLM+HLLC. Harmless to the simple kernels in
 # this file (they use < 72 regs); tighter caps spill PPM's working set.
 ifeq ($(COMPILER),NVHPC)
+ifeq ($(GLM),1)
+# The 9-var GLM-MHD kernel is much heavier; the 72 cap would spill it badly.
+gpu_hydro.o: FFLAGS += -gpu=maxregcount:128
+else
 gpu_hydro.o: FFLAGS += -gpu=maxregcount:72
+endif
 endif
 %.o:%.f90
 	$(F90) $(FFLAGS) -c $< -o $@ $(LIBS)
