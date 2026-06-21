@@ -86,7 +86,7 @@ driving), not just the Godunov kernel in isolation. All three solvers are <b>fp3
 <tbody>
 <tr><td><b>Hydro</b> (no B — the floor)</td><td>598</td><td class="win">1194</td><td>1336</td></tr>
 <tr><td><b>GLM-MHD</b> (ours)</td><td class="win">627</td><td class="win">1016</td><td>1100</td></tr>
-<tr><td>CT-MHD (upstream)</td><td>13</td><td>—&nbsp;(OOM)</td><td>324</td></tr>
+<tr><td>CT-MHD (upstream)</td><td>~108</td><td>—&nbsp;(OOM)</td><td>324</td></tr>
 </tbody>
 </table>
 <p>Two results stand out. <b>(1)</b> At the solver level, GLM-MHD's Godunov kernel runs at
@@ -96,25 +96,26 @@ face-staggering + 2-D-HLLD EMF + induction update. <b>(2)</b> A full GLM-MHD ste
 Dedner cleaning costs only ~15% over pure hydro.</p>
 
 <h3>The full step <i>is</i> the kernel</h3>
-<p>Why is the CT full-step (13 Mcell/s) so far below its kernel (324)? Because a conventional GPU
-port spends nearly all of its wall-clock <i>outside</i> the physics kernel — the CFL timestep pass,
-the <code>uold↔unew</code> double-buffer copies, the turbulent-driving pass, host bookkeeping. This
-fork fuses or eliminates every one of those: the timestep reduction is folded into the integrator
-(1-step-lagged), the post-step copy is a pointer swap, the driving is fused into the write-back, and
-the seed copy is dropped on the single-level static path. The result is a step that is essentially
-<i>nothing but</i> the Godunov kernel:</p>
+<p>A GPU MHD step is more than the Godunov kernel: a CFL timestep pass, the <code>uold↔unew</code>
+double-buffer copies, the turbulent-driving pass, and host bookkeeping all sit around it. This fork
+fuses or eliminates every one on the single-level static path — the timestep reduction is folded into
+the integrator (1-step-lagged), the post-step copy is a pointer swap, the driving is fused into the
+write-back, and the seed copy is dropped — so the step is essentially <i>nothing but</i> the kernel:</p>
 <table>
-<thead><tr><th>solver</th><th>Godunov share of the step (512³)</th></tr></thead>
+<thead><tr><th>solver</th><th>Godunov share of the step</th></tr></thead>
 <tbody>
-<tr><td><b>GLM-MHD</b> (ours)</td><td class="win">92%</td></tr>
-<tr><td><b>Hydro</b> (ours)</td><td class="win">89%</td></tr>
-<tr><td>CT-MHD (upstream port)</td><td>4%</td></tr>
+<tr><td><b>GLM-MHD</b> (ours, 512³)</td><td class="win">92%</td></tr>
+<tr><td><b>Hydro</b> (ours, 512³)</td><td class="win">89%</td></tr>
+<tr><td>CT-MHD (upstream, 256³)</td><td>~34%</td></tr>
 </tbody>
 </table>
 <p>So the GLM full-step throughput (1016 Mcell/s) sits within 8% of its raw kernel — there is almost
-no orchestration left to remove. The upstream CT port, by contrast, leaves 96% of its wall-clock on
-the table; its kernel-level 324 Mcell/s is the fair number to compare a <i>solver</i> against, and
-that is the 3.4× above.</p>
+no orchestration left to remove. The upstream CT port runs its step at ~34% Godunov-share:
+orchestration-bound between separate passes, much like this fork's hydro path <i>before</i> its own
+fusions (which started near 50%). The same fusion approach applied to the upstream CT solver recovers
+that overhead — and the per-pass GPU-timer synchronizations that dominate it — lifting it well above
+its un-fused rate. Either way, the kernel-level 324 Mcell/s is the fair number to compare a
+<i>solver</i> against, and that is the 3.4× above.</p>
 <h3>Where the kernel speed comes from</h3>
 <ul class="tight">
 <li><b>Algorithm:</b> one 1-D Riemann solve per face instead of CT's face-staggering + 2-D-HLLD EMF + induction update.</li>
@@ -230,8 +231,10 @@ scheme's supersonic robustness is a known gap worth a dedicated fix.</li>
 <li><b>Analysis:</b> 3-D fields are rebuilt from the output files using a geometric oct→cell map; the resulting
 clean power-law spectra (rather than white noise) confirm the spatial mapping is correct.</li>
 <li><b>Throughput method:</b> full-step Mcell/s is wall-clock over <code>ramses_amr_step</code> (5 warm-up
-steps, then timed, GPU-synced via a host read) on the static single-level driven-turbulence box; the
-Godunov-kernel figure uses the code's internal GPU timer over the same run. All three solvers are fp32
+steps, then timed, GPU-synced) on the static single-level driven-turbulence box with <b>per-step output
+disabled</b> (<code>foutput=0</code>) — leaving it on writes a full mesh dump to disk every step and
+swamps the GPU work, so all solvers are measured the same way without it; the Godunov-kernel figure uses
+the code's internal GPU timer over the same run. All three solvers are fp32
 (<code>NPRE=4</code>); the CT-MHD reference is the unmodified upstream <code>mini-ramses</code> GPU port
 (<code>MHD=1</code>) built with the same compiler/flags. The CT row OOMs at 512³ on 48&nbsp;GB because its
 port lacks the fork's memory-lean buffers.</li>
