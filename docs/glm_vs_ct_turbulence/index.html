@@ -51,8 +51,8 @@ forcing through three solvers and compare the turbulence statistics, power spect
 </p>
 
 <div class="grid2">
-  <div class="card"><div class="big">4.7×</div>GLM-MHD (PLM) faster than CT-MHD, godunov throughput</div>
-  <div class="card"><div class="big">&lt;1%</div>difference in sonic Mach and magnetic field energy between the solvers</div>
+  <div class="card"><div class="big">~1.0 Gcell/s</div>GLM-MHD full-step throughput at 512³ on a single RTX A6000 — 85% of plain hydro</div>
+  <div class="card"><div class="big">&lt;1%</div>difference in sonic Mach and magnetic field energy versus constrained transport</div>
 </div>
 
 <h2>The three solvers</h2>
@@ -76,26 +76,56 @@ longer exactly zero — it is held small by the cleaning — but every face need
 solve, and the lighter, cell-centred layout is what makes the heavy GPU optimisation possible.
 </p>
 
-<h2>Performance</h2>
-<p>Godunov-kernel throughput at 256³ (the fair solver metric, both solvers built with <code>-gpu=fastmath</code>):</p>
+<h2>Performance — actual throughput</h2>
+<p>The honest metric is <b>full-step throughput</b>: cells updated per second over the <i>entire</i>
+time step (reconstruction + Riemann + conservative update + the CFL timestep reduction + turbulent
+driving), not just the Godunov kernel in isolation. All three solvers are <b>fp32</b>, PLM-class
+2nd-order, built with <code>-gpu=fastmath</code>, driving the identical turbulence box on one RTX A6000.</p>
 <table>
-<thead><tr><th>solver / reconstruction</th><th>Mcell/s</th><th>vs CT</th></tr></thead>
+<thead><tr><th>solver (fp32, PLM)</th><th>full-step Mcell/s<br>256³</th><th>full-step Mcell/s<br>512³</th><th>Godunov kernel<br>Mcell/s</th></tr></thead>
 <tbody>
-<tr><td><b>GLM-MHD — PLM</b> (2nd order)</td><td class="win">1569</td><td class="win">4.7×</td></tr>
-<tr><td><b>GLM-MHD — parabolic PPM</b> (3rd order)</td><td class="win">1065</td><td class="win">3.2×</td></tr>
-<tr><td>CT-MHD — PLM (upstream)</td><td>336</td><td>1.0×</td></tr>
+<tr><td><b>Hydro</b> (no B — the floor)</td><td>598</td><td class="win">1194</td><td>1336</td></tr>
+<tr><td><b>GLM-MHD</b> (ours)</td><td class="win">627</td><td class="win">1016</td><td>1100</td></tr>
+<tr><td>CT-MHD (upstream)</td><td>13</td><td>—&nbsp;(OOM)</td><td>324</td></tr>
 </tbody>
 </table>
-<h3>Where the speed comes from</h3>
+<p>Two results stand out. <b>(1)</b> At the solver level, GLM-MHD's Godunov kernel runs at
+<b>3.4× the CT kernel</b> (1100 vs 324 Mcell/s) — one 1-D Riemann solve per face beats CT's
+face-staggering + 2-D-HLLD EMF + induction update. <b>(2)</b> A full GLM-MHD step runs at
+<b>85% of plain hydrodynamics</b> (1016 vs 1194 Mcell/s at 512³): adding the magnetic field and
+Dedner cleaning costs only ~15% over pure hydro.</p>
+
+<h3>The full step <i>is</i> the kernel</h3>
+<p>Why is the CT full-step (13 Mcell/s) so far below its kernel (324)? Because a conventional GPU
+port spends nearly all of its wall-clock <i>outside</i> the physics kernel — the CFL timestep pass,
+the <code>uold↔unew</code> double-buffer copies, the turbulent-driving pass, host bookkeeping. This
+fork fuses or eliminates every one of those: the timestep reduction is folded into the integrator
+(1-step-lagged), the post-step copy is a pointer swap, the driving is fused into the write-back, and
+the seed copy is dropped on the single-level static path. The result is a step that is essentially
+<i>nothing but</i> the Godunov kernel:</p>
+<table>
+<thead><tr><th>solver</th><th>Godunov share of the step (512³)</th></tr></thead>
+<tbody>
+<tr><td><b>GLM-MHD</b> (ours)</td><td class="win">92%</td></tr>
+<tr><td><b>Hydro</b> (ours)</td><td class="win">89%</td></tr>
+<tr><td>CT-MHD (upstream port)</td><td>4%</td></tr>
+</tbody>
+</table>
+<p>So the GLM full-step throughput (1016 Mcell/s) sits within 8% of its raw kernel — there is almost
+no orchestration left to remove. The upstream CT port, by contrast, leaves 96% of its wall-clock on
+the table; its kernel-level 324 Mcell/s is the fair number to compare a <i>solver</i> against, and
+that is the 3.4× above.</p>
+<h3>Where the kernel speed comes from</h3>
 <ul class="tight">
 <li><b>Algorithm:</b> one 1-D Riemann solve per face instead of CT's face-staggering + 2-D-HLLD EMF + induction update.</li>
 <li><b>Blocking (<code>nsubgrid=2</code>):</b> 8 octs per CUDA block (37.8&nbsp;KB shared) cuts halo redundancy 27×→8×. GLM's lighter footprint fits; CT's face-B + EMF arrays need ~64&nbsp;KB and overflow the 48&nbsp;KB static limit, so CT cannot use this blocking.</li>
 <li><b>Per-kernel <code>launch_bounds</code>:</b> each reconstruction kernel gets its own register cap to hit the right blocks/SM (occupancy is the wall, not arithmetic).</li>
-<li><b>fastmath:</b> the kernels are latency-bound on the sqrt/divide chain; the ~22-bit SFU approximations roughly double throughput, validated negligible against the scheme's truncation error.</li>
+<li><b>fp32 + fastmath:</b> the kernels are latency-bound on the sqrt/divide chain; single precision and the ~22-bit SFU approximations roughly double throughput, validated negligible against the scheme's truncation error.</li>
 </ul>
-<p>The two GLM reconstructions span an accuracy/speed knob: PLM is fastest, parabolic PPM is 3rd-order-spatial
-at 3.2× CT. (The full 7-wave <i>characteristic</i> PPM is the most accurate option on smooth flows but proved
-too fragile for this strongly supersonic regime — see caveats.)</p>
+<p>A higher-order <b>parabolic PPM</b> reconstruction (3rd-order spatial) is also available as an
+accuracy/speed knob, at roughly 0.85× the PLM kernel rate. (The full 7-wave <i>characteristic</i>
+PPM is the most accurate option on smooth flows but proved too fragile for this strongly supersonic
+regime — see caveats.)</p>
 
 <h2>Statistical equivalence</h2>
 <p>Identical OU forcing (same seed), evolved to <b>2 crossing times</b>. The turbulence statistics agree across all three solvers:</p>
@@ -199,6 +229,12 @@ blew up even at Mach 1.2 here; the robust PPM used above is the parabolic recons
 scheme's supersonic robustness is a known gap worth a dedicated fix.</li>
 <li><b>Analysis:</b> 3-D fields are rebuilt from the output files using a geometric oct→cell map; the resulting
 clean power-law spectra (rather than white noise) confirm the spatial mapping is correct.</li>
+<li><b>Throughput method:</b> full-step Mcell/s is wall-clock over <code>ramses_amr_step</code> (5 warm-up
+steps, then timed, GPU-synced via a host read) on the static single-level driven-turbulence box; the
+Godunov-kernel figure uses the code's internal GPU timer over the same run. All three solvers are fp32
+(<code>NPRE=4</code>); the CT-MHD reference is the unmodified upstream <code>mini-ramses</code> GPU port
+(<code>MHD=1</code>) built with the same compiler/flags. The CT row OOMs at 512³ on 48&nbsp;GB because its
+port lacks the fork's memory-lean buffers.</li>
 <li><b>Figure provenance:</b> the spectra and div·B figures are at the production setting (c_h × 0.25). The
 field-slice and PDF figures predate the c_h fix but are visually unchanged by it — the fix moves only the
 grid-scale power, which is invisible in real-space slices and in the bulk PDFs (Mach, σ(ln ρ), field energy
@@ -209,7 +245,8 @@ all shift by &lt;1%).</li>
 <p class="lead">
 On magnetised supersonic driven turbulence, the GLM-MHD solver is <b>statistically equivalent to constrained
 transport through the resolved cascade</b> — overlapping power spectra in velocity, magnetic and density
-fields, same Mach, same field energy to ≈1% — while running <b>3–5× faster</b>. That equivalence required
+fields, same Mach, same field energy to ≈1% — while its Godunov kernel runs <b>3.4× faster than CT</b> and a
+full step reaches <b>~1.0 Gcell/s on one A6000, 85% of plain-hydro throughput</b>. That equivalence required
 fixing the over-aggressive Dedner cleaning (c_h × 0.25); the textbook cleaning speed was the source of the
 excess small-scale dissipation. On divergence control the two are comparable under a common cell-centred
 metric — CT guarantees exact zero on its <i>faces</i>, GLM cleans the <i>cell-centred</i> divergence to a
