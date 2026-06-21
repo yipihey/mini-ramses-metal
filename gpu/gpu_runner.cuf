@@ -557,7 +557,10 @@ contains
     ! between harvests, so the host queues NHARVEST steps and runs ahead of the GPU.
     if (fused) then
        fused_dt_count = fused_dt_count + 1
-       if (mod(fused_dt_count, max(sim%r%gpu_dt_nharvest,1)) == 0) dt_lagged = dt_reduce(1)
+       ! Harvest every N steps; also force a harvest while dt_lagged<0 (step 1) so the fast path
+       ! starts immediately instead of bootstrapping cmpdt for N steps.
+       if (mod(fused_dt_count, max(sim%r%gpu_dt_nharvest,1)) == 0 .or. dt_lagged < 0.0d0) &
+          & dt_lagged = dt_reduce(1)
     end if
 #endif
     call nvtxEndRange()
