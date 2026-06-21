@@ -181,7 +181,7 @@ ifeq ($(COMPILER),NVHPC)
    ifneq ($(CUB_SCAN_REFINE),0)
       DEFINES += -DCUB_SCAN_REFINE
    endif
-   FFLAGS = -cpp -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx,curand $(DEFINES)
+   FFLAGS = -cpp -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx,curand -fpic $(DEFINES)
    LIBS = -gpu=$(CUDA_ARCH) -cuda -cudalib=nvtx,curand -lstdc++
    GPU_PATH = ../gpu
    ifeq ($(CUDA_PROFILE),1)
@@ -225,7 +225,7 @@ endif
 LIBS += $(LIBMPI) $(LIBFFTW)
 #############################################################################
 # Sources directories are searched in this exact order
-VPATH = $(PATCH):$(GPU_PATH):../feedback:../sink:../star:../cooling:../turb:../hydro:../pm:../poisson:../amr:../clump:../mdl1:../rt:../lightcone
+VPATH = $(PATCH):$(GPU_PATH):../feedback:../sink:../star:../cooling:../turb:../hydro:../pm:../poisson:../amr:../clump:../mdl1:../rt:../lightcone:../julia
 #############################################################################
 # Modules
 MODOBJ = amr_parameters.o hydro_parameters.o rt_parameters.o oct_commons.o \
@@ -243,7 +243,7 @@ else
 endif
 MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 	 cross_sections_module.o rt_spectra.o  \
-	 ramses_commons.o call_back.o cache_commons.o cache.o gadgetreadfile.o \
+	 ramses_commons.o capi_commons.o call_back.o cache_commons.o cache.o gadgetreadfile.o \
 	 boundaries.o output_hydro.o output_poisson.o output_part.o output_rt.o output_amr.o movie.o \
 	 sort.o nbors_utils.o hydro_flag.o marshal.o
 ifeq ($(COMPILER),NVHPC)
@@ -275,6 +275,13 @@ MODOBJ +=  multigrid_fine_coarse.o rho_fine.o upload.o init_xion.o \
 ramses:	$(MODOBJ) ramses.o
 	$(F90) $(FFLAGS) $(MODOBJ) ramses.o -o $(EXEC)$(NDIM)d $(LIBS)
 #############################################################################
+# C-API shared lib for headless benchmarking (../julia/ramses_capi.f90).
+libramses:	$(MODOBJ) ramses_capi.o
+	$(F90) $(FFLAGS) -shared -fPIC $(MODOBJ) ramses_capi.o -o libramses$(NDIM)d.so $(LIBS)
+capi_commons.o: ramses_commons.o
+read_params.o adaptive_loop.o ramses_capi.o: capi_commons.o
+ramses_capi.o: amr_step.o ramses_commons.o
+#############################################################################
 test_cooling:	$(MODOBJ) test_cooling.o
 	$(F90) $(FFLAGS) $(MODOBJ) test_cooling.o -o test_cooling $(LIBS)
 #############################################################################
@@ -283,17 +290,22 @@ write_gitinfo.o: FORCE
                 -DGITREPO=\'"$(GITREPO)"\' -DBUILDDATE=\'"$(BUILDDATE)"\' -DBUILDCOMMAND=\'"$(BUILDCOMMAND)"\' -c ../amr/write_gitinfo.f90 -o $@
 #############################################################################
 cub_inclusive_scan_c.o: cub_inclusive_scan.h cub_inclusive_scan.cu
-	nvcc -arch=$(CUDA_ARCH) -O3 -lineinfo -c $(GPU_PATH)/cub_inclusive_scan.cu -o cub_inclusive_scan_c.o
+	nvcc -arch=$(CUDA_ARCH) -O3 -lineinfo -Xcompiler -fPIC -c $(GPU_PATH)/cub_inclusive_scan.cu -o cub_inclusive_scan_c.o
 #############################################################################
 cub_inclusive_scan_f.o: cub_inclusive_scan.cuf cub_inclusive_scan_c.o
 	nvfortran $(FFLAGS) -c cub_inclusive_scan_c.o $(GPU_PATH)/cub_inclusive_scan.cuf -o cub_inclusive_scan_f.o
 #############################################################################
 cub_module_radix_sort_c.o: cub_module_radix_sort.h cub_module_radix_sort.cu
-	nvcc -arch=$(CUDA_ARCH) -O3 -lineinfo -c $(GPU_PATH)/cub_module_radix_sort.cu -o cub_module_radix_sort_c.o
+	nvcc -arch=$(CUDA_ARCH) -O3 -lineinfo -Xcompiler -fPIC -c $(GPU_PATH)/cub_module_radix_sort.cu -o cub_module_radix_sort_c.o
 #############################################################################
 cub_module_radix_sort_f.o: cub_module_radix_sort.cuf cub_module_radix_sort_c.o
 	nvfortran $(FFLAGS) -c cub_module_radix_sort_c.o $(GPU_PATH)/cub_module_radix_sort.cuf -o cub_module_radix_sort_f.o
 
+# fastmath on the CT-MHD godunov kernel (sqrt/divide-bound, same as the GLM fork) --
+# for an apples-to-apples comparison with the fork's nsubgrid=2 + fastmath GLM numbers.
+ifeq ($(COMPILER),NVHPC)
+gpu_hydro.o: FFLAGS += -gpu=fastmath
+endif
 %.o:%.cuf
 	$(F90) $(FFLAGS) -c $< -o $@ $(LIBS)
 %.o:%.f90

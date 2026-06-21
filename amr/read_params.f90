@@ -14,6 +14,7 @@ subroutine m_read_params(pst)
 #ifdef RTZ
   use rtz_module, only: elements, n_elements !, initialize_elements
 #endif
+  use capi_commons, only: capi_nml_path, capi_nrestart
   implicit none
   type(pst_t)::pst
 
@@ -743,8 +744,11 @@ subroutine m_read_params(pst)
   ! Write information about git version
   call write_gitinfo
 
-  ! Read namelist filename from command line argument
+  ! Read namelist filename from command line argument (or C-API override)
   narg = command_argument_count()
+  if (len_trim(capi_nml_path) > 0) then
+     infile = trim(capi_nml_path)
+  else
   IF(narg .LT. 1)THEN
      write(*,*)'You should type: ramses3d input.nml [nrestart]'
      write(*,*)'File input.nml should contain a parameter namelist'
@@ -752,6 +756,7 @@ subroutine m_read_params(pst)
      call mdl_abort(s%mdl)
   END IF
   CALL getarg(1,infile)
+  end if
 
   !-------------------------------------------------
   ! Read the namelist

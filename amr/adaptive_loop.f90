@@ -22,6 +22,7 @@ subroutine adaptive_loop(pst)
   use gpu_manager, only: r_set_grid_device
   use nvtx
 #endif
+  use capi_commons, only: capi_setup_only, capi_last_state
 
   implicit none
   type(pst_t)::pst
@@ -110,7 +111,13 @@ subroutine adaptive_loop(pst)
      return
   endif
 
-  write(*,*)'Starting time integration' 
+  ! C-API: stop right after setup and hand the live state to ramses_init.
+  if (capi_setup_only) then
+     capi_last_state => pst%s
+     return
+  end if
+
+  write(*,*)'Starting time integration'
 
   done = .false.
   do while(.not.done) ! Main time loop

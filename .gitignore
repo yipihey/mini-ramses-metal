@@ -30,3 +30,4 @@ CLAUDE.md
 *.nsys-rep
 *.ncu-rep
 *.sqlite
+bin_mhd/
