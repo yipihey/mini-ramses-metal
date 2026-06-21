@@ -281,6 +281,7 @@ libramses:	$(MODOBJ) ramses_capi.o
 capi_commons.o: ramses_commons.o
 read_params.o adaptive_loop.o ramses_capi.o: capi_commons.o
 ramses_capi.o: amr_step.o ramses_commons.o
+gpu_runner.o: timer.o   # gpu_godunov uses timer_module (timer_gpu_sync) -> needs timer_module.mod
 #############################################################################
 test_cooling:	$(MODOBJ) test_cooling.o
 	$(F90) $(FFLAGS) $(MODOBJ) test_cooling.o -o test_cooling $(LIBS)

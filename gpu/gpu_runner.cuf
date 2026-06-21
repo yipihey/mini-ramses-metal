@@ -481,6 +481,7 @@ contains
     use hydro_device, only: hydro_integrator_kernel
 #endif
     use hydro_device, only: switch_llf_dmin_d, switch_llf_pmin_d
+    use timer_module, only: timer_gpu_sync
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout)::sim
     integer, intent(in)::ilevel
@@ -510,6 +511,9 @@ contains
     induction = sim%r%induction
     ! Fused single-level static fast path (opt-in): fold the CFL dt into the integrator.
     fused = (sim%r%gpu_fused_step .and. sim%r%levelmin==sim%r%nlevelmax .and. sim%r%static_mesh)
+    ! GPU-resident: stop m_timer from cudaDeviceSynchronize-ing on every pass boundary, so the
+    ! host queues kernels and runs ahead of the GPU (eliminates ~10 per-step host<->device syncs).
+    if (fused) timer_gpu_sync = .false.
     ! Fuse the turbulent driving (apply) into the integrator write-back on the fused turb path.
     do_turb = (fused .and. sim%r%turb)
 

@@ -81,6 +81,16 @@ contains
     end do
   end function ramses_get_timer_godunov
 
+  ! Block until the GPU has finished all queued work (for accurate wall-clock timing when the
+  ! host runs ahead on the GPU-resident fused path).
+  subroutine ramses_device_sync() bind(C, name="ramses_device_sync")
+#ifdef _CUDA
+    use cudafor
+    integer :: ierr
+    ierr = cudaDeviceSynchronize()
+#endif
+  end subroutine ramses_device_sync
+
   ! Max |div.B| over leaf cells at levelmin (CT diagnostic). Returns -1 on bad handle.
   function ramses_get_divb_max(handle) result(divb) bind(C, name="ramses_get_divb_max")
 #ifdef _CUDA

@@ -46,6 +46,11 @@ module timer_module
   real(kind=8),       dimension(mtimer) :: start, time
   integer                               :: ntimer=0, itimer
   character(len=72), dimension(mtimer)  :: labels
+  ! GPU-resident fast path: when .false., m_timer does NOT cudaDeviceSynchronize, so the host
+  ! queues kernels and runs ahead of the GPU (no per-pass host<->device serialization). Set
+  ! .false. by the fused single-level path; per-pass timer values then become meaningless (only
+  ! the outer wall-clock is accurate), which is fine for production runs.
+  logical                               :: timer_gpu_sync = .true.
 contains
   subroutine findit (label)
     implicit none
@@ -74,7 +79,7 @@ subroutine m_timer(label,cmd)
   real(kind=8) wallclock, current
 #ifdef _CUDA
   integer :: cuda_ierr
-  cuda_ierr = cudaDeviceSynchronize()
+  if (timer_gpu_sync) cuda_ierr = cudaDeviceSynchronize()
 #endif
   current = wallclock()                                                 ! current time
   if (itimer > 0) then                                                  ! if timer is active ..
