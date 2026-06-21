@@ -44,7 +44,14 @@ subroutine m_init_flow_fine(pst,ilevel)
      else
         ! Use internal-defined or user-defined functions
         if(s%r%verbose)write(*,*)'Computing initial conditions from analytical model'
+#if defined(_CUDA) && defined(GLMMHD) && defined(TURB)
+        ! Driven turbulence: the IC is synthesised on the GPU (gpu_init_flow_turb, in
+        ! r_set_grid_device) instead of the per-cell CPU Fourier sum. m%uold is left
+        ! zeroed (init_amr) and uploaded; the device kernel overwrites it. Skip the CPU.
+        if(.not. s%r%turb) call r_input_hydro_condinit(pst,ilevel,1)
+#else
         call r_input_hydro_condinit(pst,ilevel,1)
+#endif
      endif
   endif
 

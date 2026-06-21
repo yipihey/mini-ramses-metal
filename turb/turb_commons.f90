@@ -17,19 +17,21 @@ module turb_commons
 #else
   integer, parameter :: TGRID_Z=0                     ! Limit of grid, z dimension
 #endif
-  character(len=16), parameter :: precision_str='DOUBLE_PRECISION'
+  character(len=16), parameter :: precision_str='SINGLE_PRECISION'
   real(kind=8), parameter :: turb_gs_real=real(TURB_GS,kind=8)
 
   ! Turbulence main object
   type turb_t
 
-     complex(kind=8), allocatable :: turb_last(:,:,:,:)   ! Turbulent spectrum at time = t
-     complex(kind=8), allocatable :: turb_next(:,:,:,:)   ! Turbulent spectrum at time = t + dt
+     ! Fully fp32 synthetic driving: spectrum + real-space field in single precision, single-
+     ! precision FFT (sfftw). OU generation math stays fp64 in registers (see add_turbulence).
+     complex(kind=4), allocatable :: turb_last(:,:,:,:)   ! Turbulent spectrum at time = t
+     complex(kind=4), allocatable :: turb_next(:,:,:,:)   ! Turbulent spectrum at time = t + dt
      real(kind=8), allocatable :: power_spec(:,:,:)    ! Power spectrum of turbulence
 
-     real(kind=8), allocatable :: afield_last(:,:,:,:) ! Forcing field at time = t
-     real(kind=8), allocatable :: afield_next(:,:,:,:) ! Forcing field at time = t + dt
-     real(kind=8), allocatable :: afield_now(:,:,:,:)  ! Forcing field now
+     real(kind=4), allocatable :: afield_last(:,:,:,:) ! Forcing field at time = t (fp32)
+     real(kind=4), allocatable :: afield_next(:,:,:,:) ! Forcing field at time = t + dt (fp32)
+     real(kind=4), allocatable :: afield_now(:,:,:,:)  ! Forcing field now (fp32)
 
      real(kind=8) :: sol_frac         ! Solenoidal fraction
      real(kind=8) :: turb_last_time   ! Time of old turbulent field
@@ -360,8 +362,8 @@ subroutine find_conj_pair(i,j,k,ii,jj,kk)
     ! Optionally, this field can be Hermitian i.e. purely real after the
     ! transform, but I'm not sure if this produces a purely even field...
     type(turb_t)                   :: turb
-    complex(kind=8), intent(inout) :: turb_field(1:NDIM,0:TGRID_X,0:TGRID_Y,0:TGRID_Z)
-                                           ! Complex field to add to
+    complex(kind=4), intent(inout) :: turb_field(1:NDIM,0:TGRID_X,0:TGRID_Y,0:TGRID_Z)
+                                           ! Complex field to add to (fp32 storage; math fp64)
     real(kind=8), intent(in)       :: dt   ! Width of Gaussian which drives
                                            ! Wiener process
     real(kind=8), intent(in)       :: comp_frac
@@ -474,10 +476,10 @@ subroutine find_conj_pair(i,j,k,ii,jj,kk)
     ! Take a old complex Fourier field of turbulence, and find
     ! decay. Remove this decay from new turbulent field.
     real(kind=8), intent(in)       :: turb_decay_frac
-    complex(kind=8), intent(in)    :: old_turb_field(1:NDIM,0:TGRID_X,0:TGRID_Y,0:TGRID_Z)
-                                           ! Old field for reference
-    complex(kind=8), intent(inout) :: new_turb_field(1:NDIM,0:TGRID_X,0:TGRID_Y,0:TGRID_Z)
-                                           ! Complex field to subtract from
+    complex(kind=4), intent(in)    :: old_turb_field(1:NDIM,0:TGRID_X,0:TGRID_Y,0:TGRID_Z)
+                                           ! Old field for reference (fp32 storage)
+    complex(kind=4), intent(inout) :: new_turb_field(1:NDIM,0:TGRID_X,0:TGRID_Y,0:TGRID_Z)
+                                           ! Complex field to subtract from (fp32 storage)
     ! Ornstein-Uhlenbeck process
     ! dF(k,t) = F_0(k) P(k) dW - F(k,t) dt / T
     ! where F(k,t) is the vector fourier amplitude,
@@ -505,24 +507,24 @@ subroutine find_conj_pair(i,j,k,ii,jj,kk)
 #endif
     ! Transform complex field into purely real field for 1D vector field
 
-    complex(kind=8), intent(in)  :: complex_field(0:TGRID_X)
-                                           ! Complex field to transform
-    real(kind=8), intent(out)    :: real_field(0:TGRID_X)
-                                           ! Result of transforms
+    complex(kind=4), intent(in)  :: complex_field(0:TGRID_X)
+                                           ! Complex field to transform (fp32 spectrum)
+    real(kind=4), intent(out)    :: real_field(0:TGRID_X)
+                                           ! Result of transforms (fp32 field storage)
 #ifdef TURB
     integer (kind=ILP)   :: plan           ! FFTW plan
-    complex(kind=8), allocatable :: fftfield(:) ! Memory for FFT
+    complex(kind=4), allocatable :: fftfield(:) ! Memory for FFT (single precision)
 
     ! Allocate storage for performing FFTs
     allocate(fftfield(0:TGRID_X))
 
-    call dfftw_plan_dft_1d(plan, TURB_GS, fftfield, fftfield, FFTW_BACKWARD, FFTW_ESTIMATE)
+    call sfftw_plan_dft_1d(plan, TURB_GS, fftfield, fftfield, FFTW_BACKWARD, FFTW_ESTIMATE)
     fftfield = complex_field(:)
 
-    call dfftw_execute_dft(plan, fftfield, fftfield)
-    real_field(:) = real(fftfield, kind=8) / (turb_gs_real)
+    call sfftw_execute_dft(plan, fftfield, fftfield)
+    real_field(:) = real(real(fftfield, kind=8) / turb_gs_real, kind=4)
 
-    call dfftw_destroy_plan(plan)
+    call sfftw_destroy_plan(plan)
 
     deallocate(fftfield)
 #else
@@ -540,27 +542,27 @@ subroutine find_conj_pair(i,j,k,ii,jj,kk)
 #endif
     ! Transform complex field into purely real field for 2D vector field
 
-    complex(kind=8), intent(in)  :: complex_field(1:2,0:TGRID_X,0:TGRID_Y)
-                                           ! Complex field to transform
-    real(kind=8), intent(out)    :: real_field(1:2,0:TGRID_X,0:TGRID_Y)
-                                           ! Result of transforms
+    complex(kind=4), intent(in)  :: complex_field(1:2,0:TGRID_X,0:TGRID_Y)
+                                           ! Complex field to transform (fp32 spectrum)
+    real(kind=4), intent(out)    :: real_field(1:2,0:TGRID_X,0:TGRID_Y)
+                                           ! Result of transforms (fp32 field storage)
 #ifdef TURB
     integer              :: d               ! Dimension counter
     integer (kind=ILP)   :: plan            ! FFTW plan
-    complex(kind=8), allocatable :: fftfield(:,:) ! Memory for FFT
+    complex(kind=4), allocatable :: fftfield(:,:) ! Memory for FFT (single precision)
 
     ! Allocate storage for performing FFTs
     allocate(fftfield(0:TGRID_X,0:TGRID_Y))
 
-    call dfftw_plan_dft_2d(plan, TURB_GS, TURB_GS, fftfield, fftfield, FFTW_BACKWARD, FFTW_ESTIMATE)
+    call sfftw_plan_dft_2d(plan, TURB_GS, TURB_GS, fftfield, fftfield, FFTW_BACKWARD, FFTW_ESTIMATE)
 
     do d=1,2
        fftfield = complex_field(d,:,:)
-       call dfftw_execute_dft(plan, fftfield, fftfield)
-       real_field(d,:,:) = real(fftfield, kind=8) / (turb_gs_real**2)
+       call sfftw_execute_dft(plan, fftfield, fftfield)
+       real_field(d,:,:) = real(real(fftfield, kind=8) / (turb_gs_real**2), kind=4)
     end do
 
-    call dfftw_destroy_plan(plan)
+    call sfftw_destroy_plan(plan)
 
     deallocate(fftfield)
 #else
@@ -578,27 +580,27 @@ subroutine find_conj_pair(i,j,k,ii,jj,kk)
 #endif
     ! Transform complex field into purely real field for 3D vector field
    
-    complex(kind=8), intent(in)  :: complex_field(1:3,0:TGRID_X,0:TGRID_Y,0:TGRID_Z)
-                                           ! Complex field to transform
-    real(kind=8), intent(out)    :: real_field(1:3,0:TGRID_X,0:TGRID_Y,0:TGRID_Z)
-                                           ! Result of transforms
+    complex(kind=4), intent(in)  :: complex_field(1:3,0:TGRID_X,0:TGRID_Y,0:TGRID_Z)
+                                           ! Complex field to transform (fp32 spectrum)
+    real(kind=4), intent(out)    :: real_field(1:3,0:TGRID_X,0:TGRID_Y,0:TGRID_Z)
+                                           ! Result of transforms (fp32 field storage)
 #ifdef TURB
     integer              :: d               ! Dimension counter
     integer (kind=ILP)   :: plan            ! FFTW plan
-    complex(kind=8), allocatable :: fftfield(:,:,:) ! Memory for FFT
+    complex(kind=4), allocatable :: fftfield(:,:,:) ! Memory for FFT (single precision)
 
     ! Allocate storage for performing FFTs
     allocate(fftfield(0:TGRID_X,0:TGRID_Y,0:TGRID_Z))
 
-    call dfftw_plan_dft_3d(plan, TURB_GS, TURB_GS, TURB_GS, fftfield, fftfield, FFTW_BACKWARD, FFTW_ESTIMATE)
+    call sfftw_plan_dft_3d(plan, TURB_GS, TURB_GS, TURB_GS, fftfield, fftfield, FFTW_BACKWARD, FFTW_ESTIMATE)
 
     do d=1,3
        fftfield = complex_field(d,:,:,:)
-       call dfftw_execute_dft(plan, fftfield, fftfield)
-       real_field(d,:,:,:) = real(fftfield, kind=8) / (turb_gs_real**3)
+       call sfftw_execute_dft(plan, fftfield, fftfield)
+       real_field(d,:,:,:) = real(real(fftfield, kind=8) / (turb_gs_real**3), kind=4)
     end do
 
-    call dfftw_destroy_plan(plan)
+    call sfftw_destroy_plan(plan)
 
     deallocate(fftfield)
 #else
@@ -637,14 +639,14 @@ subroutine find_conj_pair(i,j,k,ii,jj,kk)
     real(kind=8), intent(in)  :: power_in(0:TGRID_X,0:TGRID_Y,0:TGRID_Z)
     real(kind=8), intent(out) :: P  ! Normalization constant
 
-    complex(kind=8  )         :: complex_field(1:NDIM,0:TGRID_X,0:TGRID_Y, 0:TGRID_Z)
-                                                 ! Complex field to transform
-    real(kind=8)              :: real_field(1:NDIM,0:TGRID_X,0:TGRID_Y, 0:TGRID_Z)
-                                                 ! Result of transforms
+    complex(kind=4  )         :: complex_field(1:NDIM,0:TGRID_X,0:TGRID_Y, 0:TGRID_Z)
+                                                 ! Complex field to transform (fp32)
+    real(kind=4)              :: real_field(1:NDIM,0:TGRID_X,0:TGRID_Y, 0:TGRID_Z)
+                                                 ! Result of transforms (fp32)
     integer                   :: d                ! Dimension counter
 
     do d=1,NDIM
-       complex_field(d,:,:,:) = cmplx(power_in, kind=8)
+       complex_field(d,:,:,:) = cmplx(power_in, kind=4)
     end do
 
 #if NDIM==1
@@ -655,7 +657,7 @@ subroutine find_conj_pair(i,j,k,ii,jj,kk)
     call FFT_3D(complex_field, real_field)
 #endif
 
-    P = sqrt(sum(real_field**2)/size(real_field))
+    P = sqrt(sum(real(real_field, kind=8)**2)/size(real_field))
 
   end subroutine power_rms_norm
   !=====================================================================================

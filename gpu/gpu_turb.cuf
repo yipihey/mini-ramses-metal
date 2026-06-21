@@ -17,9 +17,9 @@ contains
   !=====================================================================================
   attributes(global) subroutine turb_interp_field_kernel(afield_last, afield_next, &
        & afield_now, last_tfrac, next_tfrac, ntot)
-    real(kind=8), device :: afield_last(*)
-    real(kind=8), device :: afield_next(*)
-    real(kind=8), device :: afield_now(*)
+    real(kind=4), device :: afield_last(*)           ! fp32 snapshots (host-uploaded, direct)
+    real(kind=4), device :: afield_next(*)
+    real(kind=4), device :: afield_now(*)            ! fp32 output (read by the hot interp)
     real(kind=8), intent(in), value :: last_tfrac, next_tfrac
     integer(kind=4), intent(in), value :: ntot
 
@@ -28,122 +28,149 @@ contains
     i = (blockIdx%x - 1)*blockDim%x + threadIdx%x
     if (i > ntot) return
 
-    afield_now(i) = last_tfrac*afield_last(i) + next_tfrac*afield_next(i)
+    afield_now(i) = real(last_tfrac*afield_last(i) + next_tfrac*afield_next(i), kind=4)
 
   end subroutine turb_interp_field_kernel
 
   !=====================================================================================
-  ! Turbulent driving force.
-  ! Per (cell, oct): compute cell-centre position, read density from uold, apply the
-  ! density filter, trilinearly interpolate the 64^3 afield_now onto the cell, and store
-  ! the result in fturb. Fuses drive_turb (turb/turb_driving.f90) and turb_force_calc
-  ! (turb/turb_commons.f90). NDIM==3.
+  ! Fused turbulent driving + source term (replaces turb_drive_kernel + turb_hydro_kernel).
+  ! Per (cell, oct): trilinearly interpolate the 64^3 afield_now onto the cell to get the
+  ! driving acceleration IN REGISTERS (the former per-cell `fturb` buffer is gone), then
+  ! immediately apply the source term to uold (remove KE, kick momentum by rho*acc*dteff,
+  ! recompute energy). afield_now is unchanged across the level step (set per turb update
+  ! in gpu_manager), so the acceleration is identical to the old split; the only behaviour
+  ! change is that the under-dense density filter now reads the post-hydro density (the
+  ! apply point), which matters only for cells straddling turb_min_rho. NDIM==3.
   !=====================================================================================
-  attributes(global) subroutine turb_drive_kernel(grid, uold, fturb, afield_now, &
-       & d_skip, head_idx, num_octs, dx, boxlen, turb_min_rho)
+  attributes(global) subroutine turb_drive_apply_kernel(grid, uold, afield_now, &
+       & d_skip, head_idx, num_octs, dx, boxlen, turb_min_rho, smallr, smallc, dteff)
     type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
-    real(kind=dp), device :: fturb(1:twotondim,1:3,*)
-    real(kind=8), device :: afield_now(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1)
-    real(kind=8), device :: d_skip(1:3)
+    real(kind=4), device :: afield_now(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1)  ! fp32
+    real(kind=dp), device :: d_skip(1:3)
     integer(kind=4), intent(in), value :: head_idx, num_octs
-    real(kind=dp), intent(in), value :: dx, boxlen, turb_min_rho
-
-    integer :: block_idx, cell_idx, oct_idx, idim
-    integer :: bmin(1:3), bmax(1:3)
-    real(kind=8) :: x, rr, rho, dr1(1:3), dr2(1:3)
-
-    block_idx = blockIdx%x - 1
-
-    ! Compute the oct idx
-    oct_idx = block_idx*blockDim%y + threadIdx%y - 1
-    if (oct_idx >= num_octs) return
-    oct_idx = head_idx + oct_idx
-
-    ! Compute the cell idx
-    cell_idx = threadIdx%x
-
-    ! Density filter: leave fturb=0 for under-dense cells (matches turb_force_calc).
-    rho = uold(cell_idx, 1, oct_idx)
-    if (rho < turb_min_rho) then
-       do idim = 1, 3
-          fturb(cell_idx, idim, oct_idx) = 0d0
-       end do
-       return
-    end if
-
-    ! Cell-centre position -> position in the turbulence grid, with periodic wrap.
-    do idim = 1, ndim
-       x = (2*grid(oct_idx)%ckey(idim) + mod((cell_idx-1)/2**(idim-1), 2) + 0.5d0)*dx - d_skip(idim)
-       rr = x/boxlen*turb_gs_real
-       bmin(idim) = floor(rr)
-       bmax(idim) = ceiling(rr)
-       if (bmin(idim) == TURB_GS) bmin(idim) = 0
-       if (bmax(idim) == TURB_GS) bmax(idim) = 0
-       dr1(idim) = rr - real(floor(rr), kind=8)
-       dr2(idim) = 1d0 - dr1(idim)
-    end do
-
-    ! Trilinear interpolation over the 8 corners, all 3 force components.
-    do idim = 1, 3
-       fturb(cell_idx, idim, oct_idx) = &
-            & afield_now(idim, bmin(1), bmin(2), bmin(3))*dr2(1)*dr2(2)*dr2(3) + &
-            & afield_now(idim, bmax(1), bmin(2), bmin(3))*dr1(1)*dr2(2)*dr2(3) + &
-            & afield_now(idim, bmin(1), bmax(2), bmin(3))*dr2(1)*dr1(2)*dr2(3) + &
-            & afield_now(idim, bmax(1), bmax(2), bmin(3))*dr1(1)*dr1(2)*dr2(3) + &
-            & afield_now(idim, bmin(1), bmin(2), bmax(3))*dr2(1)*dr2(2)*dr1(3) + &
-            & afield_now(idim, bmax(1), bmin(2), bmax(3))*dr1(1)*dr2(2)*dr1(3) + &
-            & afield_now(idim, bmin(1), bmax(2), bmax(3))*dr2(1)*dr1(2)*dr1(3) + &
-            & afield_now(idim, bmax(1), bmax(2), bmax(3))*dr1(1)*dr1(2)*dr1(3)
-    end do
-
-  end subroutine turb_drive_kernel
-
-  !=====================================================================================
-  ! Turbulent source term.
-  ! Per (cell, oct): subtract kinetic energy, add rho*fturb*dteff to momentum, recompute
-  ! total energy. Direct port of turb_hydro (turb/turb_hydro.f90); operates on uold.
-  !=====================================================================================
-  attributes(global) subroutine turb_hydro_kernel(uold, fturb, head_idx, num_octs, &
-       & smallr, smallc, dteff)
-    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
-    real(kind=dp), device :: fturb(1:twotondim,1:3,*)
-    integer(kind=4), intent(in), value :: head_idx, num_octs
-    real(kind=dp), intent(in), value :: smallr, smallc
+    real(kind=dp), intent(in), value :: dx, boxlen, turb_min_rho, smallr, smallc
     real(kind=8), intent(in), value :: dteff
 
     integer :: block_idx, cell_idx, oct_idx, idim
-    real(kind=8) :: ener, rho
+    integer :: bmin(1:3), bmax(1:3)
+    real(kind=dp) :: x, rr                      ! ALL-FP32 experiment: position/floor in fp32
+    real(kind=dp) :: rho, ener                  ! source term in fp32 (dp=fp32; avoids 1:64 fp64)
+    real(kind=4) :: w1(1:3), w2(1:3)           ! trilinear weights in fp32 (the hot interp)
+    real(kind=dp) :: ff(1:3)   ! driving acceleration, was the fturb buffer (fp32 to match)
+    real(kind=dp) :: dteff_s   ! fp32 copy of dteff for the source-term math
 
     block_idx = blockIdx%x - 1
-
     oct_idx = block_idx*blockDim%y + threadIdx%y - 1
     if (oct_idx >= num_octs) return
     oct_idx = head_idx + oct_idx
-
     cell_idx = threadIdx%x
 
     rho = uold(cell_idx, 1, oct_idx)
 
-    ! Remove kinetic energy from total energy
+    ! ---- driving acceleration ff (formerly fturb): density filter + trilinear interp ----
+    if (rho < turb_min_rho) then
+       ff(1) = 0.0_dp; ff(2) = 0.0_dp; ff(3) = 0.0_dp
+    else
+       ! Cell-centre position -> position in the turbulence grid, with periodic wrap.
+       do idim = 1, ndim
+          x = (2*grid(oct_idx)%ckey(idim) + mod((cell_idx-1)/2**(idim-1), 2) + 0.5_dp)*dx - d_skip(idim)
+          rr = x/boxlen*real(turb_gs_real, kind=dp)
+          bmin(idim) = floor(rr)
+          bmax(idim) = ceiling(rr)
+          if (bmin(idim) == TURB_GS) bmin(idim) = 0
+          if (bmax(idim) == TURB_GS) bmax(idim) = 0
+          w1(idim) = real(rr - real(floor(rr), kind=dp), kind=4)
+          w2(idim) = 1.0_4 - w1(idim)
+       end do
+       ! Trilinear interpolation over the 8 corners, all 3 force components (fp32).
+       do idim = 1, 3
+          ff(idim) = &
+               & afield_now(idim, bmin(1), bmin(2), bmin(3))*w2(1)*w2(2)*w2(3) + &
+               & afield_now(idim, bmax(1), bmin(2), bmin(3))*w1(1)*w2(2)*w2(3) + &
+               & afield_now(idim, bmin(1), bmax(2), bmin(3))*w2(1)*w1(2)*w2(3) + &
+               & afield_now(idim, bmax(1), bmax(2), bmin(3))*w1(1)*w1(2)*w2(3) + &
+               & afield_now(idim, bmin(1), bmin(2), bmax(3))*w2(1)*w2(2)*w1(3) + &
+               & afield_now(idim, bmax(1), bmin(2), bmax(3))*w1(1)*w2(2)*w1(3) + &
+               & afield_now(idim, bmin(1), bmax(2), bmax(3))*w2(1)*w1(2)*w1(3) + &
+               & afield_now(idim, bmax(1), bmax(2), bmax(3))*w1(1)*w1(2)*w1(3)
+       end do
+    end if
+
+    ! ---- source term (was turb_hydro_kernel): remove KE, kick momentum, recompute E (fp32) ----
+    dteff_s = real(dteff, kind=dp)
     ener = uold(cell_idx, 5, oct_idx)
     do idim = 1, 3
-       ener = max(ener - 0.5d0*uold(cell_idx, idim+1, oct_idx)**2/max(rho, smallr), rho*smallc**2)
+       ener = max(ener - 0.5_dp*uold(cell_idx, idim+1, oct_idx)**2/max(rho, smallr), rho*smallc**2)
     end do
-
-    ! Update momentum
     do idim = 1, 3
        uold(cell_idx, idim+1, oct_idx) = uold(cell_idx, idim+1, oct_idx) + &
-            & max(rho, smallr)*fturb(cell_idx, idim, oct_idx)*dteff
+            & max(rho, smallr)*ff(idim)*dteff_s
     end do
-
-    ! Update total energy
     do idim = 1, 3
-       ener = max(ener + 0.5d0*uold(cell_idx, idim+1, oct_idx)**2/max(rho, smallr), rho*smallc**2)
+       ener = max(ener + 0.5_dp*uold(cell_idx, idim+1, oct_idx)**2/max(rho, smallr), rho*smallc**2)
     end do
     uold(cell_idx, 5, oct_idx) = ener
 
-  end subroutine turb_hydro_kernel
+  end subroutine turb_drive_apply_kernel
+
+  !=====================================================================================
+  ! GPU initial condition for INIT==TURB (replaces the CPU condinit Fourier synthesis,
+  ! which dominated init -- 343M cells x ~16 cos on one core). Per (cell, oct): compute
+  ! the cell centre, synthesise the solenoidal velocity from the precomputed modes, and
+  ! write CONSERVED uold directly (matches cons_from_prim for GLM-MHD). Octs enumerated as
+  ! [head_idx, head_idx+num_octs) (== the hash insert); non-grid slots (lev<=0) skipped.
+  ! Mode arrays + rho0/p0/b0 are computed once on the host (gpu_init_flow_turb). NDIM==3.
+  !=====================================================================================
+  attributes(global) subroutine turb_ic_kernel(grid, uold, mkx, mky, mkz, macx, macy, macz, &
+       & mph, nmode, rho0, p0, b0, gamma, dx, boxsize, skipx, skipy, skipz, head_idx, num_octs)
+    type(oct), device :: grid(*)
+    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=8), device :: mkx(*), mky(*), mkz(*), macx(*), macy(*), macz(*), mph(*)
+    integer(kind=4), value :: nmode, head_idx, num_octs
+    real(kind=8), value :: rho0, p0, b0, gamma, dx, boxsize, skipx, skipy, skipz
+
+    integer :: block_idx, cell_idx, oct_idx, im
+    real(kind=8) :: x1, x2, x3, vx, vy, vz, phase, cosp, twopi, ekin, emag, eint
+
+    block_idx = blockIdx%x - 1
+    oct_idx = block_idx*blockDim%y + threadIdx%y - 1
+    if (oct_idx >= num_octs) return
+    oct_idx = head_idx + oct_idx
+    if (grid(oct_idx)%lev <= 0) return          ! skip non-grid / superoct slots
+    cell_idx = threadIdx%x
+
+    twopi = 2.0d0*acos(-1.0d0)
+    ! Cell-centre position (matches CPU: (2*ckey + cellbit + 0.5)*dx - skip).
+    x1 = (2*grid(oct_idx)%ckey(1) + mod((cell_idx-1)/1, 2) + 0.5d0)*dx - skipx
+    x2 = (2*grid(oct_idx)%ckey(2) + mod((cell_idx-1)/2, 2) + 0.5d0)*dx - skipy
+    x3 = (2*grid(oct_idx)%ckey(3) + mod((cell_idx-1)/4, 2) + 0.5d0)*dx - skipz
+
+    ! Solenoidal velocity = sum of precomputed transverse modes.
+    vx = 0.0d0; vy = 0.0d0; vz = 0.0d0
+    do im = 1, nmode
+       phase = twopi*(mkx(im)*x1 + mky(im)*x2 + mkz(im)*x3)/boxsize + mph(im)
+       cosp = cos(phase)
+       vx = vx + macx(im)*cosp
+       vy = vy + macy(im)*cosp
+       vz = vz + macz(im)*cosp
+    end do
+
+    ! Conserved GLM-MHD state (B = (0,0,b0), psi = 0); cf. cons_from_prim.
+    ekin = 0.5d0*rho0*(vx*vx + vy*vy + vz*vz)
+    emag = 0.5d0*b0*b0
+    eint = p0/(gamma - 1.0d0)
+    uold(cell_idx,1,oct_idx) = rho0
+    uold(cell_idx,2,oct_idx) = rho0*vx
+    uold(cell_idx,3,oct_idx) = rho0*vy
+    uold(cell_idx,4,oct_idx) = rho0*vz
+    uold(cell_idx,5,oct_idx) = eint + ekin + emag
+    uold(cell_idx,6,oct_idx) = 0.0d0
+    uold(cell_idx,7,oct_idx) = 0.0d0
+    uold(cell_idx,8,oct_idx) = b0
+    uold(cell_idx,9,oct_idx) = 0.0d0
+
+  end subroutine turb_ic_kernel
 #endif
 
 end module turb_device

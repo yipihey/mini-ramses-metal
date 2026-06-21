@@ -241,6 +241,51 @@ contains
   ! =========================================================================
 
   ! =========================================================================
+  !> @brief
+  !> Build the (uniform, single-level) base grid directly on the device: one thread per
+  !> oct in the box [bxmin,bxmin+nbx) x [bymin,..+nby) x [bzmin,..+nbz). Sets ckey (the
+  !> box-local Cartesian un-flatten), hkey (forward Hilbert), lev, refined=.false. and
+  !> superoct=1 (the GPU/Godunov path never reads superoct -- only the CPU sweep does).
+  !> Replaces the serial CPU Hilbert walk in r_init_refine_basegrid for GPU-resident
+  !> static-mesh runs. Octs are in Cartesian (not Hilbert) order; correctness is unaffected
+  !> (the hash maps ckey->igrid and the hydro gathers via nbor, both order-independent).
+  attributes(global) subroutine build_basegrid_kernel(grid, bxmin, bymin, bzmin, &
+       & nbx, nby, ilevel, num_octs)
+    type(oct), device :: grid(*)
+    integer(kind=4), value :: bxmin, bymin, bzmin, nbx, nby, ilevel, num_octs
+    integer :: tid, c, npx, npy, pblk, sub, pi, pj, pk
+    integer(kind=4), dimension(1:ndim) :: ckey
+
+    tid = (blockIdx%x - 1)*blockDim%x + threadIdx%x     ! 1 .. num_octs
+    if (tid > num_octs) return
+
+    ! Block (Morton-8) ordering: each consecutive nsubgridtondim=8 octs must form a 2x2x2
+    ! spatial block, because the GPU subgrid gather (subgrid_conserved_2_primitive_mhd)
+    ! treats every group of 8 array-consecutive octs as a 2x2x2 core. Iterate parent
+    ! 2x2x2 blocks; within each, the 8 children in (di,dj,dk) order. Requires nbx/nby/nbz
+    ! even (gated in gpu_build_basegrid).
+    npx = nbx/2; npy = nby/2
+    pblk = (tid-1)/8          ! parent-block index
+    sub  = mod(tid-1, 8)      ! 0..7 child within the 2x2x2 block
+    pi = mod(pblk, npx)
+    pj = mod(pblk/npx, npy)
+    pk = pblk/(npx*npy)
+    ckey(1) = bxmin + 2*pi + mod(sub, 2)
+    ckey(2) = bymin + 2*pj + mod(sub/2, 2)
+    ckey(3) = bzmin + 2*pk + sub/4
+
+    grid(tid)%lev = ilevel
+    grid(tid)%ckey(1:ndim) = ckey(1:ndim)
+    grid(tid)%hkey(1) = hilbert_key(ckey, ilevel-1)
+    do c = 1, twotondim
+       grid(tid)%refined(c) = .false.
+    end do
+    grid(tid)%superoct = 1
+
+  end subroutine build_basegrid_kernel
+  ! =========================================================================
+
+  ! =========================================================================
   attributes(global) subroutine insert_hash_cache(grid, hash_key, hash_val, hash_size, &
        & ckey_max, key_off, ngridmax, ifree_cache, num_octs)
     type(oct), device :: grid(*)

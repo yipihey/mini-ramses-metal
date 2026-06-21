@@ -744,8 +744,7 @@ contains
     addr = 0_c_intptr_t; noct_out = 0; head_out = 0
 #ifdef _CUDA
     block
-      use gpu_runner, only: uold
-      use cudafor,    only: c_devloc
+      use gpu_runner, only: gpu_uold_devptr
       type(ramses_t), pointer :: s
       integer :: hd
       if (handle < 1 .or. handle > CAPI_MAXSTATE) return
@@ -754,7 +753,7 @@ contains
       hd = s%m%head(ilevel)
       noct_out = s%m%noct(ilevel)
       head_out = hd
-      addr = transfer(c_devloc(uold(1,1,hd)), addr)
+      addr = transfer(gpu_uold_devptr(hd), addr)   ! current buffer base addr (via .cuf helper)
     end block
 #endif
   end function ramses_uold_devptr

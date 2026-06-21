@@ -292,6 +292,7 @@ subroutine m_read_params(pst)
   real(kind=8)::gamma=1.4d0
   real(kind=8),dimension(1:512)::gamma_rad=1.33333333334d0
   real(kind=8)::courant_factor=0.5d0
+  logical::cfl_sqrt3=.false.
   real(kind=8)::glm_ch_scale=0.25d0
   real(kind=8)::glm_cp_coef=0.18d0
   real(kind=8)::difmag=0.0d0
@@ -617,7 +618,7 @@ subroutine m_read_params(pst)
 #endif
        & ,d_region,u_region,v_region,w_region,p_region
   ! Hydro solver parameters
-  namelist/hydro_params/gamma,courant_factor,smallr,smallc &
+  namelist/hydro_params/gamma,courant_factor,cfl_sqrt3,smallr,smallc &
        & ,glm_ch_scale,glm_cp_coef &
        & ,slope_type,slope_mag_type,difmag,etamag,gamma_rad &
        & ,dual_energy,T2_fix,induction,entropy,sgs_turb,equilibrium_sgs,riemann,riemann2d,constant_gravity &
@@ -1374,6 +1375,7 @@ subroutine m_read_params(pst)
 
   s%r%gamma=gamma
   s%r%courant_factor=courant_factor
+  s%r%cfl_sqrt3=cfl_sqrt3
   s%r%glm_ch_scale=glm_ch_scale
   s%r%glm_cp_coef=glm_cp_coef
   s%r%smallc=smallc
@@ -1407,7 +1409,11 @@ subroutine m_read_params(pst)
   if(riemann=='hllc')s%r%riemann=solver_hllc
   if(riemann=='twoshock')s%r%riemann=solver_twoshock
 #endif
-#ifdef MHD
+! GLMMHD is a distinct macro from MHD (CT) but shares the same 1D Riemann names.
+! Without this, riemann='hlld' fell through unmapped in GLM builds and silently
+! ran the run_t default (solver=0 -> the LLF branch of mhd_riemann_fluxes), so
+! every "hlld" GLM run was actually LLF. Map the GLM-supported solvers here too.
+#if defined(MHD) || defined(GLMMHD)
   if(riemann=='llf')s%r%riemann=solver_llf
   if(riemann=='hll')s%r%riemann=solver_hll
   if(riemann=='hlld')s%r%riemann=solver_hlld

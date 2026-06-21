@@ -10,9 +10,13 @@ subroutine m_init_refine_basegrid(pst)
 #ifdef GRAV
   use rho_fine_module, only: m_rho_fine
 #endif
+#ifdef _CUDA
+  use gpu_runner, only: gpu_build_basegrid
+#endif
   use input_hydro_grafic_module, only: r_input_refmap_grafic
   implicit none
   type(pst_t)::pst
+  logical::gpu_bg
   !--------------------------------------------------------------------
   ! This routine is the master procedure to set the base grid
   ! and initialize all cell-based variables within it.
@@ -23,8 +27,27 @@ subroutine m_init_refine_basegrid(pst)
 
   write(*,'(" Building initial base grid at level ",I0)')r%levelmin
 
-  ! Call recursive slave routine
-  call r_init_refine_basegrid(pst,r%levelmin,1)
+  ! GPU-resident, static single-level, device-IC runs build the base grid directly on the
+  ! device (no serial CPU Hilbert walk, no host m%grid / CPU hash). rho_fine/flag_fine are
+  ! skipped below (gravity unused with poisson=false; no refinement at a single level).
+  gpu_bg = .false.
+#ifdef _CUDA
+  gpu_bg = r%turb .and. (r%nlevelmax==r%levelmin) .and. (.not.r%poisson)
+  ! The device build uses 2x2x2-block (Morton-8) ordering -> requires even box dims.
+  if(gpu_bg) gpu_bg = &
+       & mod(m%box_ckey_max(1,r%levelmin)-m%box_ckey_min(1,r%levelmin),2)==0 .and. &
+       & mod(m%box_ckey_max(2,r%levelmin)-m%box_ckey_min(2,r%levelmin),2)==0 .and. &
+       & mod(m%box_ckey_max(3,r%levelmin)-m%box_ckey_min(3,r%levelmin),2)==0
+#endif
+
+  if(gpu_bg)then
+#ifdef _CUDA
+     call gpu_build_basegrid(pst%s)
+#endif
+  else
+     ! Call recursive slave routine (CPU build)
+     call r_init_refine_basegrid(pst,r%levelmin,1)
+  endif
 
   ! Get total, min and max grid count (only in master).
   call r_noct_tot(pst,r%levelmin,1,m%noct_tot(r%levelmin),2)
@@ -47,13 +70,13 @@ subroutine m_init_refine_basegrid(pst)
 
   ! Compute total mass density from gas and particles on the base grid
 #ifdef GRAV
-  if(pst%s%r%filetype.NE.'grafic_zoom')then
+  if(.not.gpu_bg .and. pst%s%r%filetype.NE.'grafic_zoom')then
      call m_rho_fine(pst,r%levelmin,0)
   endif
 #endif
 
-  ! Flag coarse level cells for refinement
-  call m_flag_fine(pst,r%levelmin,2)
+  ! Flag coarse level cells for refinement (not needed for a static single-level GPU grid)
+  if(.not.gpu_bg) call m_flag_fine(pst,r%levelmin,2)
 
   end associate
 

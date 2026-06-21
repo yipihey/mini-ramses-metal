@@ -76,6 +76,13 @@ subroutine condinit(r,g,x,q,dx,nn)
   real(kind=8)::twopi,cs,rho0,p0,b0,norm,sumsq
   real(kind=8)::ax,ay,az,cx,cy,cz,csq,amp,ph,phase,vx,vy,vz
   real(kind=8)::hx,hy,hz,hp
+  ! Precomputed forcing-mode constants (were recomputed PER CELL: ~16 modes x 5 sin
+  ! over every one of the 343M cells = the entire init_flow_fine cost). |k| in [1,2]
+  ! => at most ~16 hemisphere modes; 32 is a safe bound.
+  integer::nmode,im
+  integer,dimension(1:32)::mkk
+  real(kind=8)::cosp
+  real(kind=8),dimension(1:32)::mkx,mky,mkz,macx,macy,macz,mph
 #elif INIT==CPALFVEN
   real(kind=8)::twopi,kx,bperp
 #else
@@ -368,8 +375,11 @@ subroutine condinit(r,g,x,q,dx,nn)
   cs=1.0d0
   p0=rho0*cs*cs/r%gamma                  ! so cs = sqrt(gamma p/rho) = 1
   b0=cs*sqrt(rho0)                        ! vA = |B|/sqrt(rho) = cs
-  ! normalization so that <v^2> = sum_hemisphere amp^2 |c|^2 / 2 = cs^2
-  sumsq=0.0d0
+  ! normalization so that <v^2> = sum_hemisphere amp^2 |c|^2 / 2 = cs^2.
+  ! Precompute the (cell-independent) mode constants ONCE here -- the original code
+  ! recomputed ax/ay/az/ph/cx/cy/cz/amp inside the per-cell loop (~16 modes x 5 sin
+  ! per cell x 343M cells). Bit-identical: same modes, same order, same accumulation.
+  sumsq=0.0d0; nmode=0
   do nx=-2,2
    do ny=-2,2
     do nz=-2,2
@@ -383,31 +393,26 @@ subroutine condinit(r,g,x,q,dx,nn)
      cx=dble(ny)*az-dble(nz)*ay; cy=dble(nz)*ax-dble(nx)*az; cz=dble(nx)*ay-dble(ny)*ax
      amp=1.0d0/sqrt(dble(kk))
      sumsq=sumsq+amp*amp*(cx*cx+cy*cy+cz*cz)*0.5d0
+     nmode=nmode+1; mkk(nmode)=kk
+     mkx(nmode)=dble(nx); mky(nmode)=dble(ny); mkz(nmode)=dble(nz)
+     macx(nmode)=cx; macy(nmode)=cy; macz(nmode)=cz               ! raw c; amp applied below
+     mph(nmode)=twopi*(sin(hp+4.0d0)*43758.5453d0-floor(sin(hp+4.0d0)*43758.5453d0))
     enddo
    enddo
   enddo
   norm=cs/sqrt(sumsq)
+  do im=1,nmode
+     amp=norm/sqrt(dble(mkk(im)))                                 ! identical to the old per-cell amp
+     macx(im)=amp*macx(im); macy(im)=amp*macy(im); macz(im)=amp*macz(im)
+  enddo
   do i=1,nn
      vx=0.0d0; vy=0.0d0; vz=0.0d0
-     do nx=-2,2
-      do ny=-2,2
-       do nz=-2,2
-        kk=nx*nx+ny*ny+nz*nz
-        if(kk<1.or.kk>4)cycle
-        if(.not.(nz>0.or.(nz==0.and.ny>0).or.(nz==0.and.ny==0.and.nx>0)))cycle
-        hp=dble(100*nx+17*ny+3*nz+211)
-        ax=2.0d0*(sin(hp+1.0d0)*43758.5453d0-floor(sin(hp+1.0d0)*43758.5453d0))-1.0d0
-        ay=2.0d0*(sin(hp+2.0d0)*43758.5453d0-floor(sin(hp+2.0d0)*43758.5453d0))-1.0d0
-        az=2.0d0*(sin(hp+3.0d0)*43758.5453d0-floor(sin(hp+3.0d0)*43758.5453d0))-1.0d0
-        ph=twopi*(sin(hp+4.0d0)*43758.5453d0-floor(sin(hp+4.0d0)*43758.5453d0))
-        cx=dble(ny)*az-dble(nz)*ay; cy=dble(nz)*ax-dble(nx)*az; cz=dble(nx)*ay-dble(ny)*ax
-        amp=norm/sqrt(dble(kk))
-        phase=twopi*(dble(nx)*x(i,1)+dble(ny)*x(i,2)+dble(nz)*x(i,3))/r%box_size(1)+ph
-        vx=vx+amp*cx*cos(phase)
-        vy=vy+amp*cy*cos(phase)
-        vz=vz+amp*cz*cos(phase)
-       enddo
-      enddo
+     do im=1,nmode
+        phase=twopi*(mkx(im)*x(i,1)+mky(im)*x(i,2)+mkz(im)*x(i,3))/r%box_size(1)+mph(im)
+        cosp=cos(phase)
+        vx=vx+macx(im)*cosp
+        vy=vy+macy(im)*cosp
+        vz=vz+macz(im)*cosp
      enddo
      q(i,1)=rho0
      q(i,2)=vx

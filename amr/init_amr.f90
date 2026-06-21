@@ -79,7 +79,7 @@ subroutine init_amr(r,g,m,type)
   use amr_commons, ONLY: run_t, global_t, mesh_t
 #if defined(_CUDA) && defined(TURB)
   use turb_commons, only: TURB_GS
-  use gpu_runner, only: afield_last_d, afield_next_d, afield_now_d, fturb
+  use gpu_runner, only: afield_last_d, afield_next_d, afield_now_d
 #endif
   use hash
   use hilbert
@@ -186,15 +186,24 @@ subroutine init_amr(r,g,m,type)
 #ifdef HYDRO
      allocate(m%uold(1:twotondim,1:nvar,1:m%ngridmax+m%ncachemax))
      allocate(m%unew(1:twotondim,1:nvar,1:m%ngridmax+m%ncachemax))
+#ifdef _CUDA
+     ! GPU-resident: the device uold/unew are allocated+zeroed separately and are the
+     ! source of truth; the host copies are not read on the hot path. m%unew is never
+     ! uploaded, so never zero it. m%uold is only uploaded for the analytic-IC (condinit)
+     ! path; for driven turbulence (r%turb) the device uold is zeroed and the GPU IC
+     ! kernel fills it (the H2D upload is skipped), so skip the costly host zeroing too.
+     ! (Zeroing these ~35 GB host arrays was ~11 s of the 700^3 init.)
+     if(.not.r%turb) m%uold=0d0
+#else
      m%uold=0d0
      m%unew=0d0
+#endif
 #endif
 #if defined(_CUDA) && defined(TURB)
      allocate(afield_last_d(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1))
      allocate(afield_next_d(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1))
      allocate(afield_now_d (1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1))
-     allocate(fturb(1:twotondim,1:3,1:m%ngridmax+m%ncachemax))
-     afield_last_d=0d0; afield_next_d=0d0; afield_now_d=0d0; fturb=0d0
+     afield_last_d=0d0; afield_next_d=0d0; afield_now_d=0d0
 #endif
 #ifdef MHD
      allocate(m%bold(1:twotondim,1:6,1:m%ngridmax+m%ncachemax))
@@ -214,11 +223,15 @@ subroutine init_amr(r,g,m,type)
      allocate(m%nref(1:twotondim,1:m%ngridmax+m%ncachemax))
      allocate(m%f(1:twotondim,1:3,1:m%ngridmax+m%ncachemax))
      allocate(m%phi_old(1:twotondim,1:m%ngridmax+m%ncachemax))
+#ifndef _CUDA
+     ! GPU-resident: host gravity arrays are never uploaded (device rho/phi/nref/f/phi_old
+     ! are zeroed separately and used); skip the host zeroing.
      m%f=0d0
      m%rho=0d0
      m%phi=0d0
      m%nref=0d0
      m%phi_old=0d0
+#endif
 #endif
   endif
 
@@ -226,22 +239,27 @@ subroutine init_amr(r,g,m,type)
 #ifdef _CUDA
   if(type=='amr')then
 #ifdef HYDRO
-     allocate(uold(1:twotondim,1:nvar,1:m%ngridmax+m%ncachemax))
-     allocate(unew(1:twotondim,1:nvar,1:m%ngridmax+m%ncachemax))
-     uold=0d0
-     unew=0d0
+     call gpu_alloc_hydro_buffers(m%ngridmax+m%ncachemax)
 #endif
 #ifdef GRAV
-     allocate(rho(1:twotondim,1:m%ngridmax+m%ncachemax))
-     allocate(phi(1:twotondim,1:m%ngridmax+m%ncachemax))
-     allocate(nref(1:twotondim,1:m%ngridmax+m%ncachemax))
+     ! f (gravity force) is always read by the MHD predictor; keep it (zeroed -> no force
+     ! when poisson=false / constant_gravity=0).
      allocate(f(1:twotondim,1:3,1:m%ngridmax+m%ncachemax))
-     allocate(phi_old(1:twotondim,1:m%ngridmax+m%ncachemax))
      f=0d0
-     rho=0d0
-     phi=0d0
-     nref=0d0
-     phi_old=0d0
+     ! rho/phi/phi_old are the Poisson multigrid working set and nref the refinement
+     ! indicator -- all unused for a poisson=false static single-level run, and not passed
+     ! to any kernel on that path. Skip them to free ~5*twotondim*N*dp of VRAM (e.g. ~6.6 GB
+     ! at 740^3), which is what lets the largest non-power-of-2 boxes fit on one A6000.
+     if(r%poisson .or. r%nlevelmax>r%levelmin)then
+        allocate(rho(1:twotondim,1:m%ngridmax+m%ncachemax))
+        allocate(phi(1:twotondim,1:m%ngridmax+m%ncachemax))
+        allocate(nref(1:twotondim,1:m%ngridmax+m%ncachemax))
+        allocate(phi_old(1:twotondim,1:m%ngridmax+m%ncachemax))
+        rho=0d0
+        phi=0d0
+        nref=0d0
+        phi_old=0d0
+     endif
 #endif
   endif
 #endif
@@ -550,7 +568,7 @@ subroutine init_amr(r,g,m,type)
      endif
   endif
   allocate(d_skip(1:ndim))
-  d_skip = m%skip
+  call gpu_upload_d_skip(m%skip)   ! H2D via .cuf (d_skip is fp32; a .f90 real4 copy mis-sizes)
 #endif
 
   ! Initialize level-based arrays

@@ -27,11 +27,19 @@ recursive subroutine r_set_grid_device(pst)
 
      ! Copy grid from host to device
      call nvtxStartRange("Copy entire mesh from host to device", color=5)!red
-     grid = pst%s%m%grid
+     ! ...unless the grid was already built directly on the device (gpu_build_basegrid).
+     if(.not. pst%s%m%grid_on_device) grid = pst%s%m%grid
      ! flag1 is only allocated/used for adaptive mesh refinement
      if(pst%s%r%nlevelmax > pst%s%r%levelmin) flag1 = pst%s%m%flag1
 #ifdef HYDRO
-     uold = pst%s%m%uold
+#if defined(GLMMHD) && defined(TURB)
+     ! Driven turbulence: the device uold is already zeroed (init_amr) and the GPU IC
+     ! kernel (below) fills the grid octs -- skip the ~37 GB host->device upload of the
+     ! (intentionally unzeroed) host m%uold.
+     if(.not. pst%s%r%turb) call gpu_upload_uold(pst%s%m%uold)
+#else
+     call gpu_upload_uold(pst%s%m%uold)
+#endif
 #endif
      call GPU_Error_Check(__FILE__, __LINE__)
      call nvtxEndRange()
@@ -88,6 +96,14 @@ recursive subroutine r_set_grid_device(pst)
      call GPU_Error_Check(__FILE__, __LINE__)
      call nvtxEndRange()
 
+#if defined(GLMMHD) && defined(TURB)
+     ! Driven-turbulence initial condition on the device (replaces the slow per-cell CPU
+     ! Fourier synthesis, skipped in m_init_flow_fine). The device grid/hash/nbor are
+     ! ready; enumerate octs exactly like the hash insert (head_idx=1, ifree-1) and fill
+     ! uold directly.
+     if(pst%s%r%turb) call gpu_init_flow_turb(pst%s, 1_4, int(pst%s%m%ifree-1, kind=4))
+#endif
+
      pst%s%m%data_on_device=.true.
 
   endif
@@ -103,8 +119,7 @@ subroutine set_uold_device(pst)
   use ramses_commons, only: pst_t
   implicit none
   type(pst_t)::pst
-  uold = pst%s%m%uold      ! host -> device (CUDA Fortran array copy)
-  call GPU_Error_Check(__FILE__, __LINE__)
+  call gpu_upload_uold(pst%s%m%uold)   ! host -> device (current buffer, via .cuf helper)
 end subroutine set_uold_device
 !###########################################################
 !###########################################################
@@ -131,7 +146,7 @@ recursive subroutine r_transfer_grid_host(pst)
      ! flag1 is only allocated/used for adaptive mesh refinement
      if(pst%s%r%nlevelmax > pst%s%r%levelmin) pst%s%m%flag1 = flag1
 #ifdef HYDRO
-     pst%s%m%uold = uold
+     call gpu_download_uold(pst%s%m%uold)
 #endif
 #ifdef GRAV
      pst%s%m%f = f
@@ -199,9 +214,7 @@ subroutine gpu_turb_init_fields(pst)
   if (.not. allocated(afield_next_d)) return
 
   call nvtxStartRange("Copy initial turb fields host to device", color=5)!red
-  afield_last_d = pst%s%turb%afield_last
-  afield_next_d = pst%s%turb%afield_next
-  call GPU_Error_Check(__FILE__, __LINE__)
+  call gpu_upload_afield_init(pst%s%turb%afield_last, pst%s%turb%afield_next)
   call nvtxEndRange()
 
 end subroutine gpu_turb_init_fields
@@ -217,9 +230,7 @@ subroutine gpu_turb_next_field(pst)
   if (.not. allocated(afield_next_d)) return
 
   call nvtxStartRange("Rotate + upload turb afield_next", color=5)!red
-  afield_last_d = afield_next_d                  ! device-to-device rotate
-  afield_next_d = pst%s%turb%afield_next         ! H2D: only the new 'next'
-  call GPU_Error_Check(__FILE__, __LINE__)
+  call gpu_upload_afield_next(pst%s%turb%afield_next)
   call nvtxEndRange()
 
 end subroutine gpu_turb_next_field

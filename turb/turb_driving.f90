@@ -8,9 +8,6 @@ recursive subroutine r_drive_turb(pst,ilevel,input_size)
   use mdl_module
   use ramses_commons, only: pst_t
   use mdl_parameters
-#if defined(_CUDA) && defined(TURB)
-  use gpu_runner, only: gpu_drive_turb
-#endif
   implicit none
   type(pst_t)::pst
   integer,VALUE::input_size
@@ -24,7 +21,8 @@ recursive subroutine r_drive_turb(pst,ilevel,input_size)
      call mdl_get_reply(pst%s%mdl,rID,0)
   else
 #if defined(_CUDA) && defined(TURB)
-     call gpu_drive_turb(pst%s,ilevel)
+     ! GPU: driving is fused into the source-term apply (gpu_turb_hydro /
+     ! turb_drive_apply_kernel); nothing to compute here. No per-cell fturb buffer.
 #else
      call drive_turb(pst%s%r,pst%s%g,pst%s%m,pst%s%turb,ilevel)
 #endif

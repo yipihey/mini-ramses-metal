@@ -157,6 +157,8 @@ module amr_commons
      ! Hydro solver parameters
      real(kind=8)::gamma=1.4d0
      real(kind=8)::courant_factor=0.5d0
+     logical::cfl_sqrt3=.false.         ! CFL signal speed: .true.=sqrt(3)*max(dir) (~1.25x faster,
+                                        ! GLM-MHD GPU only), .false.=conservative sum-over-dims (default)
      real(kind=8)::glm_ch_scale=0.25d0  ! GLM cleaning speed c_h multiplier. The textbook
                                         ! c_h=c_max over-drives the psi-B coupling (fpsi~c_h^2),
                                         ! over-dissipating small scales AND worsening div.B;
@@ -689,6 +691,9 @@ module amr_commons
   type mesh_t
      ! For GPU, is data on device
      logical::data_on_device=.false.
+     ! For GPU, was the base grid built directly on the device (skip the host->device
+     ! grid upload in r_set_grid_device; host m%grid is not populated).
+     logical::grid_on_device=.false.
 
      ! Level related arrays
      integer(kind=4),allocatable,dimension(:)::head      ! Starting index for each level

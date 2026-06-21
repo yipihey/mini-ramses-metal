@@ -16,7 +16,7 @@ module gpu_runner
   integer(kind=8), device, allocatable, dimension(:) :: key_off
   integer(kind=4), device, allocatable, dimension(:,:) :: box_ckey_min, box_ckey_max
   integer(kind=4), device, allocatable, dimension(:,:,:) :: bound_ckey_min, bound_ckey_max
-  real(kind=8), device, allocatable, dimension(:)::d_skip ! Coordinates of lower left corner of the box
+  real(kind=dp), device, allocatable, dimension(:)::d_skip ! lower-left box corner (fp32; no particles in these runs)
 
   !> Arrays to hold the grid on the device
   type(oct), device, allocatable, dimension(:) :: grid
@@ -24,8 +24,18 @@ module gpu_runner
   integer(kind=4), device, allocatable, dimension(:,:) :: nbor
   integer(kind=4), device, allocatable, target, dimension(:,:) :: flag1, flag2
 
-  !> Arrays to hold the hydro variables on the device
-  real(kind=dp), device, allocatable, dimension(:,:,:) :: uold, unew
+  !> Arrays to hold the hydro variables on the device.
+  !> Two STABLE device buffers own the memory (never reassigned after init); uold/unew are
+  !> swappable HANDLES every kernel/consumer references by name. Invariant: uold always points
+  !> at the buffer holding the current valid state. The per-step set_uold can then advance the
+  !> state by swapping the handles (free) instead of copying unew->uold (single-level path).
+  !> Folded cmpdt (single-level): the integrator reduces the CFL dt into dt_reduce as a byproduct
+  !> (reusing the primitives it already builds), and the NEXT step's integrator uses it (1-step
+  !> lag) -- eliminating the separate cmpdt pass. dt_lagged<0 means "not yet computed" (bootstrap).
+  real(kind=8), device :: dt_reduce(1)
+  real(kind=8) :: dt_lagged = -1.0d0
+  real(kind=dp), device, allocatable, target, dimension(:,:,:) :: ubuf_a, ubuf_b
+  real(kind=dp), device, pointer, dimension(:,:,:) :: uold, unew
 
   !> Arrays to hold the gravity variables on the device
   real(kind=dp), device, allocatable, dimension(:,:) :: phi, rho, nref, phi_old
@@ -38,11 +48,21 @@ module gpu_runner
   integer(kind=4), device, allocatable, dimension(:)   :: sortp
   integer(i8b),    device, allocatable, dimension(:)   :: idp
 #ifdef TURB
-  !> Turbulent acceleration fields on the device (TURB_GS^3 x NDIM), host-generated.
-  real(kind=8), device, allocatable, dimension(:,:,:,:) :: afield_last_d, afield_next_d, afield_now_d
-  !> Per-cell turbulent forcing on the device (mirrors host m%fturb).
-  real(kind=dp), device, allocatable, dimension(:,:,:) :: fturb
+  !> Turbulent acceleration fields on the device (TURB_GS^3 x NDIM). last/next are uploaded
+  !> from the fp64 host field; afield_now is the device-computed time blend, kept in fp32 --
+  !> the per-cell trilinear interp in turb_drive_apply_kernel reads it, and fp64 there is
+  !> wasted on the A6000 (1:64 FP64) for a smooth low-k forcing field.
+  ! Full fp32 driving field: host turb%afield_* are also fp32, so the H2D upload is a DIRECT
+  ! same-type copy (no real()-conversion temporary -> no async-temp race, the earlier NaN).
+  real(kind=4), device, allocatable, dimension(:,:,:,:) :: afield_last_d, afield_next_d
+  real(kind=4), device, allocatable, dimension(:,:,:,:) :: afield_now_d
+  !> Precomputed INIT==TURB forcing-mode constants on the device (<=32 modes), for the
+  !> GPU initial-condition kernel (turb_ic_kernel) that replaces the slow CPU Fourier IC.
+  real(kind=8), device, allocatable, dimension(:) :: mkx_d,mky_d,mkz_d,macx_d,macy_d,macz_d,mph_d
+  ! (The per-cell `fturb` buffer was removed: driving is interpolated in registers and
+  !  applied in the same kernel -- see turb_drive_apply_kernel / gpu_turb_hydro.)
 #endif
+
 
   !> Arrays to hold the star particle variables on the device
   real(kind=dp),   device, allocatable, dimension(:,:) :: star_xp, star_vp
@@ -101,6 +121,70 @@ contains
 
   include 'gpu_scan.cuf'
 
+  !> Allocate the two stable hydro buffers and associate the uold/unew handles. ALL pointer
+  !> machinery must live in this .cuf unit (a .f90 unit sets up the device pointer descriptor
+  !> incorrectly -> CUDA 716 at init). uold=>ubuf_a is the initial "current" buffer.
+  subroutine gpu_alloc_hydro_buffers(n)
+    integer, intent(in) :: n              ! m%ngridmax + m%ncachemax
+    allocate(ubuf_a(1:twotondim,1:nvar,1:n))
+    allocate(ubuf_b(1:twotondim,1:nvar,1:n))
+    uold => ubuf_a
+    unew => ubuf_b
+    uold = 0.0_dp
+    unew = 0.0_dp
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine gpu_alloc_hydro_buffers
+
+  ! Host<->device sync of the current hydro state, routed through this .cuf unit so no .f90
+  ! unit ever names the device pointer (a .f90 unit mis-sets the descriptor -> CUDA 716).
+  ! All three act on whichever buffer `uold` currently points at = the current valid state.
+  subroutine gpu_upload_uold(host_u)        ! H2D
+    real(kind=dp), intent(in) :: host_u(:,:,:)
+    uold = host_u
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine gpu_upload_uold
+
+  subroutine gpu_download_uold(host_u)      ! D2H
+    real(kind=dp), intent(out) :: host_u(:,:,:)
+    host_u = uold
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine gpu_download_uold
+
+  function gpu_uold_devptr(hd) result(p)    ! base device address (zero-copy chemistry)
+    integer, intent(in) :: hd
+    type(c_devptr) :: p
+    p = c_devloc(uold(1,1,hd))
+  end function gpu_uold_devptr
+
+#ifdef TURB
+  ! H2D of the fp32 driving snapshots, done in this .cuf unit (a .f90 unit mis-sizes the
+  ! real4 device array copy -> garbage/NaN; real8 happened to work).
+  subroutine gpu_upload_afield_init(hlast, hnext)
+    real(kind=4), intent(in) :: hlast(:,:,:,:), hnext(:,:,:,:)
+    afield_last_d = hlast
+    afield_next_d = hnext
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine gpu_upload_afield_init
+
+  subroutine gpu_upload_afield_next(hnext)
+    real(kind=4), intent(in) :: hnext(:,:,:,:)
+    afield_last_d = afield_next_d        ! device-to-device rotate
+    afield_next_d = hnext                ! H2D of the new 'next'
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine gpu_upload_afield_next
+#endif
+
+  ! H2D of the fp32 box-corner d_skip via this .cuf unit (fp64 m%skip -> fp32 staging on the
+  ! host, then a direct same-type copy -- a .f90 real4 device-array copy mis-sizes).
+  subroutine gpu_upload_d_skip(hskip)
+    real(kind=8), intent(in) :: hskip(:)
+    real(kind=dp) :: tmp(1:size(hskip))
+    tmp = real(hskip, kind=dp)
+    d_skip = tmp
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine gpu_upload_d_skip
+
+
   !> @brief
   !> Compute the new time step on a GPU
   !>
@@ -126,6 +210,18 @@ contains
     real(kind=8), device, dimension(5) :: d_data !mass, ekin, eint, emag, dt
     real(kind=8), dimension(5) :: h_data
 
+#ifdef GLMMHD
+    ! Folded cmpdt (single-level): the integrator already reduced the CFL dt last step. Return
+    ! that (1-step lag) and skip the separate cmpdt pass entirely. dt_lagged<0 = first step
+    ! (bootstrap): fall through to one synchronous cmpdt so step 0 has a real dt; the integrator
+    ! then takes over. (Conservation diagnostics are not computed on the folded path.)
+    if (sim%r%levelmin == sim%r%nlevelmax .and. sim%r%static_mesh .and. dt_lagged > 0.0d0) then
+       dt = dt_lagged
+       mass = 0d0; ekin = 0d0; eint = 0d0; emag = 0d0
+       return
+    end if
+#endif
+
     courant_factor = sim%r%courant_factor
     gamma = sim%r%gamma
     smallr = sim%r%smallr
@@ -145,7 +241,7 @@ contains
 #ifdef GLMMHD
     call cmpdt_kernel_mhd<<<num_blocks, num_threads>>>(grid, uold, f, &
         & constant_gravity, head_idx, num_octs, d_data, dx, gamma, &
-        & smallr, smallc2, courant_factor)
+        & smallr, smallc2, courant_factor, sim%r%cfl_sqrt3)
 #else
     call cmpdt_kernel<<<num_blocks, num_threads>>>(grid, uold, f, &
         & constant_gravity, head_idx, num_octs, d_data, dx, gamma, &
@@ -156,12 +252,7 @@ contains
     ! move results to host
     h_data(:) = d_data(:)
 
-    mass = h_data(1)
-    ekin = h_data(2)
-    eint = h_data(3)
-    emag = h_data(4)
-    dt = h_data(5)
-
+    mass = h_data(1); ekin = h_data(2); eint = h_data(3); emag = h_data(4); dt = h_data(5)
     call GPU_Error_Check(__FILE__, __LINE__)
 
   end subroutine gpu_cmpdt
@@ -176,35 +267,35 @@ contains
   subroutine gpu_set_uold(sim, ilevel)
     use nvtx
     use hydro_device, only: set_uold_kernel
-#ifdef GLMMHD
-    use hydro_device, only: glm_damp_psi_kernel
-#endif
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout)::sim
     integer, intent(in)::ilevel
 
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
-#ifdef GLMMHD
-    real(dp) :: ch, dt, dx, divb_len
-#endif
 
     head_idx = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
     threadsX_per_block = 8
     threadsY_per_block = 16
     num_blocks = (num_octs + threadsY_per_block - 1) / threadsY_per_block
+
     call nvtxStartRange("GPU Set_uold", color=0)!green
-    call set_uold_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, unew, head_idx, num_octs)
-#ifdef GLMMHD
-    ! Operator-split GLM parabolic damping of psi (after uold <- unew).
-    dt = sim%g%dtnew(ilevel)
-    dx = sim%r%boxlen/2**ilevel
-    ch = sim%r%courant_factor*dx/dt/real(ndim,dp)*sim%r%glm_ch_scale
-    divb_len = sim%r%boxlen
-    call glm_damp_psi_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, head_idx, num_octs, ch, dt, divb_len, real(sim%r%glm_cp_coef,kind=dp))
-#endif
-    call GPU_Error_Check(__FILE__, __LINE__)
+    if (sim%r%levelmin == sim%r%nlevelmax .and. sim%r%static_mesh) then
+       ! Single-level static mesh: the integrator wrote the full updated state into unew
+       ! (incl. the GLM psi-damp), so advancing the state is a free pointer swap of the
+       ! handles -- uold then names the new state. The two underlying buffers never move,
+       ! so no descriptor kernels see goes stale; set_unew re-seeds unew from uold next step.
+       block
+         real(kind=dp), device, pointer, dimension(:,:,:) :: tmp
+         tmp => uold; uold => unew; unew => tmp
+       end block
+    else
+       ! AMR / cosmo / non-static: keep the copy (the global buffers span all levels, so a
+       ! per-level swap would desync; uold stays the canonical current buffer).
+       call set_uold_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, unew, head_idx, num_octs)
+       call GPU_Error_Check(__FILE__, __LINE__)
+    end if
     call nvtxEndRange()
 
   end subroutine gpu_set_uold
@@ -225,6 +316,13 @@ contains
 
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
+
+#ifdef GLMMHD
+    ! Single-level static: the GLM integrator base-writes unew = uold + flux (each cell once),
+    ! so the unew<-uold seed is unnecessary. Skip it (matches gpu_godunov's base_write gate).
+    ! Guarded to GLMMHD: only that integrator path implements base_write.
+    if (sim%r%levelmin == sim%r%nlevelmax .and. sim%r%static_mesh) return
+#endif
 
     head_idx = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
@@ -312,6 +410,45 @@ contains
   end subroutine gpu_grav_hydro
 
   !> @brief
+  !> Build the uniform single-level base grid directly on the device (replaces the serial
+  !> CPU Hilbert walk in r_init_refine_basegrid). Sets the host oct-count metadata from the
+  !> box dimensions, launches build_basegrid_kernel to fill the device `grid` (ckey, hkey,
+  !> lev, refined, superoct=1), and flags grid_on_device so r_set_grid_device skips the
+  !> host->device grid upload. Valid only for GPU-resident static single-level runs where
+  !> the IC is also on the device (host m%grid / CPU hash are NOT built).
+  subroutine gpu_build_basegrid(sim)
+    use nvtx
+    use refine_device, only: build_basegrid_kernel
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout)::sim
+    integer :: lev, nthreads, nblocks
+    integer(kind=4) :: bxmin, bymin, bzmin, nbx, nby, nbz, num_octs
+
+    lev   = sim%r%levelmin
+    bxmin = sim%m%box_ckey_min(1,lev); bymin = sim%m%box_ckey_min(2,lev); bzmin = sim%m%box_ckey_min(3,lev)
+    nbx   = sim%m%box_ckey_max(1,lev) - bxmin
+    nby   = sim%m%box_ckey_max(2,lev) - bymin
+    nbz   = sim%m%box_ckey_max(3,lev) - bzmin
+    num_octs = nbx*nby*nbz
+
+    ! Host metadata (mirrors the CPU build's accumulation; r_noct_tot reads m%noct).
+    sim%m%head(lev)   = 1
+    sim%m%tail(lev)   = num_octs
+    sim%m%noct(lev)   = num_octs
+    sim%m%noct_used   = num_octs
+    sim%m%ifree       = num_octs + 1
+    sim%m%grid_on_device = .true.
+
+    nthreads = 256
+    nblocks  = (num_octs + nthreads - 1)/nthreads
+    call nvtxStartRange("GPU build basegrid", color=2)
+    call build_basegrid_kernel<<<nblocks, nthreads>>>(grid, bxmin, bymin, bzmin, nbx, nby, lev, num_octs)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    call nvtxEndRange()
+
+  end subroutine gpu_build_basegrid
+
+  !> @brief
   !> Perform the hydro integration on a GPU
   !>
   !> @detail
@@ -335,8 +472,13 @@ contains
     !
     integer(kind=4) :: head_idx, num_subgrids
     integer :: threads_per_block, num_blocks
-    real(dp) :: dt, dx, gamma, smallr, smallc2, ch
+    real(dp) :: dt, dx, gamma, smallr, smallc2, ch, switch_llf_dmin, switch_llf_pmin
     integer :: slope, riemann
+#ifdef GLMMHD
+    real(dp) :: glm_fac, cp_coef, cp2   ! uniform GLM psi-damping factor, applied in-integrator
+    logical :: base_write               ! single-level: integrator writes uold+flux (no set_unew)
+    logical :: do_turb                  ! fuse the turbulent driving into the integrator write-back
+#endif
 
     if(sim%r%verbose.and.sim%g%myid==1)write(*,'("   Entering gpu_godunov for level ",I2)')ilevel
 
@@ -347,6 +489,8 @@ contains
     smallc2 = sim%r%smallc**2
     slope = sim%r%slope_type
     riemann = sim%r%riemann
+    switch_llf_dmin = sim%r%switch_llf_dmin
+    switch_llf_pmin = sim%r%switch_llf_pmin
 
     head_idx = (sim%m%head(ilevel) - 1) / nsubgridtondim + 1
     num_subgrids = sim%m%noct(ilevel) / nsubgridtondim
@@ -358,18 +502,50 @@ contains
     if(nsubgrid == 2)threads_per_block = 256
     ! Dedner cleaning speed = max signal speed implied by the CFL condition.
     ch = sim%r%courant_factor*dx/dt/real(ndim,dp)*sim%r%glm_ch_scale
+    ! Operator-split GLM parabolic psi-damping, folded into the integrator's unew(9) write
+    ! (was a separate glm_damp_psi_kernel / fused into set_uold). Uniform per-step scalar;
+    ! 1.0 disables damping (cp_coef<=0). Commutes with gravity/source (they don't touch psi).
+    glm_fac = 1.0_dp
+    cp_coef = real(sim%r%glm_cp_coef, kind=dp)
+    if (cp_coef > 0.0_dp) then
+       cp2 = cp_coef*sim%r%boxlen*ch
+       glm_fac = exp(-(ch*ch/cp2)*dt)
+    end if
+    ! Single-level static: write unew = uold + flux directly (each cell once, no coarse-fine
+    ! reflux), so the separate set_unew (unew<-uold) seed pass can be skipped (gpu_set_unew).
+    base_write = (sim%r%levelmin == sim%r%nlevelmax .and. sim%r%static_mesh)
+    ! Fuse the turbulent driving into the integrator write-back on the single-level turb path
+    ! (replaces the separate gpu_turb_hydro / turb_drive_apply pass).
+    do_turb = (base_write .and. sim%r%turb)
+    ! Folded cmpdt: seed the global min-dt with a large value; the integrator atomicmins into it.
+    if (base_write) dt_reduce(1) = sim%r%courant_factor*dx/sim%r%smallc
     if (slope == 10) then
        call mhd_integrator_kernel_ppm<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
             & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
-            & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
+            & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, switch_llf_dmin, switch_llf_pmin, constant_gravity, glm_fac, base_write, &
+            & real(sim%r%courant_factor,kind=dp), dt_reduce, sim%r%cfl_sqrt3 &
+#ifdef TURB
+            & , afield_now_d, d_skip, real(sim%r%boxlen,kind=dp), real(sim%r%turb_min_rho,kind=dp), do_turb &
+#endif
+            & )
     else if (slope == 11) then
        call mhd_integrator_kernel_par<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
             & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
-            & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
+            & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, switch_llf_dmin, switch_llf_pmin, constant_gravity, glm_fac, base_write, &
+            & real(sim%r%courant_factor,kind=dp), dt_reduce, sim%r%cfl_sqrt3 &
+#ifdef TURB
+            & , afield_now_d, d_skip, real(sim%r%boxlen,kind=dp), real(sim%r%turb_min_rho,kind=dp), do_turb &
+#endif
+            & )
     else
        call mhd_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
             & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
-            & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
+            & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, switch_llf_dmin, switch_llf_pmin, constant_gravity, glm_fac, base_write, &
+            & real(sim%r%courant_factor,kind=dp), dt_reduce, sim%r%cfl_sqrt3 &
+#ifdef TURB
+            & , afield_now_d, d_skip, real(sim%r%boxlen,kind=dp), real(sim%r%turb_min_rho,kind=dp), do_turb &
+#endif
+            & )
     end if
 #elif defined(PAPER)
     threads_per_block = (2*nsubgrid + 4)**2
@@ -385,6 +561,11 @@ contains
          & gamma, smallr, smallc2, dt, dx, slope, riemann, constant_gravity)
 #endif
     call GPU_Error_Check(__FILE__, __LINE__)
+#ifdef GLMMHD
+    ! Harvest the folded-cmpdt min dt (computed by the integrator just synced above) for the
+    ! NEXT step's dt (1-step lag). gpu_cmpdt returns this instead of running a separate pass.
+    if (base_write) dt_lagged = dt_reduce(1)
+#endif
     call nvtxEndRange()
 
   end subroutine gpu_godunov
@@ -2528,22 +2709,36 @@ contains
   end subroutine gpu_turb_interp
 
   !> @brief
-  !> Compute the turbulent driving force on a level, filling fturb.
+  !> @brief
+  !> Apply the turbulent driving as a fused source term on a level: interpolate the
+  !> driving acceleration in registers and kick uold in one kernel (the old two-pass
+  !> gpu_drive_turb + gpu_turb_hydro with the per-cell `fturb` buffer is gone). Called
+  !> at the apply point in amr_step; afield_now_d is current for the step.
   !>
   !> @param[in] sim : The simulation object
-  !> @param[in] ilevel : The refinement level to drive
+  !> @param[in] ilevel : The refinement level to update
+  !> @param[in] dteff : The effective time step
   !>
-  subroutine gpu_drive_turb(sim, ilevel)
+  subroutine gpu_turb_hydro(sim, ilevel, dteff)
     use nvtx
-    use turb_device, only: turb_drive_kernel
+    use turb_device, only: turb_drive_apply_kernel
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout)::sim
     integer, intent(in)::ilevel
+    real(kind=8)::dteff
 
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
-    real(kind=dp) :: dx, boxlen, turb_min_rho
+    real(kind=dp) :: smallr, smallc, dx, boxlen, turb_min_rho
 
+#ifdef GLMMHD
+    ! Single-level static: the forcing is fused into the integrator write-back (gpu_godunov,
+    ! do_turb), so the separate driving pass is skipped here to avoid double-applying.
+    if (sim%r%levelmin == sim%r%nlevelmax .and. sim%r%static_mesh) return
+#endif
+
+    smallr = sim%r%smallr
+    smallc = sim%r%smallc
     dx = sim%r%boxlen/2**ilevel
     boxlen = sim%r%boxlen
     turb_min_rho = sim%r%turb_min_rho
@@ -2555,49 +2750,87 @@ contains
     threadsY_per_block = 16
     num_blocks = (num_octs + threadsY_per_block - 1)/threadsY_per_block
 
-    call nvtxStartRange("GPU drive_turb", color=0)!green
-    call turb_drive_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(grid, uold, &
-         & fturb, afield_now_d, d_skip, head_idx, num_octs, dx, boxlen, turb_min_rho)
-    call GPU_Error_Check(__FILE__, __LINE__)
-    call nvtxEndRange()
-
-  end subroutine gpu_drive_turb
-
-  !> @brief
-  !> Apply the turbulent source term to uold on a level.
-  !>
-  !> @param[in] sim : The simulation object
-  !> @param[in] ilevel : The refinement level to update
-  !> @param[in] dteff : The effective time step
-  !>
-  subroutine gpu_turb_hydro(sim, ilevel, dteff)
-    use nvtx
-    use turb_device, only: turb_hydro_kernel
-    use ramses_commons, only: ramses_t
-    type(ramses_t), intent(inout)::sim
-    integer, intent(in)::ilevel
-    real(kind=8)::dteff
-
-    integer(kind=4) :: head_idx, num_octs
-    integer :: threadsX_per_block, threadsY_per_block, num_blocks
-    real(kind=dp) :: smallr, smallc
-
-    smallr = sim%r%smallr
-    smallc = sim%r%smallc
-
-    head_idx = sim%m%head(ilevel)
-    num_octs = sim%m%noct(ilevel)
-    if (num_octs == 0) return
-    threadsX_per_block = twotondim
-    threadsY_per_block = 16
-    num_blocks = (num_octs + threadsY_per_block - 1)/threadsY_per_block
-
-    call nvtxStartRange("GPU turb_hydro", color=0)!green
-    call turb_hydro_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, fturb, &
-         & head_idx, num_octs, smallr, smallc, dteff)
+    call nvtxStartRange("GPU turb_drive_apply", color=0)!green
+    call turb_drive_apply_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(grid, uold, &
+         & afield_now_d, d_skip, head_idx, num_octs, dx, boxlen, turb_min_rho, smallr, smallc, dteff)
     call GPU_Error_Check(__FILE__, __LINE__)
     call nvtxEndRange()
 
   end subroutine gpu_turb_hydro
+
+  !> @brief
+  !> GPU initial condition for INIT==TURB driven turbulence. Precomputes the (cell-
+  !> independent) forcing-mode constants on the host -- identical to condinit's
+  !> INIT==TURB block -- uploads them, and launches turb_ic_kernel to fill the device
+  !> uold directly. Replaces the per-cell CPU Fourier synthesis (the init bottleneck).
+  !> Octs are enumerated EXACTLY like the device hash insert: [head_idx, head_idx+num_octs),
+  !> with the kernel skipping non-grid slots (lev<=0). Called from r_set_grid_device with
+  !> head_idx=1, num_octs=ifree-1.
+  subroutine gpu_init_flow_turb(sim, head_idx, num_octs)
+    use nvtx
+    use turb_device, only: turb_ic_kernel
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout)::sim
+    integer(kind=4), intent(in)::head_idx, num_octs
+
+    integer :: tx, ty, num_blocks, nx, ny, nz, kk, nmode, im, ilevel
+    real(kind=8) :: cs, rho0, p0, b0, norm, sumsq, gamma, boxsize, dx, twopi
+    real(kind=8) :: ax, ay, az, cx, cy, cz, amp, hp
+    real(kind=8),dimension(1:32) :: mkx_h, mky_h, mkz_h, macx_h, macy_h, macz_h, mph_h
+    integer,dimension(1:32) :: mkk
+
+    if (num_octs <= 0) return
+    ilevel  = sim%r%levelmin
+    gamma   = sim%r%gamma
+    dx      = sim%r%boxlen/2**ilevel
+    boxsize = sim%r%box_size(1)
+    twopi   = 2.0d0*acos(-1.0d0)
+    rho0 = 1.0d0; cs = 1.0d0
+    p0 = rho0*cs*cs/gamma
+    b0 = cs*sqrt(rho0)
+
+    ! Precompute the forcing modes (identical to condinit INIT==TURB).
+    sumsq=0.0d0; nmode=0
+    do nx=-2,2
+     do ny=-2,2
+      do nz=-2,2
+       kk=nx*nx+ny*ny+nz*nz
+       if(kk<1.or.kk>4)cycle
+       if(.not.(nz>0.or.(nz==0.and.ny>0).or.(nz==0.and.ny==0.and.nx>0)))cycle
+       hp=dble(100*nx+17*ny+3*nz+211)
+       ax=2.0d0*(sin(hp+1.0d0)*43758.5453d0-floor(sin(hp+1.0d0)*43758.5453d0))-1.0d0
+       ay=2.0d0*(sin(hp+2.0d0)*43758.5453d0-floor(sin(hp+2.0d0)*43758.5453d0))-1.0d0
+       az=2.0d0*(sin(hp+3.0d0)*43758.5453d0-floor(sin(hp+3.0d0)*43758.5453d0))-1.0d0
+       cx=dble(ny)*az-dble(nz)*ay; cy=dble(nz)*ax-dble(nx)*az; cz=dble(nx)*ay-dble(ny)*ax
+       amp=1.0d0/sqrt(dble(kk))
+       sumsq=sumsq+amp*amp*(cx*cx+cy*cy+cz*cz)*0.5d0
+       nmode=nmode+1; mkk(nmode)=kk
+       mkx_h(nmode)=dble(nx); mky_h(nmode)=dble(ny); mkz_h(nmode)=dble(nz)
+       macx_h(nmode)=cx; macy_h(nmode)=cy; macz_h(nmode)=cz
+       mph_h(nmode)=twopi*(sin(hp+4.0d0)*43758.5453d0-floor(sin(hp+4.0d0)*43758.5453d0))
+      enddo
+     enddo
+    enddo
+    norm=cs/sqrt(sumsq)
+    do im=1,nmode
+       amp=norm/sqrt(dble(mkk(im)))
+       macx_h(im)=amp*macx_h(im); macy_h(im)=amp*macy_h(im); macz_h(im)=amp*macz_h(im)
+    enddo
+
+    if(.not.allocated(mkx_d)) allocate(mkx_d(32),mky_d(32),mkz_d(32),macx_d(32),macy_d(32),macz_d(32),mph_d(32))
+    mkx_d(1:nmode)=mkx_h(1:nmode); mky_d(1:nmode)=mky_h(1:nmode); mkz_d(1:nmode)=mkz_h(1:nmode)
+    macx_d(1:nmode)=macx_h(1:nmode); macy_d(1:nmode)=macy_h(1:nmode); macz_d(1:nmode)=macz_h(1:nmode)
+    mph_d(1:nmode)=mph_h(1:nmode)
+
+    tx = twotondim; ty = 16
+    num_blocks = (num_octs + ty - 1)/ty
+    call nvtxStartRange("GPU turb IC", color=2)
+    call turb_ic_kernel<<<num_blocks, dim3(tx,ty,1)>>>(grid, uold, mkx_d, mky_d, mkz_d, &
+         & macx_d, macy_d, macz_d, mph_d, nmode, rho0, p0, b0, gamma, dx, boxsize, &
+         & sim%m%skip(1), sim%m%skip(2), sim%m%skip(3), head_idx, num_octs)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    call nvtxEndRange()
+
+  end subroutine gpu_init_flow_turb
 #endif
 end module gpu_runner

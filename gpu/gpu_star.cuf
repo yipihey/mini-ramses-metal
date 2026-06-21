@@ -237,7 +237,7 @@ attributes(global) subroutine star_formation_kernel(grid, uold, f, flag1, swap_l
   real(kind=dp), device :: star_mp(*), star_tp(*), star_zp(*)
   integer(kind=4), device :: star_levelp(*)
   integer(i8b), device :: star_idp(*)
-  real(kind=8), device :: d_skip(1:3)
+  real(kind=dp), device :: d_skip(1:3)
 
   integer(kind=8), intent(in), value :: leading
   integer(kind=4), intent(in), value :: head_idx, num_star

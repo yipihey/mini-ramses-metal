@@ -4,6 +4,9 @@ module hydro_device
   use oct_commons, only: oct
   use gpu_utils
   use cudafor
+#ifdef TURB
+  use turb_commons, only: TURB_GS, turb_gs_real   ! for the fused turbulent driving (base_write)
+#endif
   implicit none
 
   !> @brief
@@ -247,7 +250,7 @@ contains
     slope_central = 0.5 * (slope_left + slope_right)
 
     ! Slope type factor, 0: 1st order, 1: minmod, 2: moncen
-    factor = real(slope, kind=8) 
+    factor = real(slope, kind=dp)
 
     if (slope_left*slope_right <= 0.0_dp) then
        slope_moncen = 0.0_dp
@@ -515,7 +518,7 @@ contains
     ptotstar = (rcr*ptotl+rcl*ptotr+rcl*rcr*(ul-ur))/(rcr+rcl)
     ! Left star
     rstarl = rl*(SL-ul)/(SL-ustar); estar = rl*(SL-ul)*(SL-ustar)-A*A; el = rl*(SL-ul)*(SL-ul)-A*A
-    if (abs(estar) < 1d-4*A*A) then
+    if (abs(estar) < 1e-4_dp*A*A) then
        vstarl=vl; bstarl=bl; wstarl=wl; cstarl=cl
     else
        vstarl=vl-A*bl*(ustar-ul)/estar; bstarl=bl*el/estar
@@ -526,7 +529,7 @@ contains
     sqrrstarl  = sqrt(rstarl); calfvenl = abs(A)/sqrrstarl; SAL = ustar-calfvenl
     ! Right star
     rstarr = rr*(SR-ur)/(SR-ustar); estar = rr*(SR-ur)*(SR-ustar)-A*A; er = rr*(SR-ur)*(SR-ur)-A*A
-    if (abs(estar) < 1d-4*A*A) then
+    if (abs(estar) < 1e-4_dp*A*A) then
        vstarr=vr; bstarr=br; wstarr=wr; cstarr=cr
     else
        vstarr=vr-A*br*(ustar-ur)/estar; bstarr=br*er/estar
@@ -2241,12 +2244,27 @@ contains
   end function mhd_flux_glm
 
   !> MHD Riemann dispatch (LLF / HLL / HLLD), all GLM-cleaned at speed ch.
-  attributes(device) function mhd_riemann_fluxes(L, R, gamma, smallr, smallc2, ch, riemann) result(flux)
+  attributes(device) function mhd_riemann_fluxes(L, R, gamma, smallr, smallc2, ch, riemann, &
+       & switch_llf_dmin, switch_llf_pmin) result(flux)
     type(mhd_primitive_t), intent(in) :: L, R
-    real(kind=dp), value :: gamma, smallr, smallc2, ch
+    real(kind=dp), value :: gamma, smallr, smallc2, ch, switch_llf_dmin, switch_llf_pmin
     integer, value :: riemann
     type(mhd_conserved_t) :: flux
-    if (riemann .eq. solver_hll) then
+    logical :: use_llf
+    real(kind=dp) :: rmin, pmin
+    ! Per-cell robustification: in strongly supersonic flow the HLLD/HLL star
+    ! states go non-positive in deep voids / strong rarefactions and NaN the run.
+    ! Where either input state is below a (namelist) density/pressure floor, fall
+    ! back to the positivity-friendly LLF flux for THIS face only. Both thresholds
+    ! default <=0 (disabled), so this is a no-op unless explicitly switched on.
+    use_llf = .false.
+    rmin = min(L%density, R%density)
+    pmin = min(L%pressure, R%pressure)
+    if (switch_llf_dmin > 0.0_dp .and. rmin < switch_llf_dmin) use_llf = .true.
+    if (switch_llf_pmin > 0.0_dp .and. pmin < switch_llf_pmin) use_llf = .true.
+    if (use_llf) then
+       flux = llf_mhd_fluxes(L, R, gamma, smallr, smallc2, ch)
+    else if (riemann .eq. solver_hll) then
        flux = hll_mhd_fluxes(L, R, gamma, smallr, smallc2, ch)
     else if (riemann .eq. solver_hlld) then
        flux = hlld_mhd_fluxes(L, R, gamma, smallr, smallc2, ch)
@@ -2258,7 +2276,8 @@ contains
 
   ! ----- gather: conserved -> primitive into the 6^3 shared subgrid -----------
   attributes(device) subroutine subgrid_conserved_2_primitive_mhd(grid, uold, f, constant_gravity, nbor, &
-       & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
+       & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid, &
+       & dx, courant_factor, dt_out, do_dt, cfl_sqrt3)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
@@ -2267,10 +2286,19 @@ contains
     integer(kind=4), value :: head_idx, block_idx, thread_idx
     real(kind=dp), value :: gamma, smallr, smallc2, dt
     type(subgrid_6x6x6cell_mhd), intent(inout) :: local_subgrid
+    real(kind=dp), value :: dx, courant_factor      ! folded cmpdt (lagged dt): CFL from ls
+    real(kind=8), device :: dt_out(*)               ! global min-dt accumulator (atomicmin)
+    logical, value :: do_dt                         ! only fold dt on the single-level path
+    logical, value :: cfl_sqrt3                     ! CFL aggregation: T=sqrt(3)*max, F=sum-over-dims
     type(mhd_conserved_t) :: c
     type(mhd_primitive_t) :: p
     integer :: work_idx, ind_nbor, i, j, k, i_s, j_s, k_s, cell_idx, source_idx, subgrid_idx, work_size, s
+    integer :: info, owned_lo, owned_hi
+    real(kind=dp) :: ctot, grav, dtl
+    real(kind=8) :: dt_min
     work_size = 2*nsubgrid+4
+    dt_min = huge(0d0)
+    owned_lo = 2; owned_hi = 2*nsubgrid+1   ! inner (owned) cells of the loaded region
     do work_idx = thread_idx, work_size**3 - 1, blockDim%x
        call index_1Dto3D(work_idx/8, work_size/2, work_size/2, i_s, j_s, k_s)
        subgrid_idx = head_idx + block_idx
@@ -2289,6 +2317,31 @@ contains
        c%bz         = uold(cell_idx, 8, source_idx)
        c%psi        = uold(cell_idx, 9, source_idx)
        p = mhd_conserved_2_primitive(c, gamma, smallr, smallc2)
+       ! Folded cmpdt: CFL dt for owned (inner) leaf cells, from the primitive we just built
+       ! (no extra uold load). Reduced to a global min -> next step's dt (1-step lag).
+       if (do_dt) then
+          if ( i>=owned_lo .and. i<=owned_hi .and. j>=owned_lo .and. j<=owned_hi .and. &
+             & k>=owned_lo .and. k<=owned_hi .and. .not. grid(source_idx)%refined(cell_idx) ) then
+             ! CFL signal speed: sqrt(3)*max(directional) [cfl_sqrt3, ~1.25x faster] or sum-over-dims [default].
+             if (cfl_sqrt3) then
+                ctot = sqrt(3.0_dp)*max(abs(p%velocity_x)+mhd_fast_speed_n(p,gamma,p%bx), &
+                     & max(abs(p%velocity_y)+mhd_fast_speed_n(p,gamma,p%by), &
+                     &     abs(p%velocity_z)+mhd_fast_speed_n(p,gamma,p%bz)))
+             else
+                ctot = (abs(p%velocity_x)+mhd_fast_speed_n(p,gamma,p%bx)) &
+                     & + (abs(p%velocity_y)+mhd_fast_speed_n(p,gamma,p%by)) &
+                     & + (abs(p%velocity_z)+mhd_fast_speed_n(p,gamma,p%bz))
+             end if
+#ifdef GRAV
+             grav = abs(f(cell_idx,1,source_idx))+abs(f(cell_idx,2,source_idx))+abs(f(cell_idx,3,source_idx))
+#else
+             grav = abs(constant_gravity(1))+abs(constant_gravity(2))+abs(constant_gravity(3))
+#endif
+             grav = max(grav*dx/ctot**2, 0.0001_dp)
+             dtl = dx/ctot*(sqrt(1.0_dp+2.0_dp*courant_factor*grav)-1.0_dp)/grav
+             dt_min = min(dt_min, real(dtl, kind=8))
+          end if
+       end if
 #ifdef GRAV
        p%velocity_x = p%velocity_x + f(cell_idx, 1, source_idx)*0.5_dp*dt
        p%velocity_y = p%velocity_y + f(cell_idx, 2, source_idx)*0.5_dp*dt
@@ -2310,6 +2363,11 @@ contains
        end do
 #endif
     end do
+    ! reduce the per-thread min dt across the block, atomicmin into the global accumulator
+    if (do_dt) then
+       dt_min = block_reduce_min(dt_min)
+       if (thread_idx == 0) info = atomicmin(dt_out(1), dt_min)
+    end if
     call syncthreads()
   end subroutine subgrid_conserved_2_primitive_mhd
 
@@ -2822,12 +2880,12 @@ contains
 
   ! ----- MHD Riemann driver: rotate B with v, solve, un-rotate, store flux ----
   attributes(device) subroutine riemann_driver_mhd(lx, rx, ly, ry, lz, rz, thread_idx, &
-       & gamma, smallr, smallc2, ch, riemann)
+       & gamma, smallr, smallc2, ch, riemann, switch_llf_dmin, switch_llf_pmin)
     type(subgrid_3x2x2cell_mhd), intent(inout) :: lx, rx
     type(subgrid_2x3x2cell_mhd), intent(inout) :: ly, ry
     type(subgrid_2x2x3cell_mhd), intent(inout) :: lz, rz
     integer, value :: thread_idx, riemann
-    real(kind=dp), value :: gamma, smallr, smallc2, ch
+    real(kind=dp), value :: gamma, smallr, smallc2, ch, switch_llf_dmin, switch_llf_pmin
     integer :: work_idx, n, i, j, k, dir
     type(mhd_primitive_t) :: L, R
     type(mhd_conserved_t) :: flux
@@ -2839,7 +2897,7 @@ contains
           L%velocity_z=lx%velocity_z(i,j,k); L%pressure=lx%pressure(i,j,k); L%bx=lx%bx(i,j,k); L%by=lx%by(i,j,k); L%bz=lx%bz(i,j,k); L%psi=lx%psi(i,j,k)
           R%density=rx%density(i,j,k); R%velocity_x=rx%velocity_x(i,j,k); R%velocity_y=rx%velocity_y(i,j,k)
           R%velocity_z=rx%velocity_z(i,j,k); R%pressure=rx%pressure(i,j,k); R%bx=rx%bx(i,j,k); R%by=rx%by(i,j,k); R%bz=rx%bz(i,j,k); R%psi=rx%psi(i,j,k)
-          flux = mhd_rot_flux_from(mhd_riemann_fluxes(mhd_rot_to(L,dir), mhd_rot_to(R,dir), gamma, smallr, smallc2, ch, riemann), dir)
+          flux = mhd_rot_flux_from(mhd_riemann_fluxes(mhd_rot_to(L,dir), mhd_rot_to(R,dir), gamma, smallr, smallc2, ch, riemann, switch_llf_dmin, switch_llf_pmin), dir)
           lx%density(i,j,k)=flux%density; lx%velocity_x(i,j,k)=flux%momentum_x; lx%velocity_y(i,j,k)=flux%momentum_y
           lx%velocity_z(i,j,k)=flux%momentum_z; lx%pressure(i,j,k)=flux%energy; lx%bx(i,j,k)=flux%bx; lx%by(i,j,k)=flux%by; lx%bz(i,j,k)=flux%bz; lx%psi(i,j,k)=flux%psi
        else if (work_idx < 2*n) then
@@ -2848,7 +2906,7 @@ contains
           L%velocity_z=ly%velocity_z(i,j,k); L%pressure=ly%pressure(i,j,k); L%bx=ly%bx(i,j,k); L%by=ly%by(i,j,k); L%bz=ly%bz(i,j,k); L%psi=ly%psi(i,j,k)
           R%density=ry%density(i,j,k); R%velocity_x=ry%velocity_x(i,j,k); R%velocity_y=ry%velocity_y(i,j,k)
           R%velocity_z=ry%velocity_z(i,j,k); R%pressure=ry%pressure(i,j,k); R%bx=ry%bx(i,j,k); R%by=ry%by(i,j,k); R%bz=ry%bz(i,j,k); R%psi=ry%psi(i,j,k)
-          flux = mhd_rot_flux_from(mhd_riemann_fluxes(mhd_rot_to(L,dir), mhd_rot_to(R,dir), gamma, smallr, smallc2, ch, riemann), dir)
+          flux = mhd_rot_flux_from(mhd_riemann_fluxes(mhd_rot_to(L,dir), mhd_rot_to(R,dir), gamma, smallr, smallc2, ch, riemann, switch_llf_dmin, switch_llf_pmin), dir)
           ly%density(i,j,k)=flux%density; ly%velocity_x(i,j,k)=flux%momentum_x; ly%velocity_y(i,j,k)=flux%momentum_y
           ly%velocity_z(i,j,k)=flux%momentum_z; ly%pressure(i,j,k)=flux%energy; ly%bx(i,j,k)=flux%bx; ly%by(i,j,k)=flux%by; ly%bz(i,j,k)=flux%bz; ly%psi(i,j,k)=flux%psi
        else
@@ -2857,7 +2915,7 @@ contains
           L%velocity_z=lz%velocity_z(i,j,k); L%pressure=lz%pressure(i,j,k); L%bx=lz%bx(i,j,k); L%by=lz%by(i,j,k); L%bz=lz%bz(i,j,k); L%psi=lz%psi(i,j,k)
           R%density=rz%density(i,j,k); R%velocity_x=rz%velocity_x(i,j,k); R%velocity_y=rz%velocity_y(i,j,k)
           R%velocity_z=rz%velocity_z(i,j,k); R%pressure=rz%pressure(i,j,k); R%bx=rz%bx(i,j,k); R%by=rz%by(i,j,k); R%bz=rz%bz(i,j,k); R%psi=rz%psi(i,j,k)
-          flux = mhd_rot_flux_from(mhd_riemann_fluxes(mhd_rot_to(L,dir), mhd_rot_to(R,dir), gamma, smallr, smallc2, ch, riemann), dir)
+          flux = mhd_rot_flux_from(mhd_riemann_fluxes(mhd_rot_to(L,dir), mhd_rot_to(R,dir), gamma, smallr, smallc2, ch, riemann, switch_llf_dmin, switch_llf_pmin), dir)
           lz%density(i,j,k)=flux%density; lz%velocity_x(i,j,k)=flux%momentum_x; lz%velocity_y(i,j,k)=flux%momentum_y
           lz%velocity_z(i,j,k)=flux%momentum_z; lz%pressure(i,j,k)=flux%energy; lz%bx(i,j,k)=flux%bx; lz%by(i,j,k)=flux%by; lz%bz(i,j,k)=flux%bz; lz%psi(i,j,k)=flux%psi
        end if
@@ -2866,9 +2924,14 @@ contains
   end subroutine riemann_driver_mhd
 
   ! ----- MHD conservative update (uniform grid; AMR reflux TODO) --------------
-  attributes(device) subroutine mhd_conservative_update(unew, nbor, fx, fy, fz, &
-       & head_idx, block_idx, thread_idx, dtdx)
+  attributes(device) subroutine mhd_conservative_update(unew, uold, nbor, fx, fy, fz, &
+       & head_idx, block_idx, thread_idx, dtdx, glm_fac, base_write &
+#ifdef TURB
+       & , grid, afield_now, d_skip, dx, boxlen, turb_min_rho, smallr, smallc2, dteff, do_turb &
+#endif
+       & )
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
     type(subgrid_3x2x2cell_mhd), intent(in) :: fx
     type(subgrid_2x3x2cell_mhd), intent(in) :: fy
@@ -2876,7 +2939,23 @@ contains
     integer(kind=4), value :: head_idx
     integer, value :: block_idx, thread_idx
     real(kind=dp), value :: dtdx
+    real(kind=dp), value :: glm_fac      ! uniform GLM psi-damping applied to the psi write
+    logical, value :: base_write         ! single-level: write uold+flux (no set_unew seed)
     integer :: work_size, i, j, k, i_s, j_s, k_s, work_idx, subgrid_idx, oct_idx, cell_idx, ind_nbor
+    real(kind=dp) :: d1,d2,d3,d4,d5,d6,d7,d8,d9   ! flux divergences (each cell written once)
+#ifdef TURB
+    ! Fused turbulent driving (single-level base_write): apply the forcing source term to the
+    ! freshly-computed state, replacing the separate turb_drive_apply_kernel pass.
+    type(oct), device :: grid(*)
+    real(kind=4), device :: afield_now(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1)
+    real(kind=dp), device :: d_skip(1:3)
+    real(kind=dp), value :: dx, boxlen, turb_min_rho, smallr, smallc2, dteff
+    logical, value :: do_turb
+    integer :: tdim, tbmin(1:3), tbmax(1:3)
+    real(kind=dp) :: tx, trr                  ! ALL-FP32 experiment: position/floor in fp32
+    real(kind=4) :: tw1(1:3), tw2(1:3)
+    real(kind=dp) :: tff(1:3), trmax, tener
+#endif
     work_size = 2*nsubgrid
     do work_idx = thread_idx, work_size**3 - 1, blockDim%x
        subgrid_idx = head_idx + block_idx
@@ -2887,15 +2966,76 @@ contains
        cell_idx = mod(work_idx, 8) + 1
        call index_1Dto3D(cell_idx-1, 2, 2, i, j, k)
        i = i + 2*(i_s-1); j = j + 2*(j_s-1); k = k + 2*(k_s-1)
-       unew(cell_idx,1,oct_idx) = unew(cell_idx,1,oct_idx) + ((fx%density(i,j,k)-fx%density(i+1,j,k)) + (fy%density(i,j,k)-fy%density(i,j+1,k)) + (fz%density(i,j,k)-fz%density(i,j,k+1)))*dtdx
-       unew(cell_idx,2,oct_idx) = unew(cell_idx,2,oct_idx) + ((fx%velocity_x(i,j,k)-fx%velocity_x(i+1,j,k)) + (fy%velocity_x(i,j,k)-fy%velocity_x(i,j+1,k)) + (fz%velocity_x(i,j,k)-fz%velocity_x(i,j,k+1)))*dtdx
-       unew(cell_idx,3,oct_idx) = unew(cell_idx,3,oct_idx) + ((fx%velocity_y(i,j,k)-fx%velocity_y(i+1,j,k)) + (fy%velocity_y(i,j,k)-fy%velocity_y(i,j+1,k)) + (fz%velocity_y(i,j,k)-fz%velocity_y(i,j,k+1)))*dtdx
-       unew(cell_idx,4,oct_idx) = unew(cell_idx,4,oct_idx) + ((fx%velocity_z(i,j,k)-fx%velocity_z(i+1,j,k)) + (fy%velocity_z(i,j,k)-fy%velocity_z(i,j+1,k)) + (fz%velocity_z(i,j,k)-fz%velocity_z(i,j,k+1)))*dtdx
-       unew(cell_idx,5,oct_idx) = unew(cell_idx,5,oct_idx) + ((fx%pressure(i,j,k)-fx%pressure(i+1,j,k)) + (fy%pressure(i,j,k)-fy%pressure(i,j+1,k)) + (fz%pressure(i,j,k)-fz%pressure(i,j,k+1)))*dtdx
-       unew(cell_idx,6,oct_idx) = unew(cell_idx,6,oct_idx) + ((fx%bx(i,j,k)-fx%bx(i+1,j,k)) + (fy%bx(i,j,k)-fy%bx(i,j+1,k)) + (fz%bx(i,j,k)-fz%bx(i,j,k+1)))*dtdx
-       unew(cell_idx,7,oct_idx) = unew(cell_idx,7,oct_idx) + ((fx%by(i,j,k)-fx%by(i+1,j,k)) + (fy%by(i,j,k)-fy%by(i,j+1,k)) + (fz%by(i,j,k)-fz%by(i,j,k+1)))*dtdx
-       unew(cell_idx,8,oct_idx) = unew(cell_idx,8,oct_idx) + ((fx%bz(i,j,k)-fx%bz(i+1,j,k)) + (fy%bz(i,j,k)-fy%bz(i,j+1,k)) + (fz%bz(i,j,k)-fz%bz(i,j,k+1)))*dtdx
-       unew(cell_idx,9,oct_idx) = unew(cell_idx,9,oct_idx) + ((fx%psi(i,j,k)-fx%psi(i+1,j,k)) + (fy%psi(i,j,k)-fy%psi(i,j+1,k)) + (fz%psi(i,j,k)-fz%psi(i,j,k+1)))*dtdx
+       d1 = ((fx%density(i,j,k)-fx%density(i+1,j,k)) + (fy%density(i,j,k)-fy%density(i,j+1,k)) + (fz%density(i,j,k)-fz%density(i,j,k+1)))*dtdx
+       d2 = ((fx%velocity_x(i,j,k)-fx%velocity_x(i+1,j,k)) + (fy%velocity_x(i,j,k)-fy%velocity_x(i,j+1,k)) + (fz%velocity_x(i,j,k)-fz%velocity_x(i,j,k+1)))*dtdx
+       d3 = ((fx%velocity_y(i,j,k)-fx%velocity_y(i+1,j,k)) + (fy%velocity_y(i,j,k)-fy%velocity_y(i,j+1,k)) + (fz%velocity_y(i,j,k)-fz%velocity_y(i,j,k+1)))*dtdx
+       d4 = ((fx%velocity_z(i,j,k)-fx%velocity_z(i+1,j,k)) + (fy%velocity_z(i,j,k)-fy%velocity_z(i,j+1,k)) + (fz%velocity_z(i,j,k)-fz%velocity_z(i,j,k+1)))*dtdx
+       d5 = ((fx%pressure(i,j,k)-fx%pressure(i+1,j,k)) + (fy%pressure(i,j,k)-fy%pressure(i,j+1,k)) + (fz%pressure(i,j,k)-fz%pressure(i,j,k+1)))*dtdx
+       d6 = ((fx%bx(i,j,k)-fx%bx(i+1,j,k)) + (fy%bx(i,j,k)-fy%bx(i,j+1,k)) + (fz%bx(i,j,k)-fz%bx(i,j,k+1)))*dtdx
+       d7 = ((fx%by(i,j,k)-fx%by(i+1,j,k)) + (fy%by(i,j,k)-fy%by(i,j+1,k)) + (fz%by(i,j,k)-fz%by(i,j,k+1)))*dtdx
+       d8 = ((fx%bz(i,j,k)-fx%bz(i+1,j,k)) + (fy%bz(i,j,k)-fy%bz(i,j+1,k)) + (fz%bz(i,j,k)-fz%bz(i,j,k+1)))*dtdx
+       d9 = ((fx%psi(i,j,k)-fx%psi(i+1,j,k)) + (fy%psi(i,j,k)-fy%psi(i,j+1,k)) + (fz%psi(i,j,k)-fz%psi(i,j,k+1)))*dtdx
+       ! Add the flux divergence to the base value: uold for base_write (single-level, no
+       ! set_unew seed -- each cell written once) or the pre-seeded unew (AMR/cosmo accumulate).
+       ! One uniform branch selects the base, then a single unconditional store block. psi also
+       ! gets the operator-split GLM parabolic damping (uniform glm_fac).
+       if (base_write) then
+          d1 = uold(cell_idx,1,oct_idx) + d1; d2 = uold(cell_idx,2,oct_idx) + d2
+          d3 = uold(cell_idx,3,oct_idx) + d3; d4 = uold(cell_idx,4,oct_idx) + d4
+          d5 = uold(cell_idx,5,oct_idx) + d5; d6 = uold(cell_idx,6,oct_idx) + d6
+          d7 = uold(cell_idx,7,oct_idx) + d7; d8 = uold(cell_idx,8,oct_idx) + d8
+          d9 = uold(cell_idx,9,oct_idx) + d9
+       else
+          d1 = unew(cell_idx,1,oct_idx) + d1; d2 = unew(cell_idx,2,oct_idx) + d2
+          d3 = unew(cell_idx,3,oct_idx) + d3; d4 = unew(cell_idx,4,oct_idx) + d4
+          d5 = unew(cell_idx,5,oct_idx) + d5; d6 = unew(cell_idx,6,oct_idx) + d6
+          d7 = unew(cell_idx,7,oct_idx) + d7; d8 = unew(cell_idx,8,oct_idx) + d8
+          d9 = unew(cell_idx,9,oct_idx) + d9
+       end if
+#ifdef TURB
+       ! Fused turbulent driving on the new state (d1=rho, d2:4=mom, d5=E). Trilinear-interp
+       ! afield_now at the cell centre -> tff, then remove KE / kick momentum / restore E.
+       ! Identical math to turb_drive_apply_kernel; runs only on the single-level turb path.
+       if (do_turb .and. d1 >= turb_min_rho) then
+          do tdim = 1, ndim
+             tx = (2*grid(oct_idx)%ckey(tdim) + mod((cell_idx-1)/2**(tdim-1), 2) + 0.5_dp)*dx - d_skip(tdim)
+             trr = tx/boxlen*real(turb_gs_real, kind=dp)
+             tbmin(tdim) = floor(trr); tbmax(tdim) = ceiling(trr)
+             if (tbmin(tdim) == TURB_GS) tbmin(tdim) = 0
+             if (tbmax(tdim) == TURB_GS) tbmax(tdim) = 0
+             tw1(tdim) = real(trr - real(floor(trr), kind=dp), kind=4)
+             tw2(tdim) = 1.0_4 - tw1(tdim)
+          end do
+          do tdim = 1, 3
+             tff(tdim) = &
+                  & afield_now(tdim,tbmin(1),tbmin(2),tbmin(3))*tw2(1)*tw2(2)*tw2(3) + &
+                  & afield_now(tdim,tbmax(1),tbmin(2),tbmin(3))*tw1(1)*tw2(2)*tw2(3) + &
+                  & afield_now(tdim,tbmin(1),tbmax(2),tbmin(3))*tw2(1)*tw1(2)*tw2(3) + &
+                  & afield_now(tdim,tbmax(1),tbmax(2),tbmin(3))*tw1(1)*tw1(2)*tw2(3) + &
+                  & afield_now(tdim,tbmin(1),tbmin(2),tbmax(3))*tw2(1)*tw2(2)*tw1(3) + &
+                  & afield_now(tdim,tbmax(1),tbmin(2),tbmax(3))*tw1(1)*tw2(2)*tw1(3) + &
+                  & afield_now(tdim,tbmin(1),tbmax(2),tbmax(3))*tw2(1)*tw1(2)*tw1(3) + &
+                  & afield_now(tdim,tbmax(1),tbmax(2),tbmax(3))*tw1(1)*tw1(2)*tw1(3)
+          end do
+          trmax = max(d1, smallr)
+          tener = d5
+          tener = max(tener - 0.5_dp*d2*d2/trmax, d1*smallc2)
+          tener = max(tener - 0.5_dp*d3*d3/trmax, d1*smallc2)
+          tener = max(tener - 0.5_dp*d4*d4/trmax, d1*smallc2)
+          d2 = d2 + trmax*tff(1)*dteff
+          d3 = d3 + trmax*tff(2)*dteff
+          d4 = d4 + trmax*tff(3)*dteff
+          tener = max(tener + 0.5_dp*d2*d2/trmax, d1*smallc2)
+          tener = max(tener + 0.5_dp*d3*d3/trmax, d1*smallc2)
+          tener = max(tener + 0.5_dp*d4*d4/trmax, d1*smallc2)
+          d5 = tener
+       end if
+#endif
+       unew(cell_idx,1,oct_idx) = d1; unew(cell_idx,2,oct_idx) = d2
+       unew(cell_idx,3,oct_idx) = d3; unew(cell_idx,4,oct_idx) = d4
+       unew(cell_idx,5,oct_idx) = d5; unew(cell_idx,6,oct_idx) = d6
+       unew(cell_idx,7,oct_idx) = d7; unew(cell_idx,8,oct_idx) = d8
+       unew(cell_idx,9,oct_idx) = d9*glm_fac
     end do
   end subroutine mhd_conservative_update
 
@@ -2904,7 +3044,12 @@ contains
   ! shared-mem-limited at 2 blocks anyway (~100 regs); this just pins the intent.
   attributes(global) launch_bounds(256,2) subroutine mhd_integrator_kernel(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
-       & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
+       & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, switch_llf_dmin, switch_llf_pmin, constant_gravity, glm_fac, base_write, &
+       & courant_factor, dt_out, cfl_sqrt3 &
+#ifdef TURB
+       & , afield_now, d_skip, boxlen, turb_min_rho, do_turb &
+#endif
+       & )
     type(oct), device :: grid(*)
     integer, device :: father(*)
     integer, device :: nbor(1:subgridsize,*)
@@ -2914,8 +3059,19 @@ contains
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     integer(kind=4), value :: head_idx, num_subgrids, ngridmax
     integer, value :: ilevel, levelmin, levelmax
-    real(kind=dp), value :: gamma, smallr, smallc2, ch, dt, dx
+    real(kind=dp), value :: gamma, smallr, smallc2, ch, dt, dx, switch_llf_dmin, switch_llf_pmin
+    real(kind=dp), value :: glm_fac        ! uniform GLM psi-damping factor (folded write-back)
+    logical, value :: base_write           ! single-level: write uold+flux (skip set_unew seed)
+    real(kind=dp), value :: courant_factor ! folded cmpdt (single-level): CFL dt reduction
+    real(kind=8), device :: dt_out(*)      ! global min-dt accumulator
+    logical, value :: cfl_sqrt3            ! CFL aggregation: T=sqrt(3)*max, F=sum-over-dims
     integer, value :: slope, riemann
+#ifdef TURB
+    real(kind=4), device :: afield_now(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1)  ! fused turb driving
+    real(kind=dp), device :: d_skip(1:3)
+    real(kind=dp), value :: boxlen, turb_min_rho
+    logical, value :: do_turb
+#endif
     type(subgrid_3x2x2cell_mhd), shared :: lx, rx
     type(subgrid_2x3x2cell_mhd), shared :: ly, ry
     type(subgrid_2x2x3cell_mhd), shared :: lz, rz
@@ -2927,10 +3083,15 @@ contains
     thread_idx = threadIdx%x - 1
     if (block_idx >= num_subgrids) return
     call subgrid_conserved_2_primitive_mhd(grid, uold, f, constant_gravity, nbor, &
-         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, ls)
+         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, ls, &
+         & dx, courant_factor, dt_out, base_write, cfl_sqrt3)
     call trace_3d_mhd_plm(ls, thread_idx, lx, rx, ly, ry, lz, rz, gamma, smallr, smallc2, ch, dtdx, slope)
-    call riemann_driver_mhd(lx, rx, ly, ry, lz, rz, thread_idx, gamma, smallr, smallc2, ch, riemann)
-    call mhd_conservative_update(unew, nbor, lx, ly, lz, head_idx, block_idx, thread_idx, dtdx)
+    call riemann_driver_mhd(lx, rx, ly, ry, lz, rz, thread_idx, gamma, smallr, smallc2, ch, riemann, switch_llf_dmin, switch_llf_pmin)
+    call mhd_conservative_update(unew, uold, nbor, lx, ly, lz, head_idx, block_idx, thread_idx, dtdx, glm_fac, base_write &
+#ifdef TURB
+         & , grid, afield_now, d_skip, dx, boxlen, turb_min_rho, smallr, smallc2, dt, do_turb &
+#endif
+         & )
   end subroutine mhd_integrator_kernel
 
   !> Characteristic-PPM integrator (slope_type=10). Separate kernel so its heavy
@@ -2940,7 +3101,12 @@ contains
   ! throughput (ncu+sweep @ nsubgrid=2: 230 -> 173 Mcell/s). Keep 1 block/SM, no cap.
   attributes(global) launch_bounds(256,2) subroutine mhd_integrator_kernel_ppm(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
-       & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
+       & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, switch_llf_dmin, switch_llf_pmin, constant_gravity, glm_fac, base_write, &
+       & courant_factor, dt_out, cfl_sqrt3 &
+#ifdef TURB
+       & , afield_now, d_skip, boxlen, turb_min_rho, do_turb &
+#endif
+       & )
     type(oct), device :: grid(*)
     integer, device :: father(*)
     integer, device :: nbor(1:subgridsize,*)
@@ -2950,8 +3116,19 @@ contains
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     integer(kind=4), value :: head_idx, num_subgrids, ngridmax
     integer, value :: ilevel, levelmin, levelmax
-    real(kind=dp), value :: gamma, smallr, smallc2, ch, dt, dx
+    real(kind=dp), value :: gamma, smallr, smallc2, ch, dt, dx, switch_llf_dmin, switch_llf_pmin
+    real(kind=dp), value :: glm_fac        ! uniform GLM psi-damping factor (folded write-back)
+    logical, value :: base_write           ! single-level: write uold+flux (skip set_unew seed)
+    real(kind=dp), value :: courant_factor ! folded cmpdt (single-level): CFL dt reduction
+    real(kind=8), device :: dt_out(*)      ! global min-dt accumulator
+    logical, value :: cfl_sqrt3            ! CFL aggregation: T=sqrt(3)*max, F=sum-over-dims
     integer, value :: slope, riemann
+#ifdef TURB
+    real(kind=4), device :: afield_now(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1)  ! fused turb driving
+    real(kind=dp), device :: d_skip(1:3)
+    real(kind=dp), value :: boxlen, turb_min_rho
+    logical, value :: do_turb
+#endif
     type(subgrid_3x2x2cell_mhd), shared :: lx, rx
     type(subgrid_2x3x2cell_mhd), shared :: ly, ry
     type(subgrid_2x2x3cell_mhd), shared :: lz, rz
@@ -2963,10 +3140,15 @@ contains
     thread_idx = threadIdx%x - 1
     if (block_idx >= num_subgrids) return
     call subgrid_conserved_2_primitive_mhd(grid, uold, f, constant_gravity, nbor, &
-         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, ls)
+         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, ls, &
+         & dx, courant_factor, dt_out, base_write, cfl_sqrt3)
     call trace_3d_mhd(ls, thread_idx, lx, rx, ly, ry, lz, rz, gamma, smallr, smallc2, ch, dtdx, slope)
-    call riemann_driver_mhd(lx, rx, ly, ry, lz, rz, thread_idx, gamma, smallr, smallc2, ch, riemann)
-    call mhd_conservative_update(unew, nbor, lx, ly, lz, head_idx, block_idx, thread_idx, dtdx)
+    call riemann_driver_mhd(lx, rx, ly, ry, lz, rz, thread_idx, gamma, smallr, smallc2, ch, riemann, switch_llf_dmin, switch_llf_pmin)
+    call mhd_conservative_update(unew, uold, nbor, lx, ly, lz, head_idx, block_idx, thread_idx, dtdx, glm_fac, base_write &
+#ifdef TURB
+         & , grid, afield_now, d_skip, dx, boxlen, turb_min_rho, smallr, smallc2, dt, do_turb &
+#endif
+         & )
   end subroutine mhd_integrator_kernel_ppm
 
   !> Parabolic-PPM integrator (slope_type=11): lean kernel (no eigensystem) calling
@@ -2976,7 +3158,12 @@ contains
   ! (16.7% -> 33%), net +44% throughput (sweep @ nsubgrid=2: 364 -> 525 Mcell/s).
   attributes(global) launch_bounds(256,2) subroutine mhd_integrator_kernel_par(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
-       & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, constant_gravity)
+       & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, switch_llf_dmin, switch_llf_pmin, constant_gravity, glm_fac, base_write, &
+       & courant_factor, dt_out, cfl_sqrt3 &
+#ifdef TURB
+       & , afield_now, d_skip, boxlen, turb_min_rho, do_turb &
+#endif
+       & )
     type(oct), device :: grid(*)
     integer, device :: father(*)
     integer, device :: nbor(1:subgridsize,*)
@@ -2986,8 +3173,19 @@ contains
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     integer(kind=4), value :: head_idx, num_subgrids, ngridmax
     integer, value :: ilevel, levelmin, levelmax
-    real(kind=dp), value :: gamma, smallr, smallc2, ch, dt, dx
+    real(kind=dp), value :: gamma, smallr, smallc2, ch, dt, dx, switch_llf_dmin, switch_llf_pmin
+    real(kind=dp), value :: glm_fac        ! uniform GLM psi-damping factor (folded write-back)
+    logical, value :: base_write           ! single-level: write uold+flux (skip set_unew seed)
+    real(kind=dp), value :: courant_factor ! folded cmpdt (single-level): CFL dt reduction
+    real(kind=8), device :: dt_out(*)      ! global min-dt accumulator
+    logical, value :: cfl_sqrt3            ! CFL aggregation: T=sqrt(3)*max, F=sum-over-dims
     integer, value :: slope, riemann
+#ifdef TURB
+    real(kind=4), device :: afield_now(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1)  ! fused turb driving
+    real(kind=dp), device :: d_skip(1:3)
+    real(kind=dp), value :: boxlen, turb_min_rho
+    logical, value :: do_turb
+#endif
     type(subgrid_3x2x2cell_mhd), shared :: lx, rx
     type(subgrid_2x3x2cell_mhd), shared :: ly, ry
     type(subgrid_2x2x3cell_mhd), shared :: lz, rz
@@ -2999,15 +3197,20 @@ contains
     thread_idx = threadIdx%x - 1
     if (block_idx >= num_subgrids) return
     call subgrid_conserved_2_primitive_mhd(grid, uold, f, constant_gravity, nbor, &
-         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, ls)
+         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, ls, &
+         & dx, courant_factor, dt_out, base_write, cfl_sqrt3)
     call trace_3d_mhd_par(ls, thread_idx, lx, rx, ly, ry, lz, rz, gamma, smallr, smallc2, ch, dtdx, slope)
-    call riemann_driver_mhd(lx, rx, ly, ry, lz, rz, thread_idx, gamma, smallr, smallc2, ch, riemann)
-    call mhd_conservative_update(unew, nbor, lx, ly, lz, head_idx, block_idx, thread_idx, dtdx)
+    call riemann_driver_mhd(lx, rx, ly, ry, lz, rz, thread_idx, gamma, smallr, smallc2, ch, riemann, switch_llf_dmin, switch_llf_pmin)
+    call mhd_conservative_update(unew, uold, nbor, lx, ly, lz, head_idx, block_idx, thread_idx, dtdx, glm_fac, base_write &
+#ifdef TURB
+         & , grid, afield_now, d_skip, dx, boxlen, turb_min_rho, smallr, smallc2, dt, do_turb &
+#endif
+         & )
   end subroutine mhd_integrator_kernel_par
 
   ! ----- MHD timestep: fast-magnetosonic CFL + emag ---------------------------
   attributes(global) subroutine cmpdt_kernel_mhd(grid, uold, f, constant_gravity, &
-       & head_idx, num_octs, data_out, dx, gamma, smallr, smallc2, courant_factor)
+       & head_idx, num_octs, data_out, dx, gamma, smallr, smallc2, courant_factor, cfl_sqrt3)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
@@ -3015,10 +3218,12 @@ contains
     integer(kind=4), value :: head_idx, num_octs
     real(kind=8), device :: data_out(*)   ! mass, ekin, eint, emag, dt
     real(kind=dp), value :: dx, gamma, smallr, smallc2, courant_factor
+    logical, value :: cfl_sqrt3                     ! CFL aggregation: T=sqrt(3)*max, F=sum-over-dims
     type(mhd_conserved_t) :: c
     type(mhd_primitive_t) :: p
     integer :: info, tid, bid, cell_idx, oct_idx
-    real(kind=8) :: vol_loc, mass_loc, ekin_loc, eint_loc, emag_loc, dt_loc, grav, ctot
+    real(kind=8) :: vol_loc, mass_loc, ekin_loc, eint_loc, emag_loc, dt_loc
+    real(kind=dp) :: grav, ctot, dt_s        ! dt path in fp32 (avoids fp64 1:64 sqrt/divide)
     tid = threadIdx%x - 1; bid = blockIdx%x - 1
     oct_idx = ( tid + bid*blockDim%x ) / twotondim
     if (oct_idx >= num_octs) then
@@ -3038,16 +3243,24 @@ contains
           ekin_loc = c%energy*vol_loc
           eint_loc = p%pressure/(gamma-1d0)*vol_loc
           emag_loc = 0.5d0*magnitude_squared(p%bx,p%by,p%bz)*vol_loc
-          ctot = (abs(p%velocity_x)+mhd_fast_speed_n(p,gamma,p%bx)) &
-               & + (abs(p%velocity_y)+mhd_fast_speed_n(p,gamma,p%by)) &
-               & + (abs(p%velocity_z)+mhd_fast_speed_n(p,gamma,p%bz))
+          ! CFL signal speed: sqrt(3)*max(directional) [cfl_sqrt3, ~1.25x faster] or sum-over-dims [default].
+          if (cfl_sqrt3) then
+             ctot = sqrt(3.0_dp)*max(abs(p%velocity_x)+mhd_fast_speed_n(p,gamma,p%bx), &
+                  & max(abs(p%velocity_y)+mhd_fast_speed_n(p,gamma,p%by), &
+                  &     abs(p%velocity_z)+mhd_fast_speed_n(p,gamma,p%bz)))
+          else
+             ctot = (abs(p%velocity_x)+mhd_fast_speed_n(p,gamma,p%bx)) &
+                  & + (abs(p%velocity_y)+mhd_fast_speed_n(p,gamma,p%by)) &
+                  & + (abs(p%velocity_z)+mhd_fast_speed_n(p,gamma,p%bz))
+          end if
 #ifdef GRAV
           grav = abs(f(cell_idx,1,oct_idx))+abs(f(cell_idx,2,oct_idx))+abs(f(cell_idx,3,oct_idx))
 #else
           grav = abs(constant_gravity(1))+abs(constant_gravity(2))+abs(constant_gravity(3))
 #endif
-          grav = max(grav*dx/ctot**2, 0.0001d0)
-          dt_loc = dx/ctot*(sqrt(1d0+2d0*courant_factor*grav)-1d0)/grav
+          grav = max(grav*dx/ctot**2, 0.0001_dp)
+          dt_s = dx/ctot*(sqrt(1.0_dp+2.0_dp*courant_factor*grav)-1.0_dp)/grav
+          dt_loc = real(dt_s, kind=8)
        end if
     end if
     dt_loc=block_reduce_min(dt_loc); mass_loc=block_reduce_sum(mass_loc)
@@ -3057,25 +3270,7 @@ contains
        info=atomicadd(data_out(3),eint_loc); info=atomicadd(data_out(4),emag_loc); info=atomicmin(data_out(5),dt_loc)
     end if
   end subroutine cmpdt_kernel_mhd
-
-  ! ----- GLM parabolic damping: psi *= exp(-(ch/cp)^2 dt), cp^2=cp_coef L ch ------
-  ! cp_coef is the runtime knob (default 0.18); cp_coef<=0 disables psi damping.
-  attributes(global) subroutine glm_damp_psi_kernel(uold, head_idx, num_octs, ch, dt, divb_len, cp_coef)
-    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
-    integer(kind=4), value :: head_idx, num_octs
-    real(kind=dp), value :: ch, dt, divb_len, cp_coef
-    integer :: block_idx, cell_idx, oct_idx
-    real(kind=8) :: cp2, fac
-    if (cp_coef <= 0.0d0) return
-    block_idx = blockIdx%x - 1
-    oct_idx = block_idx*blockDim%y + threadIdx%y - 1
-    if (oct_idx >= num_octs) return
-    oct_idx = head_idx + oct_idx
-    cell_idx = threadIdx%x
-    cp2 = cp_coef*divb_len*ch
-    fac = exp(-(ch*ch/cp2)*dt)
-    uold(cell_idx, 9, oct_idx) = uold(cell_idx, 9, oct_idx) * fac
-  end subroutine glm_damp_psi_kernel
+  ! (glm_damp_psi_kernel removed: GLM psi-damping is folded into mhd_conservative_update.)
 #endif
   ! =========================================================================
 
@@ -3307,6 +3502,7 @@ contains
     ! Compute the cell idx
     cell_idx = threadIdx%x
 
+    ! Pure copy unew->uold (GLM psi-damping is now folded into the integrator write-back).
     uold(cell_idx, 1, oct_idx) = unew(cell_idx, 1, oct_idx)
     uold(cell_idx, 2, oct_idx) = unew(cell_idx, 2, oct_idx)
     uold(cell_idx, 3, oct_idx) = unew(cell_idx, 3, oct_idx)

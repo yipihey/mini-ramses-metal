@@ -569,7 +569,7 @@ attributes(global) subroutine compute_hkey_part_kernel(xp, hkey_part_d, &
   integer(kind=8), device :: hkey_part_d(*)
   integer(kind=4), device :: box_ckey_min_d(1:3, *)
   integer(kind=4), device :: box_ckey_max_d(1:3, *)
-  real(kind=8), intent(in), device :: skip(*)
+  real(kind=dp), intent(in), device :: skip(*)
   real(kind=8), intent(in), value :: dx_inv
   integer(kind=4), intent(in), value :: head_idx
   integer(kind=4), intent(in), value :: num_parts
