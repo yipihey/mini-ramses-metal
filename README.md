@@ -9,7 +9,9 @@ equivalent to upstream constrained-transport MHD** (same power spectra, Mach num
 energy to ≈1%) while running **3–5× faster**.
 
 📄 **[GLM-MHD vs CT-MHD turbulence comparison report](docs/glm_vs_ct_turbulence/index.html)**
-— throughput, statistical equivalence, power spectra, and midplane field slices. See
+— throughput, statistical equivalence, power spectra, midplane field slices, and the
+investigation that found & fixed an over-aggressive Dedner cleaning speed (the source of
+excess small-scale dissipation; now `glm_ch_scale` in `hydro_params`). See
 [`runs/mhd_cuda/README.md`](runs/mhd_cuda/README.md) for the full GPU optimisation journey and
 per-kernel benchmarks.
 

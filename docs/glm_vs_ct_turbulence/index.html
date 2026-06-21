@@ -59,8 +59,8 @@ forcing through three solvers and compare the turbulence statistics, power spect
 <table>
 <thead><tr><th>solver</th><th>B representation</th><th>div·B</th><th>per-cell work</th></tr></thead>
 <tbody>
-<tr><td><b>GLM-MHD</b> (ours)</td><td style="text-align:left">cell-centred + cleaning scalar ψ (9 vars)</td><td style="text-align:left">bounded by hyperbolic/parabolic cleaning</td><td style="text-align:left">one 1-D HLLD Riemann solve per face</td></tr>
-<tr><td><b>CT-MHD</b> (upstream)</td><td style="text-align:left">face-staggered (constrained transport)</td><td style="text-align:left"><b>= 0 to machine precision</b></td><td style="text-align:left">1-D + 2-D-HLLD EMF on edges + induction</td></tr>
+<tr><td><b>GLM-MHD</b> (ours)</td><td style="text-align:left">cell-centred + cleaning scalar ψ (9 vars)</td><td style="text-align:left">cell-centred, cleaned to a small bounded level</td><td style="text-align:left">one 1-D HLLD Riemann solve per face</td></tr>
+<tr><td><b>CT-MHD</b> (upstream)</td><td style="text-align:left">face-staggered (constrained transport)</td><td style="text-align:left"><b>= 0 on faces</b> (machine precision)</td><td style="text-align:left">1-D + 2-D-HLLD EMF on edges + induction</td></tr>
 </tbody>
 </table>
 <p>
@@ -118,15 +118,53 @@ different shock structure. The full distributions overlap:</p>
 </figure>
 
 <h3>Power spectra</h3>
-<p>The cleanest test of "same turbulence": the velocity, magnetic and density power spectra agree through the
-entire <i>resolved</i> cascade and diverge only at the grid scale.</p>
+<p>The cleanest test of "same turbulence": the velocity, magnetic and density power spectra. These overlap
+through the <i>entire</i> resolved cascade — but getting there required finding and fixing a real dissipation
+bug first (see the next section).</p>
 <figure>
   <img src="img/spectra.png" alt="Velocity, magnetic and density power spectra for the three solvers">
-  <figcaption><b>Power spectra.</b> The velocity spectrum sits between k<sup>−5/3</sup> and k<sup>−2</sup>, as
-  expected for Mach-3 turbulence. All three solvers overlap for k ≲ 30 (velocity, magnetic, <i>and</i> density).
-  They separate only in the dissipation range (k ≳ 40): <b>CT-MHD retains slightly more small-scale power</b>
-  (less numerically dissipative at the grid scale), while the two GLM solvers roll off together. The
-  large-scale physics — where the science lives — is solver-independent.</figcaption>
+  <figcaption><b>Power spectra (after the c_h fix).</b> The velocity spectrum sits between k<sup>−5/3</sup> and
+  k<sup>−2</sup>, as expected for Mach-3 turbulence. GLM-PLM (blue) and GLM-PPM (green) now lie on top of
+  CT-MHD (orange) in velocity, magnetic, <i>and</i> density across the whole cascade, with only a sliver of
+  difference at the very highest k. The large-scale physics — where the science lives — is solver-independent.</figcaption>
+</figure>
+
+<h3>Finding and fixing the over-aggressive Dedner cleaning</h3>
+<p>The <i>first</i> version of this comparison was not a win: the GLM spectra rolled off 1–2 decades below CT
+at high k in all three fields, and parabolic PPM gave no improvement over PLM. A short systematic
+investigation traced the cause — and it was not where intuition first pointed:</p>
+<ul class="tight">
+<li><b>Not the limiters.</b> The PPM→PLM fallback (<code>strong_pressure_jump</code>) fires in only
+<b>0.5%</b> of cells at Mach 3, so PPM ≈ PLM was not a fallback artefact — it meant the dissipation lives in
+the <i>flux</i>, not the reconstruction (so raising reconstruction order can't help).</li>
+<li><b>The Dedner cleaning speed.</b> Sweeping the cleaning knobs on the turbulence run, the ψ damping was
+irrelevant, but reducing the cleaning speed <code>c_h</code> monotonically restored small-scale power in
+<i>all three fields</i> until, at <b>c_h × 0.25</b>, GLM matched CT. The mechanism: the ψ–B coupling flux is
+<code>F[ψ] = c_h²·B<sub>n</sub>*</code>, scaling as <b>c_h²</b>, so the textbook <code>c_h = c_max</code>
+over-drives the coupling — it acts as a numerical resistivity that drains the small-scale field (and the
+velocity/density via the Lorentz coupling).</li>
+<li><b>No trade-off.</b> The smaller c_h is <i>strictly</i> better: on Orszag-Tang it also cuts GLM's own
+div·B by ~10× (max 25 → 2.7), because the over-driven cleaning was <i>generating</i> spurious divergence at
+shocks, not just over-dissipating. Positivity and shock capturing are unchanged.</li>
+</ul>
+<p>The fix is the new default <code>glm_ch_scale = 0.25</code> (tunable via <code>hydro_params</code>). This
+is what makes the spectra above overlap CT.</p>
+
+<h3>What "divergence-free" means — a fair, common metric</h3>
+<p>It is tempting to score the solvers on div·B, but the comparison is subtle: each scheme is divergence-free
+in <i>its own</i> discretisation. CT enforces div·B = 0 on the cell <b>faces</b> (machine precision, by
+construction); GLM cleans the <b>cell-centred</b> divergence. These are different operators on different
+representations of B. A fair, method-agnostic test is to apply the <i>same</i> cell-centred central-difference
+operator to every solver's B field — the quantity any downstream analysis (spectra, interpolation) actually
+sees.</p>
+<figure>
+  <img src="img/divb.png" alt="Cell-centred central-difference div·B for each solver">
+  <figcaption><b>Cell-centred central-difference |∇·B| (same operator, all methods).</b> The midplane slices
+  look alike, and the distributions (right) are comparable — with <b>CT actually the largest</b> under this
+  common lens. That is not a defect of CT: its face-staggered divergence is exactly zero, but averaging those
+  faces to cell centres and differencing centrally does not give zero. GLM, which cleans exactly this
+  cell-centred quantity, ends up marginally lower. <b>Neither solver is absolutely "more divergence-free"</b>
+  — it depends entirely on which discretisation you difference.</figcaption>
 </figure>
 
 <h2>The fields themselves</h2>
@@ -161,14 +199,23 @@ blew up even at Mach 1.2 here; the robust PPM used above is the parabolic recons
 scheme's supersonic robustness is a known gap worth a dedicated fix.</li>
 <li><b>Analysis:</b> 3-D fields are rebuilt from the output files using a geometric oct→cell map; the resulting
 clean power-law spectra (rather than white noise) confirm the spatial mapping is correct.</li>
+<li><b>Figure provenance:</b> the spectra and div·B figures are at the production setting (c_h × 0.25). The
+field-slice and PDF figures predate the c_h fix but are visually unchanged by it — the fix moves only the
+grid-scale power, which is invisible in real-space slices and in the bulk PDFs (Mach, σ(ln ρ), field energy
+all shift by &lt;1%).</li>
 </ul>
 
 <h2>Takeaway</h2>
 <p class="lead">
 On magnetised supersonic driven turbulence, the GLM-MHD solver is <b>statistically equivalent to constrained
-transport through the resolved cascade</b> — same spectra, same Mach, same field energy to ≈1% — while running
-<b>3–5× faster</b>. When exact div·B = 0 is essential, CT remains the tool; for the large class of problems where
-cleaning-level divergence control suffices, GLM-MHD delivers the same science substantially cheaper.
+transport through the resolved cascade</b> — overlapping power spectra in velocity, magnetic and density
+fields, same Mach, same field energy to ≈1% — while running <b>3–5× faster</b>. That equivalence required
+fixing the over-aggressive Dedner cleaning (c_h × 0.25); the textbook cleaning speed was the source of the
+excess small-scale dissipation. On divergence control the two are comparable under a common cell-centred
+metric — CT guarantees exact zero on its <i>faces</i>, GLM cleans the <i>cell-centred</i> divergence to a
+similar small level. CT's exact face-divergence remains its structural guarantee where that specific property
+is required; for the broad class of problems where cell-centred cleaning suffices, GLM-MHD now delivers the
+same science substantially cheaper.
 </p>
 
 <p class="foot">
