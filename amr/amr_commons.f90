@@ -159,6 +159,9 @@ module amr_commons
      logical::gpu_fused_step=.false.   ! opt-in fused single-level static GPU step (cmpdt-fold +
                                        ! base_write + turb-fusion + pointer-swap). Default off =
                                        ! classic per-pass behaviour unchanged. levelmin==nlevelmax only.
+     integer::gpu_dt_nharvest=1        ! GPU-resident: harvest the folded dt every N steps (1=every
+                                       ! step, identical dt; >1 lets the host run ahead N steps for
+                                       ! more throughput, at the cost of an up-to-N-step-stale dt).
      real(kind=8)::smallc=1.d-10
      real(kind=8)::smallr=1.d-10
      integer ::niter_riemann=10

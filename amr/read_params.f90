@@ -293,6 +293,7 @@ subroutine m_read_params(pst)
   real(kind=8),dimension(1:512)::gamma_rad=1.33333333334d0
   real(kind=8)::courant_factor=0.5d0
   logical::gpu_fused_step=.false.
+  integer::gpu_dt_nharvest=1
   real(kind=8)::difmag=0.0d0
   real(kind=8)::etamag=0.0d0
   real(kind=8)::smallc=1.d-10
@@ -615,7 +616,7 @@ subroutine m_read_params(pst)
 #endif
        & ,d_region,u_region,v_region,w_region,p_region
   ! Hydro solver parameters
-  namelist/hydro_params/gamma,courant_factor,gpu_fused_step,smallr,smallc &
+  namelist/hydro_params/gamma,courant_factor,gpu_fused_step,gpu_dt_nharvest,smallr,smallc &
        & ,slope_type,slope_mag_type,difmag,etamag,gamma_rad &
        & ,dual_energy,T2_fix,induction,entropy,sgs_turb,equilibrium_sgs,riemann,riemann2d,constant_gravity &
        & ,niter_riemann,scheme,switch_llf_dmin,switch_llf_pmin,smagorinsky_lilly_constant
@@ -1368,6 +1369,7 @@ subroutine m_read_params(pst)
   s%r%gamma=gamma
   s%r%courant_factor=courant_factor
   s%r%gpu_fused_step=gpu_fused_step
+  s%r%gpu_dt_nharvest=gpu_dt_nharvest
   s%r%smallc=smallc
   s%r%smallr=smallr
   s%r%niter_riemann=niter_riemann

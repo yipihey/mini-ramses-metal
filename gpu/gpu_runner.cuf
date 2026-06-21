@@ -35,6 +35,10 @@ module gpu_runner
   !> running a separate cmpdt pass. dt_lagged<0 = not yet computed (bootstrap step).
   real(kind=8), device :: dt_reduce(1)
   real(kind=8) :: dt_lagged = -1.0d0
+  ! GPU-resident: harvest the folded dt only every gpu_dt_nharvest steps so the host doesn't sync
+  ! on the integrator every step (runs ahead). dt_reduce accumulates the min over the window;
+  ! dt_lagged then lags up to gpu_dt_nharvest steps -- fine for slowly-varying dt (param, default 1).
+  integer :: fused_dt_count = 0
 
 #ifdef TURB
   !> Turbulent acceleration fields on the device (64^3 x NDIM), generated on the host.
@@ -521,8 +525,10 @@ contains
     num_subgrids = sim%m%noct(ilevel) / nsubgridtondim
     num_blocks = num_subgrids
 
-    ! Folded cmpdt: seed the global min-dt with a large value; the integrator atomicmins into it.
-    if (fused) dt_reduce(1) = sim%r%courant_factor*dx/sim%r%smallc
+    ! Folded cmpdt: seed the global min-dt at the start of each harvest window; the integrator
+    ! atomicmins into it every step, so dt_reduce holds the window-min when harvested.
+    if (fused .and. mod(fused_dt_count, max(sim%r%gpu_dt_nharvest,1)) == 0) &
+       & dt_reduce(1) = sim%r%courant_factor*dx/sim%r%smallc
 
     call nvtxStartRange("GPU Godunov", color=0)!green
 #ifdef PAPER
@@ -546,9 +552,13 @@ contains
 #endif
          & )
     call GPU_Error_Check(__FILE__, __LINE__)
-    ! Harvest the folded-cmpdt min dt (integrator just synced) for the NEXT step's dt (1-step lag);
-    ! gpu_cmpdt returns this instead of running a separate pass.
-    if (fused) dt_lagged = dt_reduce(1)
+    ! Harvest the folded-cmpdt window-min dt only every NHARVEST steps -- the only per-window
+    ! host<->device sync (the device read blocks on the integrator). gpu_cmpdt returns dt_lagged
+    ! between harvests, so the host queues NHARVEST steps and runs ahead of the GPU.
+    if (fused) then
+       fused_dt_count = fused_dt_count + 1
+       if (mod(fused_dt_count, max(sim%r%gpu_dt_nharvest,1)) == 0) dt_lagged = dt_reduce(1)
+    end if
 #endif
     call nvtxEndRange()
 
