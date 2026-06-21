@@ -403,6 +403,11 @@ contains
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
     real(kind=dp) :: smallr, smallc
 
+    ! Single-level fused: the forcing apply is folded into the integrator write-back (gpu_godunov,
+    ! do_turb), so the separate driving pass is skipped to avoid double-applying. drive_turb still
+    ! runs to fill fturb, which the fused apply reads.
+    if (sim%r%gpu_fused_step .and. sim%r%levelmin==sim%r%nlevelmax .and. sim%r%static_mesh) return
+
     smallr = sim%r%smallr
     smallc = sim%r%smallc
 
@@ -484,7 +489,7 @@ contains
     integer :: threads_per_block, num_blocks
     real(dp) :: dt, dx, gamma, smallr, smallc2, switch_llf_dmin, switch_llf_pmin
     integer :: slope, riemann, slope_mag, riemann2d
-    logical :: induction, fused
+    logical :: induction, fused, do_turb
 
     if(sim%r%verbose.and.sim%g%myid==1)write(*,'("   Entering gpu_godunov for level ",I2)')ilevel
 
@@ -505,6 +510,8 @@ contains
     induction = sim%r%induction
     ! Fused single-level static fast path (opt-in): fold the CFL dt into the integrator.
     fused = (sim%r%gpu_fused_step .and. sim%r%levelmin==sim%r%nlevelmax .and. sim%r%static_mesh)
+    ! Fuse the turbulent driving (apply) into the integrator write-back on the fused turb path.
+    do_turb = (fused .and. sim%r%turb)
 
     head_idx = (sim%m%head(ilevel) - 1) / nsubgridtondim + 1
     num_subgrids = sim%m%noct(ilevel) / nsubgridtondim
@@ -529,7 +536,11 @@ contains
          & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
          & gamma, smallr, smallc2, dt, dx, slope, slope_mag, riemann, riemann2d, &
          & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity, &
-         & real(sim%r%courant_factor,kind=dp), dt_reduce, fused)
+         & real(sim%r%courant_factor,kind=dp), dt_reduce, fused &
+#ifdef TURB
+         & , fturb, do_turb &
+#endif
+         & )
     call GPU_Error_Check(__FILE__, __LINE__)
     ! Harvest the folded-cmpdt min dt (integrator just synced) for the NEXT step's dt (1-step lag);
     ! gpu_cmpdt returns this instead of running a separate pass.
