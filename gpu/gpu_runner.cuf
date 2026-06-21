@@ -210,7 +210,7 @@ contains
     real(kind=8), device, dimension(5) :: d_data !mass, ekin, eint, emag, dt
     real(kind=8), dimension(5) :: h_data
 
-#ifdef GLMMHD
+#ifndef PAPER
     ! Folded cmpdt (single-level): the integrator already reduced the CFL dt last step. Return
     ! that (1-step lag) and skip the separate cmpdt pass entirely. dt_lagged<0 = first step
     ! (bootstrap): fall through to one synchronous cmpdt so step 0 has a real dt; the integrator
@@ -317,10 +317,10 @@ contains
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
 
-#ifdef GLMMHD
-    ! Single-level static: the GLM integrator base-writes unew = uold + flux (each cell once),
-    ! so the unew<-uold seed is unnecessary. Skip it (matches gpu_godunov's base_write gate).
-    ! Guarded to GLMMHD: only that integrator path implements base_write.
+#ifndef PAPER
+    ! Single-level static: the integrator base-writes unew = uold + flux (each cell once), so the
+    ! unew<-uold seed is unnecessary. Skip it (matches gpu_godunov's base_write gate). Both the
+    ! GLM-MHD and plain-HD integrators implement base_write; only the PAPER path still needs it.
     if (sim%r%levelmin == sim%r%nlevelmax .and. sim%r%static_mesh) return
 #endif
 
@@ -476,6 +476,8 @@ contains
     integer :: slope, riemann
 #ifdef GLMMHD
     real(dp) :: glm_fac, cp_coef, cp2   ! uniform GLM psi-damping factor, applied in-integrator
+#endif
+#ifndef PAPER
     logical :: base_write               ! single-level: integrator writes uold+flux (no set_unew)
     logical :: do_turb                  ! fuse the turbulent driving into the integrator write-back
 #endif
@@ -556,12 +558,23 @@ contains
 #else
     if(nsubgrid == 1)threads_per_block = 64
     if(nsubgrid == 2)threads_per_block = 256
+    ! Single-level static: write unew = uold + flux directly (each cell once, no coarse-fine
+    ! reflux), so the separate set_unew seed pass can be skipped (gpu_set_unew). Fuse the
+    ! turbulent driving into the write-back, and fold the CFL dt reduction (lagged dt).
+    base_write = (sim%r%levelmin == sim%r%nlevelmax .and. sim%r%static_mesh)
+    do_turb = (base_write .and. sim%r%turb)
+    if (base_write) dt_reduce(1) = sim%r%courant_factor*dx/sim%r%smallc
     call hydro_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
          & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
-         & gamma, smallr, smallc2, dt, dx, slope, riemann, constant_gravity)
+         & gamma, smallr, smallc2, dt, dx, slope, riemann, constant_gravity, base_write, &
+         & real(sim%r%courant_factor,kind=dp), dt_reduce, sim%r%cfl_sqrt3 &
+#ifdef TURB
+         & , afield_now_d, d_skip, real(sim%r%boxlen,kind=dp), real(sim%r%turb_min_rho,kind=dp), do_turb &
+#endif
+         & )
 #endif
     call GPU_Error_Check(__FILE__, __LINE__)
-#ifdef GLMMHD
+#ifndef PAPER
     ! Harvest the folded-cmpdt min dt (computed by the integrator just synced above) for the
     ! NEXT step's dt (1-step lag). gpu_cmpdt returns this instead of running a separate pass.
     if (base_write) dt_lagged = dt_reduce(1)
@@ -2731,9 +2744,10 @@ contains
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
     real(kind=dp) :: smallr, smallc, dx, boxlen, turb_min_rho
 
-#ifdef GLMMHD
+#ifndef PAPER
     ! Single-level static: the forcing is fused into the integrator write-back (gpu_godunov,
-    ! do_turb), so the separate driving pass is skipped here to avoid double-applying.
+    ! do_turb), so the separate driving pass is skipped here to avoid double-applying. Both the
+    ! GLM-MHD and plain-HD integrators implement the fused driving.
     if (sim%r%levelmin == sim%r%nlevelmax .and. sim%r%static_mesh) return
 #endif
 

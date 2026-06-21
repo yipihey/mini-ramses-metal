@@ -620,7 +620,8 @@ contains
   !> @param[out] local_subgrid : The local subgrid in shared memory to write the primitive variables to
   !>
   attributes(device) subroutine subgrid_conserved_2_primitive(grid, uold, f, constant_gravity, nbor, &
-       & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
+       & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid, &
+       & dx, courant_factor, dt_out, do_dt, cfl_sqrt3)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
@@ -631,6 +632,10 @@ contains
     real(kind=dp), value :: gamma, smallr, smallc2
     real(kind=dp), value :: dt
     type(subgrid_6x6x6cell_primitive), intent(inout) :: local_subgrid
+    real(kind=dp), value :: dx, courant_factor      ! folded cmpdt (lagged dt): CFL from primitives
+    real(kind=8), device :: dt_out(*)               ! global min-dt accumulator (atomicmin)
+    logical, value :: do_dt                         ! only fold dt on the single-level path
+    logical, value :: cfl_sqrt3                     ! CFL aggregation: T=sqrt(3)*max, F=sum-over-dims
 
     type(conserved_t) :: conserved ! object to hold the conserved variables
     type(primitive_t) :: primitive ! object to hold the primitive variables
@@ -639,8 +644,13 @@ contains
     integer :: cell_idx, source_idx, subgrid_idx
     integer :: work_size
     integer :: s
+    integer :: info, owned_lo, owned_hi
+    real(kind=dp) :: ctot, grav, dtl, cs
+    real(kind=8) :: dt_min
 
     work_size = 2*nsubgrid+4
+    dt_min = huge(0d0)
+    owned_lo = 2; owned_hi = 2*nsubgrid+1   ! inner (owned) cells of the loaded region
 
     do work_idx = thread_idx, work_size**3 - 1, blockDim%x
 
@@ -673,6 +683,30 @@ contains
        ! Convert to primitive variables
        primitive = conserved_2_primitive(conserved, gamma, smallr, smallc2)
 
+       ! Folded cmpdt: CFL dt for owned (inner) leaf cells, from the primitive we just built
+       ! (no extra uold load). Reduced to a global min -> next step's dt (1-step lag).
+       if (do_dt) then
+          if ( i>=owned_lo .and. i<=owned_hi .and. j>=owned_lo .and. j<=owned_hi .and. &
+             & k>=owned_lo .and. k<=owned_hi .and. .not. grid(source_idx)%refined(cell_idx) ) then
+             cs = sqrt(gamma*primitive%pressure/primitive%density)
+             ! CFL signal speed: sqrt(3)*max(directional) [cfl_sqrt3, ~1.25x faster] or sum-over-dims [default].
+             if (cfl_sqrt3) then
+                ctot = sqrt(3.0_dp)*max(abs(primitive%velocity_x)+cs, &
+                     & max(abs(primitive%velocity_y)+cs, abs(primitive%velocity_z)+cs))
+             else
+                ctot = abs(primitive%velocity_x)+abs(primitive%velocity_y)+abs(primitive%velocity_z)+3.0_dp*cs
+             end if
+#ifdef GRAV
+             grav = abs(f(cell_idx,1,source_idx))+abs(f(cell_idx,2,source_idx))+abs(f(cell_idx,3,source_idx))
+#else
+             grav = abs(constant_gravity(1))+abs(constant_gravity(2))+abs(constant_gravity(3))
+#endif
+             grav = max(grav*dx/ctot**2, 0.0001_dp)
+             dtl = dx/ctot*(sqrt(1.0_dp+2.0_dp*courant_factor*grav)-1.0_dp)/grav
+             dt_min = min(dt_min, real(dtl, kind=8))
+          end if
+       end if
+
        ! Gravity predictor step
 #ifdef GRAV
        primitive%velocity_x = primitive%velocity_x + f(cell_idx, 1, source_idx) * 0.5_dp * dt
@@ -702,6 +736,12 @@ contains
 #endif
 
     end do
+
+    ! reduce the per-thread min dt across the block, atomicmin into the global accumulator
+    if (do_dt) then
+       dt_min = block_reduce_min(dt_min)
+       if (thread_idx == 0) info = atomicmin(dt_out(1), dt_min)
+    end if
 
     call syncthreads()
 
@@ -1674,9 +1714,14 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(device) subroutine conservative_update(unew, nbor, fluxes_x, fluxes_y, fluxes_z, &
-       & local_subgrid, head_idx, block_idx, thread_idx, dtdx)
+  attributes(device) subroutine conservative_update(unew, uold, nbor, fluxes_x, fluxes_y, fluxes_z, &
+       & local_subgrid, head_idx, block_idx, thread_idx, dtdx, base_write &
+#ifdef TURB
+       & , grid, afield_now, d_skip, dx, boxlen, turb_min_rho, smallr, smallc2, dteff, do_turb &
+#endif
+       & )
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
     type(subgrid_3x2x2cell_primitive), intent(in) :: fluxes_x
     type(subgrid_2x3x2cell_primitive), intent(in) :: fluxes_y
@@ -1685,6 +1730,7 @@ contains
     integer(kind=4), value :: head_idx
     integer, value :: block_idx, thread_idx
     real(kind=dp), value :: dtdx
+    logical, value :: base_write          ! single-level: write uold+flux (no set_unew seed)
 
     integer :: work_size
     integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
@@ -1692,6 +1738,20 @@ contains
     type(conserved_t) :: update_term
     integer :: s, li, lj, lk
     real(kind=dp) :: fl, fr, supd
+    real(kind=dp) :: b1, b2, b3, b4, b5       ! base (uold or unew) for the single-store write
+#ifdef TURB
+    ! Fused turbulent driving (single-level base_write): apply the forcing source term to the
+    ! freshly-computed state, replacing the separate turb_drive_apply_kernel pass.
+    type(oct), device :: grid(*)
+    real(kind=4), device :: afield_now(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1)
+    real(kind=dp), device :: d_skip(1:3)
+    real(kind=dp), value :: dx, boxlen, turb_min_rho, smallr, smallc2, dteff
+    logical, value :: do_turb
+    integer :: tdim, tbmin(1:3), tbmax(1:3)
+    real(kind=dp) :: tx, trr
+    real(kind=4) :: tw1(1:3), tw2(1:3)
+    real(kind=dp) :: tff(1:3), trmax, tener
+#endif
 
     ! Compute the size of the section of the subgrid to operate on
     work_size = 2*nsubgrid
@@ -1747,12 +1807,63 @@ contains
        update_term%momentum_z = (fluxes_z%velocity_z(i, j, k) - fluxes_z%velocity_z(i, j, k+1)) * dtdx + update_term%momentum_z
        update_term%energy     = (fluxes_z%pressure  (i, j, k) - fluxes_z%pressure  (i, j, k+1)) * dtdx + update_term%energy
 
-       ! Conservative update. Note that in this code dt/dx = dt/dy = dt/dz in all cases
-       unew(cell_idx, 1, oct_idx) = unew(cell_idx, 1, oct_idx) + update_term%density
-       unew(cell_idx, 2, oct_idx) = unew(cell_idx, 2, oct_idx) + update_term%momentum_x
-       unew(cell_idx, 3, oct_idx) = unew(cell_idx, 3, oct_idx) + update_term%momentum_y
-       unew(cell_idx, 4, oct_idx) = unew(cell_idx, 4, oct_idx) + update_term%momentum_z
-       unew(cell_idx, 5, oct_idx) = unew(cell_idx, 5, oct_idx) + update_term%energy
+       ! Add the flux divergence to the base value: uold for base_write (single-level, no
+       ! set_unew seed -- each cell written once) or the pre-seeded unew (AMR/cosmo accumulate).
+       ! dt/dx = dt/dy = dt/dz in all cases.
+       if (base_write) then
+          b1 = uold(cell_idx,1,oct_idx); b2 = uold(cell_idx,2,oct_idx); b3 = uold(cell_idx,3,oct_idx)
+          b4 = uold(cell_idx,4,oct_idx); b5 = uold(cell_idx,5,oct_idx)
+       else
+          b1 = unew(cell_idx,1,oct_idx); b2 = unew(cell_idx,2,oct_idx); b3 = unew(cell_idx,3,oct_idx)
+          b4 = unew(cell_idx,4,oct_idx); b5 = unew(cell_idx,5,oct_idx)
+       end if
+       b1 = b1 + update_term%density;    b2 = b2 + update_term%momentum_x
+       b3 = b3 + update_term%momentum_y; b4 = b4 + update_term%momentum_z
+       b5 = b5 + update_term%energy
+#ifdef TURB
+       ! Fused turbulent driving on the new state (b1=rho, b2:4=mom, b5=E). Trilinear-interp
+       ! afield_now at the cell centre -> tff, then remove KE / kick momentum / restore E.
+       ! Identical math to turb_drive_apply_kernel; runs only on the single-level turb path.
+       if (do_turb .and. b1 >= turb_min_rho) then
+          do tdim = 1, ndim
+             tx = (2*grid(oct_idx)%ckey(tdim) + mod((cell_idx-1)/2**(tdim-1), 2) + 0.5_dp)*dx - d_skip(tdim)
+             trr = tx/boxlen*real(turb_gs_real, kind=dp)
+             tbmin(tdim) = floor(trr); tbmax(tdim) = ceiling(trr)
+             if (tbmin(tdim) == TURB_GS) tbmin(tdim) = 0
+             if (tbmax(tdim) == TURB_GS) tbmax(tdim) = 0
+             tw1(tdim) = real(trr - real(floor(trr), kind=dp), kind=4)
+             tw2(tdim) = 1.0_4 - tw1(tdim)
+          end do
+          do tdim = 1, 3
+             tff(tdim) = &
+                  & afield_now(tdim,tbmin(1),tbmin(2),tbmin(3))*tw2(1)*tw2(2)*tw2(3) + &
+                  & afield_now(tdim,tbmax(1),tbmin(2),tbmin(3))*tw1(1)*tw2(2)*tw2(3) + &
+                  & afield_now(tdim,tbmin(1),tbmax(2),tbmin(3))*tw2(1)*tw1(2)*tw2(3) + &
+                  & afield_now(tdim,tbmax(1),tbmax(2),tbmin(3))*tw1(1)*tw1(2)*tw2(3) + &
+                  & afield_now(tdim,tbmin(1),tbmin(2),tbmax(3))*tw2(1)*tw2(2)*tw1(3) + &
+                  & afield_now(tdim,tbmax(1),tbmin(2),tbmax(3))*tw1(1)*tw2(2)*tw1(3) + &
+                  & afield_now(tdim,tbmin(1),tbmax(2),tbmax(3))*tw2(1)*tw1(2)*tw1(3) + &
+                  & afield_now(tdim,tbmax(1),tbmax(2),tbmax(3))*tw1(1)*tw1(2)*tw1(3)
+          end do
+          trmax = max(b1, smallr)
+          tener = b5
+          tener = max(tener - 0.5_dp*b2*b2/trmax, b1*smallc2)
+          tener = max(tener - 0.5_dp*b3*b3/trmax, b1*smallc2)
+          tener = max(tener - 0.5_dp*b4*b4/trmax, b1*smallc2)
+          b2 = b2 + trmax*tff(1)*dteff
+          b3 = b3 + trmax*tff(2)*dteff
+          b4 = b4 + trmax*tff(3)*dteff
+          tener = max(tener + 0.5_dp*b2*b2/trmax, b1*smallc2)
+          tener = max(tener + 0.5_dp*b3*b3/trmax, b1*smallc2)
+          tener = max(tener + 0.5_dp*b4*b4/trmax, b1*smallc2)
+          b5 = tener
+       end if
+#endif
+       unew(cell_idx, 1, oct_idx) = b1
+       unew(cell_idx, 2, oct_idx) = b2
+       unew(cell_idx, 3, oct_idx) = b3
+       unew(cell_idx, 4, oct_idx) = b4
+       unew(cell_idx, 5, oct_idx) = b5
 
 #if NVAR>5
        ! Passive-scalar (vars 6..nvar) advection: F(ρsᵢ) = (mass flux)·s_upwind (donor cell),
@@ -1775,7 +1886,11 @@ contains
           fr = fluxes_z%density(i, j, k+1)
           supd = supd + ( fl*merge(local_subgrid%scalar(li,lj,lk-1,s), local_subgrid%scalar(li,lj,lk,s), fl>0.0_dp) &
                         - fr*merge(local_subgrid%scalar(li,lj,lk,  s), local_subgrid%scalar(li,lj,lk+1,s), fr>0.0_dp) ) * dtdx
-          unew(cell_idx, 5+s, oct_idx) = unew(cell_idx, 5+s, oct_idx) + supd
+          if (base_write) then
+             unew(cell_idx, 5+s, oct_idx) = uold(cell_idx, 5+s, oct_idx) + supd
+          else
+             unew(cell_idx, 5+s, oct_idx) = unew(cell_idx, 5+s, oct_idx) + supd
+          end if
        end do
 #endif
 
@@ -2090,7 +2205,12 @@ contains
   ! trace's own internal state cut (or the pipeline split into separate kernels).
   attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
-       & gamma, smallr, smallc2, dt, dx, slope, riemann, constant_gravity)
+       & gamma, smallr, smallc2, dt, dx, slope, riemann, constant_gravity, base_write, &
+       & courant_factor, dt_out, cfl_sqrt3 &
+#ifdef TURB
+       & , afield_now, d_skip, boxlen, turb_min_rho, do_turb &
+#endif
+       & )
     type(oct), device :: grid(*)
     integer, device :: father(*)
     integer, device :: nbor(1:subgridsize,*)
@@ -2107,6 +2227,16 @@ contains
     real(kind=dp), intent(in), value :: dx
     integer, intent(in), value :: slope
     integer, intent(in), value :: riemann
+    logical, value :: base_write           ! single-level: write uold+flux (skip set_unew seed)
+    real(kind=dp), value :: courant_factor ! folded cmpdt (single-level): CFL dt reduction
+    real(kind=8), device :: dt_out(*)      ! global min-dt accumulator
+    logical, value :: cfl_sqrt3            ! CFL aggregation: T=sqrt(3)*max, F=sum-over-dims
+#ifdef TURB
+    real(kind=4), device :: afield_now(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1)  ! fused turb driving
+    real(kind=dp), device :: d_skip(1:3)
+    real(kind=dp), value :: boxlen, turb_min_rho
+    logical, value :: do_turb
+#endif
 
     type(subgrid_3x2x2cell_primitive), shared :: left_interfaces_x, right_interfaces_x
     type(subgrid_2x3x2cell_primitive), shared :: left_interfaces_y, right_interfaces_y
@@ -2129,7 +2259,8 @@ contains
     ! Convert from conserved to primitive variables
     ! =======================================================================
     call subgrid_conserved_2_primitive(grid, uold, f, constant_gravity, nbor, &
-         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
+         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid, &
+         & dx, courant_factor, dt_out, base_write, cfl_sqrt3)
 
     ! =======================================================================
     ! Perform tracing step and compute the interface states
@@ -2160,8 +2291,12 @@ contains
     ! =======================================================================
     ! Update the conserved variables at current level.
     ! =======================================================================
-    call conservative_update(unew, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, local_subgrid, &
-         & head_idx, block_idx, thread_idx, dtdx)
+    call conservative_update(unew, uold, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, local_subgrid, &
+         & head_idx, block_idx, thread_idx, dtdx, base_write &
+#ifdef TURB
+         & , grid, afield_now, d_skip, dx, boxlen, turb_min_rho, smallr, smallc2, dt, do_turb &
+#endif
+         & )
 
     ! =======================================================================
     ! Update the conserved variables at coarser level.
