@@ -156,6 +156,9 @@ module amr_commons
      ! Hydro solver parameters
      real(kind=8)::gamma=1.4d0
      real(kind=8)::courant_factor=0.5d0
+     logical::gpu_fused_step=.false.   ! opt-in fused single-level static GPU step (cmpdt-fold +
+                                       ! base_write + turb-fusion + pointer-swap). Default off =
+                                       ! classic per-pass behaviour unchanged. levelmin==nlevelmax only.
      real(kind=8)::smallc=1.d-10
      real(kind=8)::smallr=1.d-10
      integer ::niter_riemann=10
