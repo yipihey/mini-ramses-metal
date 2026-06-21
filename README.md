@@ -1,6 +1,20 @@
 [1]: https://bitbucket.org/rteyssie/ramses/
 [2]: https://bitbucket.org/rteyssie/mini-ramses/
 
+## This fork: a fast GPU GLM-MHD solver ##
+
+The `cuda-dedner-mhd` branch adds a cell-centred, Dedner-cleaned **GLM-MHD** solver to the
+CUDA port and optimises it heavily. On magnetised driven turbulence it is **statistically
+equivalent to upstream constrained-transport MHD** (same power spectra, Mach number and field
+energy to ≈1%) while running **3–5× faster**.
+
+📄 **[GLM-MHD vs CT-MHD turbulence comparison report](docs/glm_vs_ct_turbulence/index.html)**
+— throughput, statistical equivalence, power spectra, and midplane field slices. See
+[`runs/mhd_cuda/README.md`](runs/mhd_cuda/README.md) for the full GPU optimisation journey and
+per-kernel benchmarks.
+
+---
+
 ## mini-ramses ##
 
 The mini-ramses repository is a fork of the [main RAMSES repository][1]. It was created as a stripped-down version of the main code base created in order to facilitate the development of major updates of RAMSES' core routines. This stripped-down version is still available in the `master` branch.

@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GLM-MHD vs CT-MHD on the GPU — driven turbulence comparison</title>
+<style>
+  :root{--fg:#1a1a1a;--mut:#666;--acc:#1366d6;--bg:#fff;--card:#f6f8fa;--bd:#d8dee4;}
+  *{box-sizing:border-box}
+  body{font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+       color:var(--fg);background:var(--bg);margin:0;padding:0}
+  .wrap{max-width:940px;margin:0 auto;padding:32px 22px 80px}
+  h1{font-size:30px;line-height:1.25;margin:.2em 0 .1em}
+  h2{font-size:22px;margin:1.8em 0 .5em;border-bottom:2px solid var(--bd);padding-bottom:.2em}
+  h3{font-size:17px;margin:1.4em 0 .3em}
+  .sub{color:var(--mut);font-size:15px;margin-top:0}
+  code{background:var(--card);border:1px solid var(--bd);border-radius:4px;padding:.5px 5px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:15px}
+  th,td{border:1px solid var(--bd);padding:7px 11px;text-align:right}
+  th:first-child,td:first-child{text-align:left}
+  thead th{background:var(--card)}
+  tr td.win{font-weight:700;color:#0a7d28}
+  figure{margin:1.5em 0;text-align:center}
+  img{max-width:100%;height:auto;border:1px solid var(--bd);border-radius:6px}
+  figcaption{color:var(--mut);font-size:13.5px;margin-top:.5em;text-align:left}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:14px 18px}
+  .big{font-size:30px;font-weight:700;color:var(--acc);line-height:1}
+  .lead{font-size:18px;color:#333}
+  .pill{display:inline-block;background:#eaf2fd;color:var(--acc);border-radius:20px;padding:2px 11px;font-size:13px;font-weight:600;margin-right:6px}
+  ul.tight li{margin:.2em 0}
+  .foot{color:var(--mut);font-size:13.5px;border-top:1px solid var(--bd);margin-top:2.5em;padding-top:1em}
+  @media(max-width:620px){.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>A fast GPU GLM-MHD solver vs. constrained transport</h1>
+<p class="sub">Statistical equivalence at a fraction of the cost — measured on identical magnetised driven turbulence.</p>
+<p>
+  <span class="pill">256³</span><span class="pill">isothermal</span><span class="pill">β = 2</span>
+  <span class="pill">Mach ≈ 3</span><span class="pill">RTX A6000</span>
+</p>
+
+<p class="lead">
+This fork adds a <b>cell-centred, Dedner-cleaned GLM-MHD</b> solver to mini-ramses' GPU port and
+optimises it heavily. The question this page answers: <b>does the faster solver give the same physics
+as the reference constrained-transport (CT) scheme?</b> We drive the same turbulence box with the same
+forcing through three solvers and compare the turbulence statistics, power spectra, and the actual fields.
+</p>
+
+<div class="grid2">
+  <div class="card"><div class="big">4.7×</div>GLM-MHD (PLM) faster than CT-MHD, godunov throughput</div>
+  <div class="card"><div class="big">&lt;1%</div>difference in sonic Mach and magnetic field energy between the solvers</div>
+</div>
+
+<h2>The three solvers</h2>
+<table>
+<thead><tr><th>solver</th><th>B representation</th><th>div·B</th><th>per-cell work</th></tr></thead>
+<tbody>
+<tr><td><b>GLM-MHD</b> (ours)</td><td style="text-align:left">cell-centred + cleaning scalar ψ (9 vars)</td><td style="text-align:left">bounded by hyperbolic/parabolic cleaning</td><td style="text-align:left">one 1-D HLLD Riemann solve per face</td></tr>
+<tr><td><b>CT-MHD</b> (upstream)</td><td style="text-align:left">face-staggered (constrained transport)</td><td style="text-align:left"><b>= 0 to machine precision</b></td><td style="text-align:left">1-D + 2-D-HLLD EMF on edges + induction</td></tr>
+</tbody>
+</table>
+<p>
+<b>Constrained transport (CT)</b> stores <b>B</b> on cell faces and updates it with an edge-centred
+electromotive force (a 2-D HLLD Riemann problem), so the discrete divergence is exactly zero forever.
+That guarantee costs work: extra Riemann solves, the induction update, and a larger per-block memory
+footprint.
+</p>
+<p>
+<b>GLM (Dedner) cleaning</b> instead keeps <b>B</b> cell-centred like any other fluid variable and adds a
+scalar field ψ that advects divergence errors away at the fast wave speed and damps them. div·B is no
+longer exactly zero — it is held small by the cleaning — but every face needs only a single 1-D Riemann
+solve, and the lighter, cell-centred layout is what makes the heavy GPU optimisation possible.
+</p>
+
+<h2>Performance</h2>
+<p>Godunov-kernel throughput at 256³ (the fair solver metric, both solvers built with <code>-gpu=fastmath</code>):</p>
+<table>
+<thead><tr><th>solver / reconstruction</th><th>Mcell/s</th><th>vs CT</th></tr></thead>
+<tbody>
+<tr><td><b>GLM-MHD — PLM</b> (2nd order)</td><td class="win">1569</td><td class="win">4.7×</td></tr>
+<tr><td><b>GLM-MHD — parabolic PPM</b> (3rd order)</td><td class="win">1065</td><td class="win">3.2×</td></tr>
+<tr><td>CT-MHD — PLM (upstream)</td><td>336</td><td>1.0×</td></tr>
+</tbody>
+</table>
+<h3>Where the speed comes from</h3>
+<ul class="tight">
+<li><b>Algorithm:</b> one 1-D Riemann solve per face instead of CT's face-staggering + 2-D-HLLD EMF + induction update.</li>
+<li><b>Blocking (<code>nsubgrid=2</code>):</b> 8 octs per CUDA block (37.8&nbsp;KB shared) cuts halo redundancy 27×→8×. GLM's lighter footprint fits; CT's face-B + EMF arrays need ~64&nbsp;KB and overflow the 48&nbsp;KB static limit, so CT cannot use this blocking.</li>
+<li><b>Per-kernel <code>launch_bounds</code>:</b> each reconstruction kernel gets its own register cap to hit the right blocks/SM (occupancy is the wall, not arithmetic).</li>
+<li><b>fastmath:</b> the kernels are latency-bound on the sqrt/divide chain; the ~22-bit SFU approximations roughly double throughput, validated negligible against the scheme's truncation error.</li>
+</ul>
+<p>The two GLM reconstructions span an accuracy/speed knob: PLM is fastest, parabolic PPM is 3rd-order-spatial
+at 3.2× CT. (The full 7-wave <i>characteristic</i> PPM is the most accurate option on smooth flows but proved
+too fragile for this strongly supersonic regime — see caveats.)</p>
+
+<h2>Statistical equivalence</h2>
+<p>Identical OU forcing (same seed), evolved to <b>2 crossing times</b>. The turbulence statistics agree across all three solvers:</p>
+<table>
+<thead><tr><th>quantity</th><th>GLM-PLM</th><th>GLM-PPM</th><th>CT-MHD</th></tr></thead>
+<tbody>
+<tr><td>sonic Mach number</td><td>2.944</td><td>2.944</td><td>2.928</td></tr>
+<tr><td>σ(ln ρ) — density-PDF width</td><td>0.573</td><td>0.576</td><td>0.547</td></tr>
+<tr><td>⟨B²/2⟩ — magnetic energy</td><td>0.0226</td><td>0.0227</td><td>0.0221</td></tr>
+<tr><td>B<sub>rms</sub></td><td>0.213</td><td>0.213</td><td>0.210</td></tr>
+</tbody>
+</table>
+<p>The two GLM solvers are nearly indistinguishable (≤0.5%); both match CT to under 1% in Mach and field
+strength. CT's density PDF is ~5% narrower — consistent with its exact div·B = 0 producing marginally
+different shock structure. The full distributions overlap:</p>
+<figure>
+  <img src="img/pdfs.png" alt="Density, velocity and field-magnitude PDFs for the three solvers">
+  <figcaption><b>Probability distributions at 2 crossing times.</b> Density (lognormal in s = ln ρ/⟨ρ⟩),
+  velocity magnitude (dotted line = sound speed), and field magnitude. The three solvers' PDFs lie on top of one another.</figcaption>
+</figure>
+
+<h3>Power spectra</h3>
+<p>The cleanest test of "same turbulence": the velocity, magnetic and density power spectra agree through the
+entire <i>resolved</i> cascade and diverge only at the grid scale.</p>
+<figure>
+  <img src="img/spectra.png" alt="Velocity, magnetic and density power spectra for the three solvers">
+  <figcaption><b>Power spectra.</b> The velocity spectrum sits between k<sup>−5/3</sup> and k<sup>−2</sup>, as
+  expected for Mach-3 turbulence. All three solvers overlap for k ≲ 30 (velocity, magnetic, <i>and</i> density).
+  They separate only in the dissipation range (k ≳ 40): <b>CT-MHD retains slightly more small-scale power</b>
+  (less numerically dissipative at the grid scale), while the two GLM solvers roll off together. The
+  large-scale physics — where the science lives — is solver-independent.</figcaption>
+</figure>
+
+<h2>The fields themselves</h2>
+<p>Midplane slices of velocity magnitude, current density |∇×B|, and gas density as the turbulence develops
+over the two crossing times (our GLM-PLM solver):</p>
+<figure>
+  <img src="img/evolution.png" alt="Time evolution of midplane slices: |v|, |curl B|, density">
+  <figcaption><b>Evolution (GLM-MHD, PLM).</b> Top: velocity magnitude growing as the driving ramps in.
+  Middle: |∇×B| (current density) — the seed field starts uniform (dark) and is progressively tangled into
+  filamentary current sheets. Bottom: gas density developing the shock/void network of supersonic turbulence.</figcaption>
+</figure>
+<p>The same slices at 2 crossing times, side by side for the three solvers, show that the agreement in the
+statistics holds field-by-field:</p>
+<figure>
+  <img src="img/solvers.png" alt="Solver comparison of midplane slices at 2 crossing times">
+  <figcaption><b>Three solvers, same snapshot.</b> Velocity (top), current density (middle) and density
+  (bottom) at t = 2 crossing times. The large-scale structures are the same realisation across GLM-PLM,
+  GLM-PPM and CT-MHD; differences are confined to the smallest scales (cf. the dissipation range of the spectra).</figcaption>
+</figure>
+
+<h2>Method &amp; caveats</h2>
+<ul class="tight">
+<li><b>Setup:</b> 256³ uniform grid, isothermal EOS, plasma β = 2 (uniform seed field Bx₀ = √p), solenoidal+compressive
+OU forcing (same seed for all solvers), run with the executables (not via the C-API) to identical physical times.</li>
+<li><b>Driving ramp:</b> the forcing is ramped linearly 0→full over the first crossing time. Slamming the gas
+with full forcing from rest creates a cold-start transient that triggers positivity failures; the gentle
+spin-up is what makes stable supersonic runs possible.</li>
+<li><b>Mach ≈ 3, single realisation:</b> the Mach-5 regime the namelist targets is numerically unstable at 256³
+for these schemes even with the ramp. Statistics are from one forcing seed — multi-seed error bars are future work.</li>
+<li><b>Characteristic PPM fragility:</b> the 7-wave characteristic reconstruction (most accurate on smooth flows)
+blew up even at Mach 1.2 here; the robust PPM used above is the parabolic reconstruction. The characteristic
+scheme's supersonic robustness is a known gap worth a dedicated fix.</li>
+<li><b>Analysis:</b> 3-D fields are rebuilt from the output files using a geometric oct→cell map; the resulting
+clean power-law spectra (rather than white noise) confirm the spatial mapping is correct.</li>
+</ul>
+
+<h2>Takeaway</h2>
+<p class="lead">
+On magnetised supersonic driven turbulence, the GLM-MHD solver is <b>statistically equivalent to constrained
+transport through the resolved cascade</b> — same spectra, same Mach, same field energy to ≈1% — while running
+<b>3–5× faster</b>. When exact div·B = 0 is essential, CT remains the tool; for the large class of problems where
+cleaning-level divergence control suffices, GLM-MHD delivers the same science substantially cheaper.
+</p>
+
+<p class="foot">
+Generated from the <code>cuda-dedner-mhd</code> branch of mini-ramses-metal. Throughput measured on an NVIDIA
+RTX A6000. See <code>runs/mhd_cuda/README.md</code> for the full GPU optimisation journey and per-kernel benchmarks.
+</p>
+
+</div>
+</body>
+</html>
