@@ -200,9 +200,9 @@ contains
     ! Operator-split GLM parabolic damping of psi (after uold <- unew).
     dt = sim%g%dtnew(ilevel)
     dx = sim%r%boxlen/2**ilevel
-    ch = sim%r%courant_factor*dx/dt/real(ndim,dp)
+    ch = sim%r%courant_factor*dx/dt/real(ndim,dp)*sim%r%glm_ch_scale
     divb_len = sim%r%boxlen
-    call glm_damp_psi_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, head_idx, num_octs, ch, dt, divb_len)
+    call glm_damp_psi_kernel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(uold, head_idx, num_octs, ch, dt, divb_len, real(sim%r%glm_cp_coef,kind=dp))
 #endif
     call GPU_Error_Check(__FILE__, __LINE__)
     call nvtxEndRange()
@@ -357,7 +357,7 @@ contains
     if(nsubgrid == 1)threads_per_block = 64
     if(nsubgrid == 2)threads_per_block = 256
     ! Dedner cleaning speed = max signal speed implied by the CFL condition.
-    ch = sim%r%courant_factor*dx/dt/real(ndim,dp)
+    ch = sim%r%courant_factor*dx/dt/real(ndim,dp)*sim%r%glm_ch_scale
     if (slope == 10) then
        call mhd_integrator_kernel_ppm<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
             & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &

@@ -157,6 +157,12 @@ module amr_commons
      ! Hydro solver parameters
      real(kind=8)::gamma=1.4d0
      real(kind=8)::courant_factor=0.5d0
+     real(kind=8)::glm_ch_scale=0.25d0  ! GLM cleaning speed c_h multiplier. The textbook
+                                        ! c_h=c_max over-drives the psi-B coupling (fpsi~c_h^2),
+                                        ! over-dissipating small scales AND worsening div.B;
+                                        ! c_max/4 recovers the turbulent cascade (matches CT) and
+                                        ! cuts OT div.B ~10x. Tunable via hydro_params.
+     real(kind=8)::glm_cp_coef=0.18d0   ! GLM psi parabolic-damping coefficient (cp^2=coef*L*ch); <=0 disables damping
      real(kind=8)::smallc=1.d-10
      real(kind=8)::smallr=1.d-10
      integer ::niter_riemann=10

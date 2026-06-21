@@ -292,6 +292,8 @@ subroutine m_read_params(pst)
   real(kind=8)::gamma=1.4d0
   real(kind=8),dimension(1:512)::gamma_rad=1.33333333334d0
   real(kind=8)::courant_factor=0.5d0
+  real(kind=8)::glm_ch_scale=0.25d0
+  real(kind=8)::glm_cp_coef=0.18d0
   real(kind=8)::difmag=0.0d0
   real(kind=8)::etamag=0.0d0
   real(kind=8)::smallc=1.d-10
@@ -616,6 +618,7 @@ subroutine m_read_params(pst)
        & ,d_region,u_region,v_region,w_region,p_region
   ! Hydro solver parameters
   namelist/hydro_params/gamma,courant_factor,smallr,smallc &
+       & ,glm_ch_scale,glm_cp_coef &
        & ,slope_type,slope_mag_type,difmag,etamag,gamma_rad &
        & ,dual_energy,T2_fix,induction,entropy,sgs_turb,equilibrium_sgs,riemann,riemann2d,constant_gravity &
        & ,niter_riemann,scheme,switch_llf_dmin,switch_llf_pmin,smagorinsky_lilly_constant
@@ -1371,6 +1374,8 @@ subroutine m_read_params(pst)
 
   s%r%gamma=gamma
   s%r%courant_factor=courant_factor
+  s%r%glm_ch_scale=glm_ch_scale
+  s%r%glm_cp_coef=glm_cp_coef
   s%r%smallc=smallc
   s%r%smallr=smallr
   s%r%niter_riemann=niter_riemann

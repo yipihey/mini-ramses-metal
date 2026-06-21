@@ -3058,19 +3058,21 @@ contains
     end if
   end subroutine cmpdt_kernel_mhd
 
-  ! ----- GLM parabolic damping: psi *= exp(-(ch/cp)^2 dt), cp^2=0.18 L ch ------
-  attributes(global) subroutine glm_damp_psi_kernel(uold, head_idx, num_octs, ch, dt, divb_len)
+  ! ----- GLM parabolic damping: psi *= exp(-(ch/cp)^2 dt), cp^2=cp_coef L ch ------
+  ! cp_coef is the runtime knob (default 0.18); cp_coef<=0 disables psi damping.
+  attributes(global) subroutine glm_damp_psi_kernel(uold, head_idx, num_octs, ch, dt, divb_len, cp_coef)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     integer(kind=4), value :: head_idx, num_octs
-    real(kind=dp), value :: ch, dt, divb_len
+    real(kind=dp), value :: ch, dt, divb_len, cp_coef
     integer :: block_idx, cell_idx, oct_idx
     real(kind=8) :: cp2, fac
+    if (cp_coef <= 0.0d0) return
     block_idx = blockIdx%x - 1
     oct_idx = block_idx*blockDim%y + threadIdx%y - 1
     if (oct_idx >= num_octs) return
     oct_idx = head_idx + oct_idx
     cell_idx = threadIdx%x
-    cp2 = 0.18d0*divb_len*ch
+    cp2 = cp_coef*divb_len*ch
     fac = exp(-(ch*ch/cp2)*dt)
     uold(cell_idx, 9, oct_idx) = uold(cell_idx, 9, oct_idx) * fac
   end subroutine glm_damp_psi_kernel
