@@ -2499,10 +2499,19 @@ contains
 
     integer(kind=4) :: ntot
     integer :: num_threads, num_blocks
-    real(kind=8) :: last_tfrac, next_tfrac
+    real(kind=8) :: last_tfrac, next_tfrac, ramp
+    ! Linearly ramp the driving amplitude 0 -> full over the first crossing time, so
+    ! the gas spins up gently rather than being slammed from rest (the cold-start
+    ! transient is what drives the strong-rarefaction positivity failures). The OU
+    ! acceleration field is scaled by `ramp` via the interpolation weights; ramp=1
+    ! afterwards. t_ramp ~ turb_T (forcing turnover / first crossing time).
+    real(kind=8), parameter :: t_ramp = 0.3d0
 
     last_tfrac = (sim%g%t - sim%turb%turb_last_time)/sim%turb%turb_dt
     next_tfrac = 1d0 - last_tfrac
+    ramp = min(sim%g%t / t_ramp, 1.0d0)
+    last_tfrac = last_tfrac * ramp
+    next_tfrac = next_tfrac * ramp
 
     ntot = ndim*TURB_GS**ndim
     num_threads = 256
