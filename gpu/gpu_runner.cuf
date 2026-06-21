@@ -30,6 +30,12 @@ module gpu_runner
   !> Device arrays for face-centred B (MHD).
   real(kind=dp), device, allocatable, dimension(:,:,:) :: bold, bnew
 
+  !> Folded-cmpdt accumulator (single-level fused step, gpu_fused_step): the integrator reduces
+  !> the CFL dt into dt_reduce as a byproduct; gpu_cmpdt returns it (1-step lag) instead of
+  !> running a separate cmpdt pass. dt_lagged<0 = not yet computed (bootstrap step).
+  real(kind=8), device :: dt_reduce(1)
+  real(kind=8) :: dt_lagged = -1.0d0
+
 #ifdef TURB
   !> Turbulent acceleration fields on the device (64^3 x NDIM), generated on the host.
   real(kind=8), device, allocatable, dimension(:,:,:,:) :: afield_last_d, afield_next_d, afield_now_d
@@ -127,6 +133,16 @@ contains
     real(kind=dp) :: gamma, smallr, smallc2, dx, courant_factor
     real(kind=8), device, dimension(5) :: d_data !mass, ekin, eint, emag, dt
     real(kind=8), dimension(5) :: h_data
+
+    ! Folded cmpdt (single-level fused): the integrator reduced the CFL dt last step. Return that
+    ! (1-step lag) and skip the separate cmpdt pass. dt_lagged<0 = bootstrap (step 0): fall through
+    ! to one synchronous cmpdt so step 0 has a real dt; the integrator then takes over.
+    if (sim%r%gpu_fused_step .and. sim%r%levelmin==sim%r%nlevelmax .and. sim%r%static_mesh &
+       & .and. dt_lagged > 0.0d0) then
+       dt = dt_lagged
+       mass = 0d0; ekin = 0d0; eint = 0d0; emag = 0d0
+       return
+    end if
 
     courant_factor = sim%r%courant_factor
     gamma = sim%r%gamma
@@ -437,7 +453,7 @@ contains
     integer :: threads_per_block, num_blocks
     real(dp) :: dt, dx, gamma, smallr, smallc2, switch_llf_dmin, switch_llf_pmin
     integer :: slope, riemann, slope_mag, riemann2d
-    logical :: induction
+    logical :: induction, fused
 
     if(sim%r%verbose.and.sim%g%myid==1)write(*,'("   Entering gpu_godunov for level ",I2)')ilevel
 
@@ -456,10 +472,15 @@ contains
     switch_llf_dmin_d = switch_llf_dmin
     switch_llf_pmin_d = switch_llf_pmin
     induction = sim%r%induction
+    ! Fused single-level static fast path (opt-in): fold the CFL dt into the integrator.
+    fused = (sim%r%gpu_fused_step .and. sim%r%levelmin==sim%r%nlevelmax .and. sim%r%static_mesh)
 
     head_idx = (sim%m%head(ilevel) - 1) / nsubgridtondim + 1
     num_subgrids = sim%m%noct(ilevel) / nsubgridtondim
     num_blocks = num_subgrids
+
+    ! Folded cmpdt: seed the global min-dt with a large value; the integrator atomicmins into it.
+    if (fused) dt_reduce(1) = sim%r%courant_factor*dx/sim%r%smallc
 
     call nvtxStartRange("GPU Godunov", color=0)!green
 #ifdef PAPER
@@ -476,8 +497,12 @@ contains
          & f, father, nbor, &
          & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
          & gamma, smallr, smallc2, dt, dx, slope, slope_mag, riemann, riemann2d, &
-         & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
+         & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity, &
+         & real(sim%r%courant_factor,kind=dp), dt_reduce, fused)
     call GPU_Error_Check(__FILE__, __LINE__)
+    ! Harvest the folded-cmpdt min dt (integrator just synced) for the NEXT step's dt (1-step lag);
+    ! gpu_cmpdt returns this instead of running a separate pass.
+    if (fused) dt_lagged = dt_reduce(1)
 #endif
     call nvtxEndRange()
 

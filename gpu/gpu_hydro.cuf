@@ -1094,7 +1094,8 @@ contains
 #ifdef MHD
        & bf, &
 #endif
-       & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
+       & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid, &
+       & dx, courant_factor, induction, dt_out, do_dt)
     type(oct), device :: grid(*)
     real(kind=8), device :: constant_gravity(3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
@@ -1106,6 +1107,10 @@ contains
     real(kind=dp), value :: gamma, smallr, smallc2
     real(kind=dp), value :: dt
     type(subgrid_6x6x6cell_primitive), intent(inout) :: local_subgrid
+    real(kind=dp), value :: dx, courant_factor    ! folded cmpdt (lagged dt): CFL from primitives
+    logical, value :: induction                   ! CT dt: induction-only vs fast-magnetosonic
+    real(kind=8), device :: dt_out(*)             ! global min-dt accumulator (atomicmin)
+    logical, value :: do_dt                       ! only fold dt on the single-level fused path
 #if NVAR>5+NENER
     real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
     integer :: n
@@ -1126,8 +1131,17 @@ contains
     integer :: source_idx_face
     real(kind=dp) :: b0(1:6)
 #endif
+    ! folded cmpdt: per-thread CFL dt min, reduced to the global accumulator after the loop
+    integer :: info_dt, owned_lo, owned_hi
+    real(kind=dp) :: ctot, grav_dt, dtl
+    real(kind=8) :: dt_min
+#ifdef MHD
+    real(kind=dp) :: pp_dt, b2sq_dt, rinv_dt, a2_dt, c2v_dt
+#endif
 
     work_size = 2*nsubgrid+4
+    dt_min = huge(0d0)
+    owned_lo = 2; owned_hi = 2*nsubgrid+1   ! inner (owned) cells of the central oct
 
     do work_idx = thread_idx, work_size**3 - 1, blockDim%x
 
@@ -1198,6 +1212,39 @@ contains
        primitive = conserved_2_primitive(conserved, gamma, smallr, smallc2)
        invD = 1.0_dp / primitive%density
 
+       ! Folded cmpdt: CFL dt for owned (inner) leaf cells, from the raw primitive (before the
+       ! gravity predictor) -- mirrors cmpdt_kernel exactly. Reduced to a global min after the loop.
+       if (do_dt) then
+          if ( i>=owned_lo .and. i<=owned_hi .and. j>=owned_lo .and. j<=owned_hi .and. &
+             & k>=owned_lo .and. k<=owned_hi .and. .not. grid(source_idx)%refined(cell_idx) ) then
+#ifdef MHD
+             pp_dt = max(primitive%pressure, primitive%density*smallc2/gamma)
+             b2sq_dt = compute_bsquared(primitive%Bx, primitive%By, primitive%Bz)
+             rinv_dt = invD
+             a2_dt = gamma*pp_dt*rinv_dt
+             if (induction) then
+                ctot = abs(primitive%velocity_x)+abs(primitive%velocity_y)+abs(primitive%velocity_z) + 3.0_dp*sqrt(smallc2)
+             else
+                c2v_dt = 0.5_dp*(b2sq_dt*rinv_dt + a2_dt)
+                ctot = abs(primitive%velocity_x) + sqrt(c2v_dt + sqrt(c2v_dt**2 - a2_dt*primitive%Bx**2*rinv_dt)) &
+                     & + abs(primitive%velocity_y) + sqrt(c2v_dt + sqrt(c2v_dt**2 - a2_dt*primitive%By**2*rinv_dt)) &
+                     & + abs(primitive%velocity_z) + sqrt(c2v_dt + sqrt(c2v_dt**2 - a2_dt*primitive%Bz**2*rinv_dt))
+             endif
+#else
+             ctot = abs(primitive%velocity_x)+abs(primitive%velocity_y)+abs(primitive%velocity_z) &
+                  & + 3.0_dp*sqrt(gamma*primitive%pressure*invD)
+#endif
+#ifdef GRAV
+             grav_dt = abs(f(cell_idx,1,source_idx))+abs(f(cell_idx,2,source_idx))+abs(f(cell_idx,3,source_idx))
+#else
+             grav_dt = abs(constant_gravity(1))+abs(constant_gravity(2))+abs(constant_gravity(3))
+#endif
+             grav_dt = max(grav_dt*dx/ctot**2, 0.0001_dp)
+             dtl = dx/ctot*(sqrt(1.0_dp+2.0_dp*courant_factor*grav_dt)-1.0_dp)/grav_dt
+             dt_min = min(dt_min, real(dtl, kind=8))
+          end if
+       end if
+
        ! Gravity predictor step
 #ifdef GRAV
        primitive%velocity_x = primitive%velocity_x + f(cell_idx, 1, source_idx) * 0.5_dp * dt
@@ -1229,6 +1276,12 @@ contains
        endif
 
     end do
+
+    ! reduce the per-thread min dt across the block, atomicmin into the global accumulator
+    if (do_dt) then
+       dt_min = block_reduce_min(dt_min)
+       if (thread_idx == 0) info_dt = atomicmin(dt_out(1), dt_min)
+    end if
 
     call syncthreads()
 
@@ -3332,7 +3385,8 @@ contains
        & f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, smallr, smallc2, dt, dx, slope, slope_mag, riemann, riemann2d, &
-       & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity)
+       & switch_llf_dmin, switch_llf_pmin, induction, constant_gravity, &
+       & courant_factor, dt_out, do_dt)
     type(oct), device :: grid(*)
     integer, device :: father(*)
     integer, device :: nbor(1:subgridsize,*)
@@ -3355,6 +3409,9 @@ contains
     integer, intent(in), value :: riemann2d
     real(kind=dp), intent(in), value :: switch_llf_dmin, switch_llf_pmin
     logical, intent(in), value :: induction
+    real(kind=dp), intent(in), value :: courant_factor   ! folded cmpdt: CFL dt reduction
+    real(kind=8), device :: dt_out(*)                    ! global min-dt accumulator
+    logical, intent(in), value :: do_dt                  ! fold dt only on the fused single-level path
 
     type(subgrid_3x2x2cell_primitive), shared :: left_interfaces_x, right_interfaces_x
     type(subgrid_2x3x2cell_primitive), shared :: left_interfaces_y, right_interfaces_y
@@ -3398,7 +3455,8 @@ contains
 #ifdef MHD
          & bf, &
 #endif
-         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
+         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid, &
+         & dx, courant_factor, induction, dt_out, do_dt)
 
     ! =======================================================================
     ! Perform tracing step and compute the interface states
