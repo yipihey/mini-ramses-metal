@@ -80,4 +80,21 @@ contains
        if (trim(labels(i)) == 'hydro - godunov') secs = real(time(i), c_double)
     end do
   end function ramses_get_timer_godunov
+
+  ! Max |div.B| over leaf cells at levelmin (CT diagnostic). Returns -1 on bad handle.
+  function ramses_get_divb_max(handle) result(divb) bind(C, name="ramses_get_divb_max")
+#ifdef _CUDA
+    use gpu_runner, only: gpu_divb_max
+#endif
+    integer(c_int), value :: handle
+    real(c_double) :: divb
+    type(pst_t) :: pst; logical :: ok
+    real(kind=8) :: dmax
+    divb = -1.0_c_double
+    call capi_pst(handle, pst, ok); if (.not. ok) return
+#if defined(_CUDA) && defined(MHD)
+    call gpu_divb_max(pst%s, pst%s%r%levelmin, dmax)
+    divb = real(dmax, c_double)
+#endif
+  end function ramses_get_divb_max
 end module ramses_capi

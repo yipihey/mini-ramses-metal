@@ -2388,13 +2388,16 @@ contains
   ! =========================================================================
 
   ! =========================================================================
-  attributes(device) subroutine conservative_update(unew, bnew, nbor, fluxes_x, fluxes_y, fluxes_z, &
+  attributes(device) subroutine conservative_update(unew, bnew, uold, bold, nbor, fluxes_x, fluxes_y, fluxes_z, &
 #ifdef MHD
        & emfx, emfy, emfz, &
 #endif
-       & head_idx, block_idx, thread_idx, dtdx)
+       & head_idx, block_idx, thread_idx, dtdx, base_write)
     real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
     real(kind=dp), device :: bnew(1:twotondim,1:6,*) ! Unused without MHD
+    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*) ! Unused without MHD
+    logical, value :: base_write   ! single-level fused: write uold/bold+flux (no set_unew seed)
     integer(kind=4), device :: nbor(1:subgridsize,*)
     type(subgrid_3x2x2cell_primitive), intent(in) :: fluxes_x
     type(subgrid_2x3x2cell_primitive), intent(in) :: fluxes_y
@@ -2474,36 +2477,52 @@ contains
        update_term%momentum_z = (fluxes_z%velocity_z(i, j, k) - fluxes_z%velocity_z(i, j, k+1)) * dtdx + update_term%momentum_z
        update_term%energy     = (fluxes_z%pressure  (i, j, k) - fluxes_z%pressure  (i, j, k+1)) * dtdx + update_term%energy
 
-       ! Conservative update. Note that in this code dt/dx = dt/dy = dt/dz in all cases
-       unew(cell_idx, 1, oct_idx) = unew(cell_idx, 1, oct_idx) + update_term%density
-       unew(cell_idx, 2, oct_idx) = unew(cell_idx, 2, oct_idx) + update_term%momentum_x
-       unew(cell_idx, 3, oct_idx) = unew(cell_idx, 3, oct_idx) + update_term%momentum_y
-       unew(cell_idx, 4, oct_idx) = unew(cell_idx, 4, oct_idx) + update_term%momentum_z
-       unew(cell_idx, 5, oct_idx) = unew(cell_idx, 5, oct_idx) + update_term%energy
+       ! Conservative update. base_write (single-level fused) adds the flux divergence to uold
+       ! directly -- each cell written once, no separate set_unew seed -- else accumulates into
+       ! the pre-seeded unew (AMR/cosmo). dt/dx = dt/dy = dt/dz in all cases.
+       if (base_write) then
+          unew(cell_idx, 1, oct_idx) = uold(cell_idx, 1, oct_idx) + update_term%density
+          unew(cell_idx, 2, oct_idx) = uold(cell_idx, 2, oct_idx) + update_term%momentum_x
+          unew(cell_idx, 3, oct_idx) = uold(cell_idx, 3, oct_idx) + update_term%momentum_y
+          unew(cell_idx, 4, oct_idx) = uold(cell_idx, 4, oct_idx) + update_term%momentum_z
+          unew(cell_idx, 5, oct_idx) = uold(cell_idx, 5, oct_idx) + update_term%energy
+       else
+          unew(cell_idx, 1, oct_idx) = unew(cell_idx, 1, oct_idx) + update_term%density
+          unew(cell_idx, 2, oct_idx) = unew(cell_idx, 2, oct_idx) + update_term%momentum_x
+          unew(cell_idx, 3, oct_idx) = unew(cell_idx, 3, oct_idx) + update_term%momentum_y
+          unew(cell_idx, 4, oct_idx) = unew(cell_idx, 4, oct_idx) + update_term%momentum_z
+          unew(cell_idx, 5, oct_idx) = unew(cell_idx, 5, oct_idx) + update_term%energy
+       end if
 
 #if NVAR>5+NENER
        do n = 1, nscalar
           supd = (fluxes_x%scalar(i,j,k,n) - fluxes_x%scalar(i+1,j,k,n)) * dtdx &
                & + (fluxes_y%scalar(i,j,k,n) - fluxes_y%scalar(i,j+1,k,n)) * dtdx &
                & + (fluxes_z%scalar(i,j,k,n) - fluxes_z%scalar(i,j,k+1,n)) * dtdx
-          unew(cell_idx, 5+nener+n, oct_idx) = unew(cell_idx, 5+nener+n, oct_idx) + supd
+          if (base_write) then
+             unew(cell_idx, 5+nener+n, oct_idx) = uold(cell_idx, 5+nener+n, oct_idx) + supd
+          else
+             unew(cell_idx, 5+nener+n, oct_idx) = unew(cell_idx, 5+nener+n, oct_idx) + supd
+          end if
        end do
 
 #endif
 #ifdef MHD
-       ! Constrained-transport curl of edge EMFs advances face-B.
+       ! Constrained-transport curl of edge EMFs advances face-B. base_write seeds from bold (==
+       ! what set_unew would have copied), else accumulates into the pre-seeded bnew. bnew=bold+dflux
+       ! is algebraically identical to the seed+accumulate path, so div.B is preserved exactly.
        dflux = ( (emfy%edge_e(i,j,k)-emfy%edge_e(i,j,k+1)) - (emfz%edge_e(i,j,k)-emfz%edge_e(i,j+1,k)) ) * dtdx
-       bnew(cell_idx, 1, oct_idx) = bnew(cell_idx, 1, oct_idx) + dflux
+       bnew(cell_idx, 1, oct_idx) = merge(bold(cell_idx,1,oct_idx), bnew(cell_idx,1,oct_idx), base_write) + dflux
        dflux = ( (emfy%edge_e(i+1,j,k)-emfy%edge_e(i+1,j,k+1)) - (emfz%edge_e(i+1,j,k)-emfz%edge_e(i+1,j+1,k)) ) * dtdx
-       bnew(cell_idx, 4, oct_idx) = bnew(cell_idx, 4, oct_idx) + dflux
+       bnew(cell_idx, 4, oct_idx) = merge(bold(cell_idx,4,oct_idx), bnew(cell_idx,4,oct_idx), base_write) + dflux
        dflux = ( (emfz%edge_e(i,j,k)-emfz%edge_e(i+1,j,k)) - (emfx%edge_e(i,j,k)-emfx%edge_e(i,j,k+1)) ) * dtdx
-       bnew(cell_idx, 2, oct_idx) = bnew(cell_idx, 2, oct_idx) + dflux
+       bnew(cell_idx, 2, oct_idx) = merge(bold(cell_idx,2,oct_idx), bnew(cell_idx,2,oct_idx), base_write) + dflux
        dflux = ( (emfz%edge_e(i,j+1,k)-emfz%edge_e(i+1,j+1,k)) - (emfx%edge_e(i,j+1,k)-emfx%edge_e(i,j+1,k+1)) ) * dtdx
-       bnew(cell_idx, 5, oct_idx) = bnew(cell_idx, 5, oct_idx) + dflux
+       bnew(cell_idx, 5, oct_idx) = merge(bold(cell_idx,5,oct_idx), bnew(cell_idx,5,oct_idx), base_write) + dflux
        dflux = ( (emfx%edge_e(i,j,k)-emfx%edge_e(i,j+1,k)) - (emfy%edge_e(i,j,k)-emfy%edge_e(i+1,j,k)) ) * dtdx
-       bnew(cell_idx, 3, oct_idx) = bnew(cell_idx, 3, oct_idx) + dflux
+       bnew(cell_idx, 3, oct_idx) = merge(bold(cell_idx,3,oct_idx), bnew(cell_idx,3,oct_idx), base_write) + dflux
        dflux = ( (emfx%edge_e(i,j,k+1)-emfx%edge_e(i,j+1,k+1)) - (emfy%edge_e(i,j,k+1)-emfy%edge_e(i+1,j,k+1)) ) * dtdx
-       bnew(cell_idx, 6, oct_idx) = bnew(cell_idx, 6, oct_idx) + dflux
+       bnew(cell_idx, 6, oct_idx) = merge(bold(cell_idx,6,oct_idx), bnew(cell_idx,6,oct_idx), base_write) + dflux
 #endif
 
     end do
@@ -3508,12 +3527,12 @@ contains
     ! =======================================================================
     ! Update the conserved variables at current level.
     ! =======================================================================
-    call conservative_update(unew, bnew, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, &
+    call conservative_update(unew, bnew, uold, bold, nbor, left_interfaces_x, left_interfaces_y, left_interfaces_z, &
 #ifdef MHD
          & emfx, emfy, emfz, &
 #endif
          & head_idx, block_idx, &
-         & thread_idx, dtdx)
+         & thread_idx, dtdx, do_dt)
 
     ! =======================================================================
     ! Update the conserved variables at coarser level.
@@ -4224,6 +4243,36 @@ contains
 
   end subroutine cmpdt_kernel
   ! =========================================================================
+
+#ifdef MHD
+  ! ----- Diagnostic: max |div.B| over leaf cells (CT face-staggered) -----------
+  ! div.B per cell from the six face fields in bold: (Bx_hi-Bx_lo + By_hi-By_lo +
+  ! Bz_hi-Bz_lo)/dx. For constrained transport this is ~machine-zero and must stay so.
+  attributes(global) subroutine divb_max_kernel(grid, bold, head_idx, num_octs, dx, out)
+    type(oct), device :: grid(*)
+    real(kind=dp), device :: bold(1:twotondim,1:6,*)
+    integer(kind=4), value :: head_idx, num_octs
+    real(kind=dp), value :: dx
+    real(kind=8), device :: out(*)
+    integer :: tid, bid, oct_idx, cell_idx, info
+    real(kind=8) :: dloc
+    tid = threadIdx%x - 1; bid = blockIdx%x - 1
+    oct_idx = ( tid + bid*blockDim%x ) / twotondim
+    dloc = 0d0
+    if (oct_idx < num_octs) then
+       oct_idx = head_idx + oct_idx
+       cell_idx = mod(tid, twotondim) + 1
+       if (.not. grid(oct_idx)%refined(cell_idx)) then
+          dloc = abs( (bold(cell_idx,4,oct_idx)-bold(cell_idx,1,oct_idx)) &
+                    + (bold(cell_idx,5,oct_idx)-bold(cell_idx,2,oct_idx)) &
+                    + (bold(cell_idx,6,oct_idx)-bold(cell_idx,3,oct_idx)) ) / dx
+       end if
+    end if
+    dloc = block_reduce_max(dloc)
+    if (tid == 0) info = atomicmax(out(1), dloc)
+  end subroutine divb_max_kernel
+  ! =========================================================================
+#endif
 
   ! =========================================================================
   attributes(global) subroutine gather_send_buffer(uold, uold_send, idx_send, num_send)

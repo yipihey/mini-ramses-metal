@@ -178,6 +178,33 @@ contains
 
   end subroutine gpu_cmpdt
 
+#ifdef MHD
+  !> Diagnostic: max |div.B| over leaf cells at ilevel (CT face-staggered). Used to validate
+  !> that the fused base_write face-B path preserves the constrained-transport guarantee.
+  subroutine gpu_divb_max(sim, ilevel, divbmax)
+    use hydro_device, only: divb_max_kernel
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout) :: sim
+    integer, intent(in) :: ilevel
+    real(kind=8), intent(out) :: divbmax
+    integer(kind=4) :: head_idx, num_octs
+    integer :: num_threads, num_blocks
+    real(kind=dp) :: dx
+    real(kind=8), device :: d_out(1)
+    real(kind=8) :: h_out(1)
+    dx = sim%r%boxlen/2**ilevel
+    head_idx = sim%m%head(ilevel)
+    num_octs = sim%m%noct(ilevel)
+    d_out(1) = 0d0
+    num_threads = 256
+    num_blocks = (num_octs * twotondim + num_threads - 1) / num_threads
+    call divb_max_kernel<<<num_blocks, num_threads>>>(grid, bold, head_idx, num_octs, dx, d_out)
+    h_out = d_out
+    divbmax = h_out(1)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine gpu_divb_max
+#endif
+
   !> @brief
   !> Set uold equal to unew on a GPU
   !>
@@ -223,6 +250,10 @@ contains
 
     integer(kind=4) :: head_idx, num_octs
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
+
+    ! Single-level fused: the integrator base-writes unew = uold + flux (each cell once), so the
+    ! unew<-uold / bnew<-bold seed is unnecessary. Skip it (matches gpu_godunov's base_write gate).
+    if (sim%r%gpu_fused_step .and. sim%r%levelmin==sim%r%nlevelmax .and. sim%r%static_mesh) return
 
     head_idx = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
