@@ -2511,9 +2511,11 @@ contains
        p%velocity_y = p%velocity_y + f(cell_idx, 2, source_idx)*0.5_dp*dt
        p%velocity_z = p%velocity_z + f(cell_idx, 3, source_idx)*0.5_dp*dt
 #else
-       p%velocity_x = p%velocity_x + constant_gravity(1)*0.5_dp*dt
-       p%velocity_y = p%velocity_y + constant_gravity(2)*0.5_dp*dt
-       p%velocity_z = p%velocity_z + constant_gravity(3)*0.5_dp*dt
+       ! fp32 cast: cg is real*8, so the un-cast term promoted this hot per-cell
+       ! predictor to fp64 (1:64 on GA102) -- same bug/fix as the hydro path at :745.
+       p%velocity_x = p%velocity_x + real(constant_gravity(1),dp)*0.5_dp*dt
+       p%velocity_y = p%velocity_y + real(constant_gravity(2),dp)*0.5_dp*dt
+       p%velocity_z = p%velocity_z + real(constant_gravity(3),dp)*0.5_dp*dt
 #endif
        local_subgrid%density(i,j,k)=p%density; local_subgrid%velocity_x(i,j,k)=p%velocity_x
        local_subgrid%velocity_y(i,j,k)=p%velocity_y; local_subgrid%velocity_z(i,j,k)=p%velocity_z
