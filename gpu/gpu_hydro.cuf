@@ -1894,7 +1894,11 @@ contains
        unew(cell_idx, 4, oct_idx) = b4
        unew(cell_idx, 5, oct_idx) = b5
 
-#if NVAR>5
+! Exclude from GLM-MHD builds: this hydro kernel is dead in a GLM build (the _mhd
+! path runs instead), but at NVAR=9 it still COMPILED and its merge() over the f16
+! `scalar` tile hit NVFORTRAN-S-0705 (merge has no real2 support), blocking the
+! f16/nsubgrid=3 fast tile for GLM-MHD. GLM-MHD carries its own scalars (#if NVAR>9).
+#if NVAR>5 && !defined(GLMMHD)
        ! Passive-scalar (vars 6..nvar) advection: F(ρsᵢ) = (mass flux)·s_upwind (donor cell),
        ! using the SAME mass flux as the density update so ρsᵢ/ρ is conserved consistently.
        ! local_subgrid index = flux index + 2 for the central oct (li=i+2, etc.).
