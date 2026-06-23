@@ -502,6 +502,7 @@ contains
 #ifdef GLMMHD
     if(nsubgrid == 1)threads_per_block = 64
     if(nsubgrid == 2)threads_per_block = 256
+    if(nsubgrid == 3)threads_per_block = 256
     ! Dedner cleaning speed = max signal speed implied by the CFL condition.
     ch = sim%r%courant_factor*dx/dt/real(ndim,dp)*sim%r%glm_ch_scale
     ! Operator-split GLM parabolic psi-damping, folded into the integrator's unew(9) write
@@ -558,6 +559,7 @@ contains
 #else
     if(nsubgrid == 1)threads_per_block = 64
     if(nsubgrid == 2)threads_per_block = 256
+    if(nsubgrid == 3)threads_per_block = 256
     ! Single-level static: write unew = uold + flux directly (each cell once, no coarse-fine
     ! reflux), so the separate set_unew seed pass can be skipped (gpu_set_unew). Fuse the
     ! turbulent driving into the write-back, and fold the CFL dt reduction (lagged dt).

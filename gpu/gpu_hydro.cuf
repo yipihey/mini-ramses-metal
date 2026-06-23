@@ -31,25 +31,25 @@ module hydro_device
   !> for interface states and fluxes. Note that it is zero indexed to make 1D to 3D
   !> indexing easier
   type, public :: subgrid_3x2x2cell_primitive
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: density
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_x
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_y
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_z
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: pressure
+     real(kind=tp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: density
+     real(kind=tp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_x
+     real(kind=tp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_y
+     real(kind=tp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: velocity_z
+     real(kind=tp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: pressure
   end type subgrid_3x2x2cell_primitive
   type, public :: subgrid_2x3x2cell_primitive
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: density
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_x
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_y
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_z
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: pressure
+     real(kind=tp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: density
+     real(kind=tp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_x
+     real(kind=tp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_y
+     real(kind=tp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: velocity_z
+     real(kind=tp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: pressure
   end type subgrid_2x3x2cell_primitive
   type, public :: subgrid_2x2x3cell_primitive
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: density
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_x
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_y
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_z
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: pressure
+     real(kind=tp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: density
+     real(kind=tp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_x
+     real(kind=tp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_y
+     real(kind=tp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: velocity_z
+     real(kind=tp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: pressure
   end type subgrid_2x2x3cell_primitive
 
   !> @brief
@@ -105,15 +105,15 @@ module hydro_device
 
   ! Directional interface-state subgrids (mirror the hydro ones + B/psi).
   type, public :: subgrid_3x2x2cell_mhd
-     real(kind=dp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: &
+     real(kind=tp), dimension(0:2*nsubgrid, 0:2*nsubgrid-1, 0:2*nsubgrid-1) :: &
           & density, velocity_x, velocity_y, velocity_z, pressure, bx, by, bz, psi
   end type subgrid_3x2x2cell_mhd
   type, public :: subgrid_2x3x2cell_mhd
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: &
+     real(kind=tp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid, 0:2*nsubgrid-1) :: &
           & density, velocity_x, velocity_y, velocity_z, pressure, bx, by, bz, psi
   end type subgrid_2x3x2cell_mhd
   type, public :: subgrid_2x2x3cell_mhd
-     real(kind=dp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: &
+     real(kind=tp), dimension(0:2*nsubgrid-1, 0:2*nsubgrid-1, 0:2*nsubgrid) :: &
           & density, velocity_x, velocity_y, velocity_z, pressure, bx, by, bz, psi
   end type subgrid_2x2x3cell_mhd
 #endif
@@ -647,38 +647,64 @@ contains
     integer :: info, owned_lo, owned_hi
     real(kind=dp) :: ctot, grav, dtl, cs
     real(kind=8) :: dt_min
+    ! software-pipeline prefetch state (next cell's loads issued while current is processed)
+    type(conserved_t) :: cons_n
+    integer :: src_n, cell_n, in_, jn_, kn_, ci, cj, ck
+    logical :: have_next
 
     work_size = 2*nsubgrid+4
     dt_min = huge(0d0)
     owned_lo = 2; owned_hi = 2*nsubgrid+1   ! inner (owned) cells of the loaded region
 
-    do work_idx = thread_idx, work_size**3 - 1, blockDim%x
+    subgrid_idx = head_idx + block_idx   ! loop-invariant
 
-       ! Compute the subgrid_indices index, i.e. determine the oct to load
+    ! --- Software-pipelined load. The kernel is latency-bound (register-limited
+    ! --- occupancy), so we prefetch the NEXT cell's nbor+uold loads and let them
+    ! --- fly while the CURRENT cell is c2p'd / stored. This is the deliberate
+    ! --- memory-level parallelism that the GRAV f-reads supplied for free.
+    work_idx = thread_idx
+    have_next = (work_idx <= work_size**3 - 1)
+    if (have_next) then
        call index_1Dto3D(work_idx/8, work_size/2, work_size/2, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx)
+       src_n  = nbor(work_idx/8 + 1, subgrid_idx)
+       cell_n = mod(work_idx, 8) + 1
+       call index_1Dto3D(cell_n - 1, 2, 2, ci, cj, ck)
+       in_ = ci + 2*i_subgrid_idx
+       jn_ = cj + 2*j_subgrid_idx
+       kn_ = ck + 2*k_subgrid_idx
+       cons_n%density    = uold(cell_n, 1, src_n)
+       cons_n%momentum_x = uold(cell_n, 2, src_n)
+       cons_n%momentum_y = uold(cell_n, 3, src_n)
+       cons_n%momentum_z = uold(cell_n, 4, src_n)
+       cons_n%energy     = uold(cell_n, 5, src_n)
+    end if
 
-       ! Get subgrid index
-       subgrid_idx = head_idx + block_idx
+    do while (have_next)
 
-       ! Get neighbour index
-       ind_nbor = work_idx/8 + 1
-       source_idx = nbor(ind_nbor, subgrid_idx)
+       ! Adopt the cell prefetched on the previous trip as the current cell
+       conserved  = cons_n
+       source_idx = src_n
+       cell_idx   = cell_n
+       i = in_; j = jn_; k = kn_
 
-       ! Now that we have the index to the oct we need to figure out which cell within it to load 
-       cell_idx = mod(work_idx, 8) + 1
-
-       ! Lastly, we need to figure out where in the subgrid the cell we will load goes
-       call index_1Dto3D(cell_idx - 1, 2, 2, i, j, k)
-       i = i + 2*i_subgrid_idx
-       j = j + 2*j_subgrid_idx
-       k = k + 2*k_subgrid_idx
-
-       ! Load the cell
-       conserved%density    = uold(cell_idx, 1, source_idx)
-       conserved%momentum_x = uold(cell_idx, 2, source_idx)
-       conserved%momentum_y = uold(cell_idx, 3, source_idx)
-       conserved%momentum_z = uold(cell_idx, 4, source_idx)
-       conserved%energy     = uold(cell_idx, 5, source_idx)
+       ! Issue the NEXT cell's loads now, so they are in flight while we convert
+       ! and store the current cell below.
+       work_idx = work_idx + blockDim%x
+       have_next = (work_idx <= work_size**3 - 1)
+       if (have_next) then
+          call index_1Dto3D(work_idx/8, work_size/2, work_size/2, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx)
+          src_n  = nbor(work_idx/8 + 1, subgrid_idx)
+          cell_n = mod(work_idx, 8) + 1
+          call index_1Dto3D(cell_n - 1, 2, 2, ci, cj, ck)
+          in_ = ci + 2*i_subgrid_idx
+          jn_ = cj + 2*j_subgrid_idx
+          kn_ = ck + 2*k_subgrid_idx
+          cons_n%density    = uold(cell_n, 1, src_n)
+          cons_n%momentum_x = uold(cell_n, 2, src_n)
+          cons_n%momentum_y = uold(cell_n, 3, src_n)
+          cons_n%momentum_z = uold(cell_n, 4, src_n)
+          cons_n%energy     = uold(cell_n, 5, src_n)
+       end if
 
        ! Convert to primitive variables
        primitive = conserved_2_primitive(conserved, gamma, smallr, smallc2)
@@ -1050,9 +1076,9 @@ contains
        ! axis triggers the moncen (slope=2) shock fallback (hydro.h trace_cell_3d).
        use_ppm = (slope == 10)
        if (use_ppm) then
-          if ( strong_pressure_jump(local_subgrid%pressure(i-1,j,k), m0%pressure, local_subgrid%pressure(i+1,j,k)) .or. &
-             & strong_pressure_jump(local_subgrid%pressure(i,j-1,k), m0%pressure, local_subgrid%pressure(i,j+1,k)) .or. &
-             & strong_pressure_jump(local_subgrid%pressure(i,j,k-1), m0%pressure, local_subgrid%pressure(i,j,k+1)) ) then
+          if ( strong_pressure_jump(real(local_subgrid%pressure(i-1,j,k),dp), m0%pressure, real(local_subgrid%pressure(i+1,j,k),dp)) .or. &
+             & strong_pressure_jump(real(local_subgrid%pressure(i,j-1,k),dp), m0%pressure, real(local_subgrid%pressure(i,j+1,k),dp)) .or. &
+             & strong_pressure_jump(real(local_subgrid%pressure(i,j,k-1),dp), m0%pressure, real(local_subgrid%pressure(i,j,k+1),dp)) ) then
              use_ppm = .false.
           end if
        end if
@@ -1069,21 +1095,21 @@ contains
           ! MUSCL-Hancock (moncen) slopes + half-step cell prediction.
           eff_slope = slope
           if (slope == 10) eff_slope = 2
-          slopes_x%density = 0.5 * slope_moncen(local_subgrid%density(i-1,j,k), cell%density, local_subgrid%density(i+1,j,k), eff_slope)
-          slopes_x%velocity_x = 0.5 * slope_moncen(local_subgrid%velocity_x(i-1,j,k), cell%velocity_x, local_subgrid%velocity_x(i+1,j,k), eff_slope)
-          slopes_x%velocity_y = 0.5 * slope_moncen(local_subgrid%velocity_y(i-1,j,k), cell%velocity_y, local_subgrid%velocity_y(i+1,j,k), eff_slope)
-          slopes_x%velocity_z = 0.5 * slope_moncen(local_subgrid%velocity_z(i-1,j,k), cell%velocity_z, local_subgrid%velocity_z(i+1,j,k), eff_slope)
-          slopes_x%pressure = 0.5 * slope_moncen(local_subgrid%pressure(i-1,j,k), cell%pressure, local_subgrid%pressure(i+1,j,k), eff_slope)
-          slopes_y%density = 0.5 * slope_moncen(local_subgrid%density(i,j-1,k), cell%density, local_subgrid%density(i,j+1,k), eff_slope)
-          slopes_y%velocity_x = 0.5 * slope_moncen(local_subgrid%velocity_x(i,j-1,k), cell%velocity_x, local_subgrid%velocity_x(i,j+1,k), eff_slope)
-          slopes_y%velocity_y = 0.5 * slope_moncen(local_subgrid%velocity_y(i,j-1,k), cell%velocity_y, local_subgrid%velocity_y(i,j+1,k), eff_slope)
-          slopes_y%velocity_z = 0.5 * slope_moncen(local_subgrid%velocity_z(i,j-1,k), cell%velocity_z, local_subgrid%velocity_z(i,j+1,k), eff_slope)
-          slopes_y%pressure = 0.5 * slope_moncen(local_subgrid%pressure(i,j-1,k), cell%pressure, local_subgrid%pressure(i,j+1,k), eff_slope)
-          slopes_z%density = 0.5 * slope_moncen(local_subgrid%density(i,j,k-1), cell%density, local_subgrid%density(i,j,k+1), eff_slope)
-          slopes_z%velocity_x = 0.5 * slope_moncen(local_subgrid%velocity_x(i,j,k-1), cell%velocity_x, local_subgrid%velocity_x(i,j,k+1), eff_slope)
-          slopes_z%velocity_y = 0.5 * slope_moncen(local_subgrid%velocity_y(i,j,k-1), cell%velocity_y, local_subgrid%velocity_y(i,j,k+1), eff_slope)
-          slopes_z%velocity_z = 0.5 * slope_moncen(local_subgrid%velocity_z(i,j,k-1), cell%velocity_z, local_subgrid%velocity_z(i,j,k+1), eff_slope)
-          slopes_z%pressure = 0.5 * slope_moncen(local_subgrid%pressure(i,j,k-1), cell%pressure, local_subgrid%pressure(i,j,k+1), eff_slope)
+          slopes_x%density = 0.5 * slope_moncen(real(local_subgrid%density(i-1,j,k),dp), cell%density, real(local_subgrid%density(i+1,j,k),dp), eff_slope)
+          slopes_x%velocity_x = 0.5 * slope_moncen(real(local_subgrid%velocity_x(i-1,j,k),dp), cell%velocity_x, real(local_subgrid%velocity_x(i+1,j,k),dp), eff_slope)
+          slopes_x%velocity_y = 0.5 * slope_moncen(real(local_subgrid%velocity_y(i-1,j,k),dp), cell%velocity_y, real(local_subgrid%velocity_y(i+1,j,k),dp), eff_slope)
+          slopes_x%velocity_z = 0.5 * slope_moncen(real(local_subgrid%velocity_z(i-1,j,k),dp), cell%velocity_z, real(local_subgrid%velocity_z(i+1,j,k),dp), eff_slope)
+          slopes_x%pressure = 0.5 * slope_moncen(real(local_subgrid%pressure(i-1,j,k),dp), cell%pressure, real(local_subgrid%pressure(i+1,j,k),dp), eff_slope)
+          slopes_y%density = 0.5 * slope_moncen(real(local_subgrid%density(i,j-1,k),dp), cell%density, real(local_subgrid%density(i,j+1,k),dp), eff_slope)
+          slopes_y%velocity_x = 0.5 * slope_moncen(real(local_subgrid%velocity_x(i,j-1,k),dp), cell%velocity_x, real(local_subgrid%velocity_x(i,j+1,k),dp), eff_slope)
+          slopes_y%velocity_y = 0.5 * slope_moncen(real(local_subgrid%velocity_y(i,j-1,k),dp), cell%velocity_y, real(local_subgrid%velocity_y(i,j+1,k),dp), eff_slope)
+          slopes_y%velocity_z = 0.5 * slope_moncen(real(local_subgrid%velocity_z(i,j-1,k),dp), cell%velocity_z, real(local_subgrid%velocity_z(i,j+1,k),dp), eff_slope)
+          slopes_y%pressure = 0.5 * slope_moncen(real(local_subgrid%pressure(i,j-1,k),dp), cell%pressure, real(local_subgrid%pressure(i,j+1,k),dp), eff_slope)
+          slopes_z%density = 0.5 * slope_moncen(real(local_subgrid%density(i,j,k-1),dp), cell%density, real(local_subgrid%density(i,j,k+1),dp), eff_slope)
+          slopes_z%velocity_x = 0.5 * slope_moncen(real(local_subgrid%velocity_x(i,j,k-1),dp), cell%velocity_x, real(local_subgrid%velocity_x(i,j,k+1),dp), eff_slope)
+          slopes_z%velocity_y = 0.5 * slope_moncen(real(local_subgrid%velocity_y(i,j,k-1),dp), cell%velocity_y, real(local_subgrid%velocity_y(i,j,k+1),dp), eff_slope)
+          slopes_z%velocity_z = 0.5 * slope_moncen(real(local_subgrid%velocity_z(i,j,k-1),dp), cell%velocity_z, real(local_subgrid%velocity_z(i,j,k+1),dp), eff_slope)
+          slopes_z%pressure = 0.5 * slope_moncen(real(local_subgrid%pressure(i,j,k-1),dp), cell%pressure, real(local_subgrid%pressure(i,j,k+1),dp), eff_slope)
           source_term%density    = -cell%velocity_x*slopes_x%density    -cell%velocity_y*slopes_y%density    -cell%velocity_z*slopes_z%density    - (slopes_x%velocity_x+slopes_y%velocity_y+slopes_z%velocity_z)*cell%density
           source_term%velocity_x = -cell%velocity_x*slopes_x%velocity_x -cell%velocity_y*slopes_y%velocity_x -cell%velocity_z*slopes_z%velocity_x - slopes_x%pressure/cell%density
           source_term%velocity_y = -cell%velocity_x*slopes_x%velocity_y -cell%velocity_y*slopes_y%velocity_y -cell%velocity_z*slopes_z%velocity_y - slopes_y%pressure/cell%density
@@ -2839,9 +2865,9 @@ contains
        ! PPM (parabolic) faces unless a strong pressure jump -> PLM/moncen fallback.
        use_ppm = (slope == 10)
        if (use_ppm) then
-          if ( strong_pressure_jump(ls%pressure(i-1,j,k), m0%pressure, ls%pressure(i+1,j,k)) .or. &
-             & strong_pressure_jump(ls%pressure(i,j-1,k), m0%pressure, ls%pressure(i,j+1,k)) .or. &
-             & strong_pressure_jump(ls%pressure(i,j,k-1), m0%pressure, ls%pressure(i,j,k+1)) ) use_ppm = .false.
+          if ( strong_pressure_jump(real(ls%pressure(i-1,j,k),dp), m0%pressure, real(ls%pressure(i+1,j,k),dp)) .or. &
+             & strong_pressure_jump(real(ls%pressure(i,j-1,k),dp), m0%pressure, real(ls%pressure(i,j+1,k),dp)) .or. &
+             & strong_pressure_jump(real(ls%pressure(i,j,k-1),dp), m0%pressure, real(ls%pressure(i,j,k+1),dp)) ) use_ppm = .false.
        end if
        ! MUSCL-Hancock predictor: only consumed by the PLM fallback stores below
        ! (use_ppm=.false.). Computing it lazily keeps sx/sy/sz/u0/du/mh OUT of the live
@@ -2979,9 +3005,9 @@ contains
        du = mhd_cadd(du, mhd_hancock_dir(m0, sz, 3, gamma, ch, 0.5_dp*dtdx))
        mh = mhd_conserved_2_primitive(mhd_cadd(u0, du), gamma, smallr, smallc2)
        if (mh%density <= smallr .or. mh%pressure <= smallp) mh = m0
-       up = .not. ( strong_pressure_jump(ls%pressure(i-1,j,k), m0%pressure, ls%pressure(i+1,j,k)) .or. &
-          & strong_pressure_jump(ls%pressure(i,j-1,k), m0%pressure, ls%pressure(i,j+1,k)) .or. &
-          & strong_pressure_jump(ls%pressure(i,j,k-1), m0%pressure, ls%pressure(i,j,k+1)) )
+       up = .not. ( strong_pressure_jump(real(ls%pressure(i-1,j,k),dp), m0%pressure, real(ls%pressure(i+1,j,k),dp)) .or. &
+          & strong_pressure_jump(real(ls%pressure(i,j-1,k),dp), m0%pressure, real(ls%pressure(i,j+1,k),dp)) .or. &
+          & strong_pressure_jump(real(ls%pressure(i,j,k-1),dp), m0%pressure, real(ls%pressure(i,j,k+1),dp)) )
        if (up) call mhd_ppm_faces(sg_load_mhd(ls,i-1,j,k), m0, sg_load_mhd(ls,i+1,j,k), pm, pp)
        if (i > 1 .and. (j > 1 .and. j < work_size) .and. (k > 1 .and. k < work_size)) then
           if (up) then; fr = mhd_face(mh, pm, m0); else; fr = mhd_padd(mh, sx, -1.0_dp); end if

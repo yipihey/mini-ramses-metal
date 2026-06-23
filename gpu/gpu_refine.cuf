@@ -11,6 +11,23 @@ contains
   include 'gpu_hash.cuf'
   include 'gpu_hilbert.cuf'
 
+  ! Oct sort key. Default (#else) = Hilbert (8 contiguous octs => a 2x2x2 spatial block, for
+  ! nsubgrid=2). For -DNSUB=k!=2 the block grouping needs k^3 contiguous octs to be a spatial
+  ! k x k x k cube, so the key = Hilbert-of-the-block * nsubgridtondim + within-block child index.
+  attributes(device) function block_sort_key(ckey, ilevel) result(k)
+    integer(kind=4), dimension(1:ndim) :: ckey
+    integer(kind=4), value :: ilevel
+    integer(kind=8) :: k
+#ifdef NSUB
+    integer(kind=4), dimension(1:ndim) :: bk
+    bk(1)=ckey(1)/nsubgrid; bk(2)=ckey(2)/nsubgrid; bk(3)=ckey(3)/nsubgrid
+    k = hilbert_key(bk, ilevel-1) * int(nsubgridtondim, kind=8) &
+      & + int(mod(ckey(1),nsubgrid) + mod(ckey(2),nsubgrid)*nsubgrid + mod(ckey(3),nsubgrid)*nsubgridsq, kind=8)
+#else
+    k = hilbert_key(ckey, ilevel-1)
+#endif
+  end function block_sort_key
+
   ! =========================================================================
   attributes(device) subroutine make_new_oct(grid, flag1, uold, f, phi, phi_old, ifree, oct_idx, cell_idx)
     use amr_parameters, only: ndim
@@ -50,7 +67,7 @@ contains
     flag1(1:twotondim,child_idx) = 0
 
     ! Compute new oct Hilbert key
-    hkey = hilbert_key(ckey, ilevel - 1)
+    hkey = block_sort_key(ckey, ilevel)
     grid(child_idx)%hkey(1) = hkey
 
 #ifdef HYDRO
@@ -259,24 +276,24 @@ contains
     tid = (blockIdx%x - 1)*blockDim%x + threadIdx%x     ! 1 .. num_octs
     if (tid > num_octs) return
 
-    ! Block (Morton-8) ordering: each consecutive nsubgridtondim=8 octs must form a 2x2x2
-    ! spatial block, because the GPU subgrid gather (subgrid_conserved_2_primitive_mhd)
-    ! treats every group of 8 array-consecutive octs as a 2x2x2 core. Iterate parent
-    ! 2x2x2 blocks; within each, the 8 children in (di,dj,dk) order. Requires nbx/nby/nbz
-    ! even (gated in gpu_build_basegrid).
-    npx = nbx/2; npy = nby/2
-    pblk = (tid-1)/8          ! parent-block index
-    sub  = mod(tid-1, 8)      ! 0..7 child within the 2x2x2 block
+    ! Block ordering (parametric in nsubgrid): each consecutive nsubgridtondim octs must form
+    ! a nsubgrid x nsubgrid x nsubgrid spatial block, because the GPU subgrid gather treats every
+    ! group of nsubgridtondim array-consecutive octs as a spatial nsubgrid^3 core. Iterate parent
+    ! nsubgrid^3 blocks; within each, the children in (di,dj,dk) order. Requires nbx/nby/nbz
+    ! divisible by nsubgrid (gated in init_refine_basegrid). nsubgrid=2 reduces to Morton-8.
+    npx = nbx/nsubgrid; npy = nby/nsubgrid
+    pblk = (tid-1)/nsubgridtondim          ! parent-block index
+    sub  = mod(tid-1, nsubgridtondim)      ! 0..nsubgrid^3-1 child within the nsubgrid^3 block
     pi = mod(pblk, npx)
     pj = mod(pblk/npx, npy)
     pk = pblk/(npx*npy)
-    ckey(1) = bxmin + 2*pi + mod(sub, 2)
-    ckey(2) = bymin + 2*pj + mod(sub/2, 2)
-    ckey(3) = bzmin + 2*pk + sub/4
+    ckey(1) = bxmin + nsubgrid*pi + mod(sub, nsubgrid)
+    ckey(2) = bymin + nsubgrid*pj + mod(sub/nsubgrid, nsubgrid)
+    ckey(3) = bzmin + nsubgrid*pk + sub/nsubgridsq
 
     grid(tid)%lev = ilevel
     grid(tid)%ckey(1:ndim) = ckey(1:ndim)
-    grid(tid)%hkey(1) = hilbert_key(ckey, ilevel-1)
+    grid(tid)%hkey(1) = block_sort_key(ckey, ilevel)
     do c = 1, twotondim
        grid(tid)%refined(c) = .false.
     end do
@@ -840,7 +857,7 @@ contains
     ! Compute Hilbert key
     ckey = grid(oct_idx)%ckey
     ilevel = grid(oct_idx)%lev
-    hkey = hilbert_key(ckey, ilevel - 1)
+    hkey = block_sort_key(ckey, ilevel)
     grid(oct_idx)%hkey(1) = hkey
 
   end subroutine sort_scatter_grid_impl
@@ -1610,7 +1627,7 @@ contains
     flag1(1:twotondim, cache_idx) = 0
 
     ! Compute new oct Hilbert key
-    hkey = hilbert_key(ckey, ilevel - 1)
+    hkey = block_sort_key(ckey, ilevel)
     grid(cache_idx)%hkey(1) = hkey
 
     ! Compute parent oct hash table key
