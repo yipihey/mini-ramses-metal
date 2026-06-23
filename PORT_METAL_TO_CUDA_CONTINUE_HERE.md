@@ -8,7 +8,12 @@ slow (not the 1.6GB); only the predictor reads matter; **broadcast vs divergent 
 (kills MLP/pacing theory)**; fp64-vs-fp32 predictor is the decider. **FIX (one line, fp32-safe): cast cg→dp.**
 Applied to BOTH kernels: CUDA-C GRAV=0 2967→~4176 (≈GRAV=1); **Fortran GRAV=0 2864→~3631 (+27%, ≈Fortran
 GRAV=1), conserve PASS** — a free production win. GRAV=0 is now the best config (GRAV=1 speed + saves 1.6GB).
-TODO: same latent fp64 bug in the GLM-MHD predictors (gpu_hydro.cuf ~2499/3420/3931) — not yet fixed/tested.
+GLM-MHD had the SAME bug (subgrid_conserved_2_primitive_mhd:2514) — now FIXED, +32% on Orszag-Tang 128³
+(996→1311, paired, bit-identical since cg≡0). **Hydro kernel is at its memory-movement CEILING post-fix:**
+trace/riemann recon FREE (slope 0/1/2 ≡, llf≈hllc), wide loads neutral (+0.3% paired), occupancy flat
+(mb2/3/4 ≡0.2%), dt-fold free — balanced kernel ≈ Julia 5-var reference (~4250). ⚠ MEASURE PAIRED: the
+A6000 throttles ~16%, clock-lock needs sudo; sequential A,B order alone gave a 13% phantom delta. Latent
+(trivial, low-value): sync_hydro/grav_hydro cg (:3768/:3834, only with self-gravity), dt-fold magnitudes.
 
 **Status:** Stages 0+1+2 DONE + GRAV=0↔1 mystery solved. **S1 (faithful scalar-load translation) PASSED — and BEATS the Fortran
 ceiling**: 480³ turb warm-interleaved GRAV=1 **~4254 vs ~3560 (+19%)**, GRAV=0 **~2951 vs ~2838 (+5%)**,
