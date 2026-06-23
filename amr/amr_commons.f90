@@ -292,6 +292,7 @@ module amr_commons
      integer::box_xmin,box_xmax  ! Min and max Cartesian keys at levelmin
      integer::box_ymin,box_ymax  ! Min and max Cartesian keys at levelmin
      integer::box_zmin,box_zmax  ! Min and max Cartesian keys at levelmin
+     logical::fast_tile_upsize=.true. ! ns3 fast tile: auto-grow box to a multiple of nsubgrid octs
      integer,dimension(1:MAXBOUND)::bound_type=0
      integer,dimension(1:MAXBOUND)::bound_dir=0
      integer,dimension(1:MAXBOUND)::bound_shift=0

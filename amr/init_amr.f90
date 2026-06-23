@@ -96,6 +96,10 @@ subroutine init_amr(r,g,m,type)
   ! Local variables
   integer::idim,ilevel,icpu,igrid,ibound,ilevelmin
   integer::nborarrsize
+#ifdef _CUDA
+  integer::bxmn(1:3),bxmx(1:3),nn,nup,ndn,cmax   ! ns3 fast-tile box auto-fit
+  logical::changed
+#endif
   integer(kind=8)::max_key
   real(kind=8)::dx
   integer(kind=8)::ngrid_tot,ikey
@@ -346,6 +350,53 @@ subroutine init_amr(r,g,m,type)
      m%ckey_max(ilevel)=2**(ilevel-1)
      m%hkey_max(1:nhilbert,ilevel)=refine_key(m%hkey_max(1:nhilbert,ilevel-1),ilevel)
   end do
+
+#ifdef _CUDA
+  ! ns3 fast tile: the GPU base-grid build groups octs into nsubgrid^ndim (3x3x3) blocks, so
+  ! the per-dimension oct count must be divisible by nsubgrid. Auto-grow the user's box to the
+  ! next multiple of nsubgrid (same dx -> a slightly larger periodic box, "for free") when the
+  ! GPU base-grid path is active. fast_tile_upsize=.false. keeps the exact grid (errors if it is
+  ! then incompatible). nsubgrid=2 (default build) => no-op on even grids. Absolute box (>0) only.
+  if (nsubgrid>1 .and. r%turb .and. (r%nlevelmax==r%levelmin) .and. (.not.r%poisson)) then
+     bxmn = (/ r%box_xmin, r%box_ymin, r%box_zmin /)
+     bxmx = (/ r%box_xmax, r%box_ymax, r%box_zmax /)
+     cmax = m%ckey_max(r%bound_levelmin)
+     changed = .false.
+     do idim = 1, ndim
+        if (bxmx(idim) > 0) then
+           nn = bxmx(idim) - bxmn(idim)
+           if (nn > 0 .and. mod(nn, nsubgrid) /= 0) then
+              if (.not. r%fast_tile_upsize) then
+                 write(*,'(" ERROR: nsubgrid=",I0," fast tile needs a multiple of ",I0," cells/dim.")') nsubgrid, 2*nsubgrid
+                 write(*,'("   dim ",I0," has ",I0," cells (",I0," octs). Use a compatible grid or fast_tile_upsize=.true.")') idim, 2*nn, nn
+                 stop
+              endif
+              nup = ((nn + nsubgrid - 1)/nsubgrid)*nsubgrid
+              ndn = (nn/nsubgrid)*nsubgrid
+              if (bxmn(idim) + nup <= cmax) then
+                 write(*,'(" Fast tile (nsubgrid=",I0,"): dim ",I0," ",I0,"->",I0," octs (",I0,"->",I0," cells, same dx; free upsize)")') &
+                      & nsubgrid, idim, nn, nup, 2*nn, 2*nup
+                 bxmx(idim) = bxmn(idim) + nup
+              else
+                 write(*,'(" Fast tile (nsubgrid=",I0,"): dim ",I0," ",I0,"->",I0," octs (no index room to grow; using smaller grid)")') &
+                      & nsubgrid, idim, nn, ndn
+                 bxmx(idim) = bxmn(idim) + ndn
+              endif
+              changed = .true.
+           endif
+        endif
+     end do
+     if (changed) then
+        r%box_xmax = bxmx(1)
+#if NDIM>1
+        r%box_ymax = bxmx(2)
+#endif
+#if NDIM>2
+        r%box_zmax = bxmx(3)
+#endif
+     endif
+  endif
+#endif
 
   ! Bounding box for computational domain
   ! Examples are: box_xmin=1 box_xmax=-1

@@ -12,6 +12,7 @@ subroutine m_init_refine_basegrid(pst)
 #endif
 #ifdef _CUDA
   use gpu_runner, only: gpu_build_basegrid
+  use gpu_utils, only: nsubgrid
 #endif
   use input_hydro_grafic_module, only: r_input_refmap_grafic
   implicit none
@@ -33,11 +34,13 @@ subroutine m_init_refine_basegrid(pst)
   gpu_bg = .false.
 #ifdef _CUDA
   gpu_bg = r%turb .and. (r%nlevelmax==r%levelmin) .and. (.not.r%poisson)
-  ! The device build uses 2x2x2-block (Morton-8) ordering -> requires even box dims.
+  ! The device build groups octs into nsubgrid^ndim blocks (2x2x2 Morton-8 at ns2, 3x3x3 at
+  ! ns3) -> requires box dims divisible by nsubgrid. init_amr auto-fits the box to satisfy
+  ! this; this is the safety net (incompatible -> CPU build instead of a NaN).
   if(gpu_bg) gpu_bg = &
-       & mod(m%box_ckey_max(1,r%levelmin)-m%box_ckey_min(1,r%levelmin),2)==0 .and. &
-       & mod(m%box_ckey_max(2,r%levelmin)-m%box_ckey_min(2,r%levelmin),2)==0 .and. &
-       & mod(m%box_ckey_max(3,r%levelmin)-m%box_ckey_min(3,r%levelmin),2)==0
+       & mod(m%box_ckey_max(1,r%levelmin)-m%box_ckey_min(1,r%levelmin),nsubgrid)==0 .and. &
+       & mod(m%box_ckey_max(2,r%levelmin)-m%box_ckey_min(2,r%levelmin),nsubgrid)==0 .and. &
+       & mod(m%box_ckey_max(3,r%levelmin)-m%box_ckey_min(3,r%levelmin),nsubgrid)==0
 #endif
 
   if(gpu_bg)then

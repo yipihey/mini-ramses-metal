@@ -358,6 +358,7 @@ subroutine m_read_params(pst)
   integer::box_ymax=0 ! Max. Cartesian key for the box at levelmin in y direction
   integer::box_zmin=0 ! Min. Cartesian key for the box at levelmin in z direction
   integer::box_zmax=0 ! Max. Cartesian key for the box at levelmin in z direction
+  logical::fast_tile_upsize=.true. ! ns3 fast tile: auto-grow box to a multiple of nsubgrid octs (else error)
   integer,dimension(1:MAXBOUND)::bound_type=0
   integer,dimension(1:MAXBOUND)::bound_dir=0
   integer,dimension(1:MAXBOUND)::bound_shift=0
@@ -650,6 +651,7 @@ subroutine m_read_params(pst)
   namelist/boundary_params/periodic,nbound,bound_type,bound_dir,bound_shift &
        & ,bound_xmin,bound_xmax,bound_ymin,bound_ymax,bound_zmin,bound_zmax &
        & ,bound_levelmin,box_size,box_xmin,box_xmax,box_ymin,box_ymax,box_zmin,box_zmax &
+       & ,fast_tile_upsize &
 #if NENER>0
        & ,prad_bound &
 #endif
@@ -1552,6 +1554,7 @@ subroutine m_read_params(pst)
   s%r%box_size=box_size
   s%r%box_xmin=box_xmin
   s%r%box_xmax=box_xmax
+  s%r%fast_tile_upsize=fast_tile_upsize
   s%r%box_ymin=box_ymin
   s%r%box_ymax=box_ymax
   s%r%box_zmin=box_zmin
