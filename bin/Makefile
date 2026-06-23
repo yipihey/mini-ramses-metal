@@ -123,6 +123,13 @@ endif
 ifneq ($(NVECTOR),32)
    DEFINES += -DNVECTOR=$(NVECTOR)
 endif
+# Fast-tile opt-in (5-var hydro): -DNSUB=3 -DTPRE=2 => f16 tile + nsubgrid=3
+ifdef NSUB
+   DEFINES += -DNSUB=$(NSUB)
+endif
+ifdef TPRE
+   DEFINES += -DTPRE=$(TPRE)
+endif
 ifneq ($(NPRE),8)
    DEFINES += -DNPRE=$(NPRE)
 endif
