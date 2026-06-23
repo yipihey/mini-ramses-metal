@@ -295,6 +295,7 @@ subroutine adaptive_loop(pst)
                do LL = pst%s%r%levelmin, pst%s%r%nlevelmax
                   write(plun,'(A,I3,1X,I8)') '#L ', LL, pst%s%m%noct(LL)
                end do
+#ifdef GRAV
                do LL = pst%s%r%levelmin+1, pst%s%r%nlevelmax
                   do oo = pst%s%m%head(LL), pst%s%m%head(LL)+pst%s%m%noct(LL)-1
                      write(plun,'(I3,1X,I12,1X,I20,4(1X,ES22.13))') LL, pst%s%m%grid(oo)%ckey(1), &
@@ -302,6 +303,7 @@ subroutine adaptive_loop(pst)
                           pst%s%m%phi_old(1,oo), pst%s%m%phi_old(2,oo)
                   end do
                end do
+#endif
                close(plun)
                ! 2:1 grid topology dump (RAMSES_DUMP_GRID2TO1): level, ckey, refined(1),
                ! refined(2) for ALL octs all levels -> reconstruct leaf cells + check that

@@ -366,6 +366,7 @@ contains
        end do
        do c = 1, twotondim
           select case (which)
+#ifdef GRAV
           case (0); val(twotondim*(j-1)+c) = real(s%m%rho(c,o),     c_double)
           case (1); val(twotondim*(j-1)+c) = real(s%m%phi(c,o),     c_double)
           case (2); val(twotondim*(j-1)+c) = real(s%m%phi_old(c,o), c_double)
@@ -373,6 +374,7 @@ contains
           case (4); val(twotondim*(j-1)+c) = real(s%m%f(c,2,o),     c_double)
           case (5); val(twotondim*(j-1)+c) = real(s%m%f(c,3,o),     c_double)
           case (6); val(twotondim*(j-1)+c) = real(s%m%nref(c,o),    c_double)
+#endif
           case (7); val(twotondim*(j-1)+c) = real(s%m%flag1(c,o),   c_double)
           end select
        end do
@@ -424,11 +426,13 @@ contains
        if (o <= 0) cycle
        do c = 1, twotondim
           select case (which)
+#ifdef GRAV
           case (1); s%m%phi(c,o)     = real(val(twotondim*(j-1)+c), dp)
           case (2); s%m%phi_old(c,o) = real(val(twotondim*(j-1)+c), dp)
           case (3); s%m%f(c,1,o)     = real(val(twotondim*(j-1)+c), dp)
           case (4); s%m%f(c,2,o)     = real(val(twotondim*(j-1)+c), dp)
           case (5); s%m%f(c,3,o)     = real(val(twotondim*(j-1)+c), dp)
+#endif
           ! flag1: lets a driver impose an explicit refinement map and call
           ! ramses_refine_fine directly (geometry-controlled test hierarchies);
           ! note m_flag_fine RESETS flag1, so skip it when driving this way.
@@ -516,6 +520,7 @@ contains
     call r_save_phi_old(pst, ilevel, 1)
   end subroutine ramses_save_phi_old
 
+#ifdef GRAV
   subroutine ramses_multigrid(handle, ilevel, icount) bind(C, name="ramses_multigrid")
     use multigrid_fine_commons, only: multigrid
     integer(c_int), value :: handle, ilevel, icount
@@ -539,12 +544,14 @@ contains
     call capi_pst(handle, pst, ok); if (.not. ok) return
     call m_force_fine(pst, ilevel, icount)
   end subroutine ramses_force_fine
+#endif
 
   ! Level potential energy = sum_{leaf cells, dims} (-dx^ndim/(4pi)/2)*f^2.  CPU:
   ! compute_epot reads m%f (fp64).  Metal: m_metal_epot reads the device B.f.  Both
   ! use the IDENTICAL fact + leaf-cell f^2 sum -> the diff point for "is the GPU
   ! epot reduction faithful given the same force".  Returns the level epot (no
   ! accumulation side effect: g%epot_tot is saved/restored).
+#ifdef GRAV
   function ramses_epot(handle, ilevel) result(epot) bind(C, name="ramses_epot")
     use force_fine_module, only: compute_epot
 #ifdef _METAL
@@ -570,6 +577,7 @@ contains
     call compute_epot(pst%s%r, pst%s%g, pst%s%m, ilevel, ep)
     epot = ep
   end function ramses_epot
+#endif
 
   subroutine ramses_kick_drift(handle, ilevel, action) bind(C, name="ramses_kick_drift")
     use move_fine_module, only: m_kick_drift_part
@@ -1014,6 +1022,7 @@ contains
   ! no state handle — the tightest possible unit, and the direct CPU-vs-Metal
   ! diff point for the over-energization boundary suspect.
   !--------------------------------------------------------------------------
+#ifdef GRAV
   subroutine ramses_interpol_phi_kernel(phi_cube, phiold_cube, tfrac, phi_int) &
        bind(C, name="ramses_interpol_phi_kernel")
     use amr_commons,         only: mesh_t
@@ -1039,6 +1048,7 @@ contains
     phi_int(1:twotondim) = real(phint(1:twotondim), c_double)
     deallocate(m%phi, m%phi_old)
   end subroutine ramses_interpol_phi_kernel
+#endif
 
   !--------------------------------------------------------------------------
   ! Radiative transfer (RAMSES-RT) slice — ADR-0006 Phase 4 (RamsesNG.jl).

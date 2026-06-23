@@ -627,10 +627,16 @@ subroutine m_trace_dump(pst,ilevel,icount,tag)
   open(newunit=u, file=trim(fn), status='replace', action='write')
   do o = m%head(ilevel), m%tail(ilevel)
      do c = 1, twotondim
+#ifdef GRAV
         write(u,'(3I9,I3,5ES23.15,I3,I2)') &
              m%grid(o)%ckey(1), m%grid(o)%ckey(2), m%grid(o)%ckey(3), c, &
              m%nref(c,o), m%phi(c,o), m%f(c,1,o), m%f(c,2,o), m%f(c,3,o), &
              m%flag1(c,o), merge(1,0,m%grid(o)%refined(c))
+#else
+        write(u,'(3I9,I3,I3,I2)') &
+             m%grid(o)%ckey(1), m%grid(o)%ckey(2), m%grid(o)%ckey(3), c, &
+             m%flag1(c,o), merge(1,0,m%grid(o)%refined(c))
+#endif
      end do
   end do
   close(u)
