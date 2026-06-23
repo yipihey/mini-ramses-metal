@@ -3761,15 +3761,16 @@ contains
     ! Convert to primitive
     prim = conserved_2_primitive(cons, gamma, smallr, smallc2)
 
-    ! Update velocity
+    ! Update velocity. dt is real*8 (a streaming c2p->kick->p2c kernel that should be
+    ! pure bandwidth) -- cast dt & cg to dp(fp32) so the kick is fp32, not fp64 (1:64 on GA102).
 #ifdef GRAV
-    prim%velocity_x = prim%velocity_x + f(cell_idx, 1, oct_idx) * dt
-    prim%velocity_y = prim%velocity_y + f(cell_idx, 2, oct_idx) * dt
-    prim%velocity_z = prim%velocity_z + f(cell_idx, 3, oct_idx) * dt
+    prim%velocity_x = prim%velocity_x + f(cell_idx, 1, oct_idx) * real(dt,dp)
+    prim%velocity_y = prim%velocity_y + f(cell_idx, 2, oct_idx) * real(dt,dp)
+    prim%velocity_z = prim%velocity_z + f(cell_idx, 3, oct_idx) * real(dt,dp)
 #else
-    prim%velocity_x = prim%velocity_x + constant_gravity(1) * dt
-    prim%velocity_y = prim%velocity_y + constant_gravity(2) * dt
-    prim%velocity_z = prim%velocity_z + constant_gravity(3) * dt
+    prim%velocity_x = prim%velocity_x + real(constant_gravity(1),dp) * real(dt,dp)
+    prim%velocity_y = prim%velocity_y + real(constant_gravity(2),dp) * real(dt,dp)
+    prim%velocity_z = prim%velocity_z + real(constant_gravity(3),dp) * real(dt,dp)
 #endif
 
     ! Convert back to conservative
@@ -3825,7 +3826,9 @@ contains
     ! Old and new densities
     ! rho_old = uold(cell_idx, 1, oct_idx)
     ! rho_new = unew(cell_idx, 1, oct_idx)
-    rho_old_new_ratio_dt = dt * uold(cell_idx, 1, oct_idx) / unew(cell_idx, 1, oct_idx)
+    ! fp32 throughout: real(dt,dp) makes this an fp32 divide (was an fp64 divide per
+    ! cell -- the single most expensive fp64 op on GA102) feeding the fp32 kick below.
+    rho_old_new_ratio_dt = real(dt,dp) * uold(cell_idx, 1, oct_idx) / unew(cell_idx, 1, oct_idx)
 
     ! Update velocity
 #ifdef GRAV
@@ -3833,9 +3836,9 @@ contains
     prim%velocity_y = prim%velocity_y + f(cell_idx, 2, oct_idx) * rho_old_new_ratio_dt
     prim%velocity_z = prim%velocity_z + f(cell_idx, 3, oct_idx) * rho_old_new_ratio_dt
 #else
-    prim%velocity_x = prim%velocity_x + constant_gravity(1) * rho_old_new_ratio_dt
-    prim%velocity_y = prim%velocity_y + constant_gravity(2) * rho_old_new_ratio_dt
-    prim%velocity_z = prim%velocity_z + constant_gravity(3) * rho_old_new_ratio_dt
+    prim%velocity_x = prim%velocity_x + real(constant_gravity(1),dp) * rho_old_new_ratio_dt
+    prim%velocity_y = prim%velocity_y + real(constant_gravity(2),dp) * rho_old_new_ratio_dt
+    prim%velocity_z = prim%velocity_z + real(constant_gravity(3),dp) * rho_old_new_ratio_dt
 #endif
 
     ! Convert back to conservative
