@@ -739,9 +739,12 @@ contains
        primitive%velocity_y = primitive%velocity_y + f(cell_idx, 2, source_idx) * 0.5_dp * dt
        primitive%velocity_z = primitive%velocity_z + f(cell_idx, 3, source_idx) * 0.5_dp * dt
 #else
-       primitive%velocity_x = primitive%velocity_x + constant_gravity(1) * 0.5_dp * dt
-       primitive%velocity_y = primitive%velocity_y + constant_gravity(2) * 0.5_dp * dt
-       primitive%velocity_z = primitive%velocity_z + constant_gravity(3) * 0.5_dp * dt
+       ! cast cg (real*8) -> dp(fp32) so this term is fp32, not fp64: the fp64
+       ! promotion here was the ENTIRE GRAV=0<->GRAV=1 gap (~24%) on GA102's 1:64
+       ! fp64 path (found via the CUDA-C port's isolation harness). Sim is fp32.
+       primitive%velocity_x = primitive%velocity_x + real(constant_gravity(1),dp) * 0.5_dp * dt
+       primitive%velocity_y = primitive%velocity_y + real(constant_gravity(2),dp) * 0.5_dp * dt
+       primitive%velocity_z = primitive%velocity_z + real(constant_gravity(3),dp) * 0.5_dp * dt
 #endif
 
        ! Write primitives cells to shared memory

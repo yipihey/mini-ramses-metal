@@ -57,6 +57,25 @@ static constexpr int TURB_GS = 64;
 
 typedef __half thalf;   // tp / TPRE kind for the shared tile
 
+// ---- f-read isolation experiment (GRAV builds only) ------------------------
+// The ONLY code difference between GRAV=1 (fast) and GRAV=0 (slow) is the 6
+// divergent f reads/cell (3 in the dt-fold, 3 in the velocity predictor) vs the
+// constant_gravity broadcast. To find which reads drive the +44%, build GRAV=1
+// (f allocated + read) and selectively swap a site back to the broadcast:
+//   -DFEXP_DT_OFF    dt-fold uses constant_gravity (predictor still reads f)
+//   -DFEXP_PRED_OFF  predictor uses constant_gravity (dt-fold still reads f)
+//   both             == GRAV=0 instruction pattern, but with f still allocated
+#if defined(GRAV) && !defined(FEXP_DT_OFF)
+#define DT_USE_F 1
+#else
+#define DT_USE_F 0
+#endif
+#if defined(GRAV) && !defined(FEXP_PRED_OFF)
+#define PRED_USE_F 1
+#else
+#define PRED_USE_F 0
+#endif
+
 // ---- ABI flat indexing into the Fortran device arrays (0-based, col-major) -
 //   uold(cell,var,oct) : cell 1..8, var 1..NVAR, oct 1-based
 //   f(cell,dim,oct)    : cell 1..8, dim 1..3
@@ -536,24 +555,28 @@ __global__ void __launch_bounds__(256, CUMINBLK) hydro_integrator_kernel_cuda(
                             ctot=fabsf(primitive.velocity_x)+fabsf(primitive.velocity_y)+fabsf(primitive.velocity_z)+3.0f*cs;
                         }
                         float grav;
-#ifdef GRAV
+#if DT_USE_F
                         grav=fabsf(FARR(cell_idx,1,src))+fabsf(FARR(cell_idx,2,src))+fabsf(FARR(cell_idx,3,src));
 #else
-                        grav=(float)(fabs(constant_gravity[0])+fabs(constant_gravity[1])+fabs(constant_gravity[2]));
+                        grav=fabsf((float)constant_gravity[0])+fabsf((float)constant_gravity[1])+fabsf((float)constant_gravity[2]);
 #endif
                         grav=fmaxf(grav*dx/(ctot*ctot), 0.0001f);
                         float dtl=dx/ctot*(sqrtf(1.0f+2.0f*courant_factor*grav)-1.0f)/grav;
                         dt_min=fmin(dt_min,(double)dtl);
                     }
                 }
-#ifdef GRAV
+#if PRED_USE_F
                 primitive.velocity_x += FARR(cell_idx,1,src)*0.5f*dt;
                 primitive.velocity_y += FARR(cell_idx,2,src)*0.5f*dt;
                 primitive.velocity_z += FARR(cell_idx,3,src)*0.5f*dt;
-#else
+#elif defined(FEXP_CG_FP64)
                 primitive.velocity_x = (float)((double)primitive.velocity_x + constant_gravity[0]*0.5*(double)dt);
                 primitive.velocity_y = (float)((double)primitive.velocity_y + constant_gravity[1]*0.5*(double)dt);
                 primitive.velocity_z = (float)((double)primitive.velocity_z + constant_gravity[2]*0.5*(double)dt);
+#else
+                primitive.velocity_x += (float)constant_gravity[0]*0.5f*dt;
+                primitive.velocity_y += (float)constant_gravity[1]*0.5f*dt;
+                primitive.velocity_z += (float)constant_gravity[2]*0.5f*dt;
 #endif
                 int q=ls.idx(i,j,k);
                 ls.d[q] =__float2half(primitive.density);
@@ -623,10 +646,10 @@ __global__ void __launch_bounds__(256, CUMINBLK) hydro_integrator_kernel_cuda(
                         ctot=fabsf(primitive.velocity_x)+fabsf(primitive.velocity_y)+fabsf(primitive.velocity_z)+3.0f*cs;
                     }
                     float grav;
-#ifdef GRAV
+#if DT_USE_F
                     grav=fabsf(FARR(cell_idx,1,source_idx))+fabsf(FARR(cell_idx,2,source_idx))+fabsf(FARR(cell_idx,3,source_idx));
 #else
-                    grav=(float)(fabs(constant_gravity[0])+fabs(constant_gravity[1])+fabs(constant_gravity[2]));
+                    grav=fabsf((float)constant_gravity[0])+fabsf((float)constant_gravity[1])+fabsf((float)constant_gravity[2]);
 #endif
                     grav=fmaxf(grav*dx/(ctot*ctot), 0.0001f);
                     float dtl=dx/ctot*(sqrtf(1.0f+2.0f*courant_factor*grav)-1.0f)/grav;
@@ -635,14 +658,35 @@ __global__ void __launch_bounds__(256, CUMINBLK) hydro_integrator_kernel_cuda(
             }
 
             // gravity predictor
-#ifdef GRAV
+#if PRED_USE_F
+#ifdef FEXP_PRED_BCAST
+            // broadcast f-read: all threads hit the SAME address (1 cache line).
+            // f is all-zeros in a turb run, so the VALUE is identical to the
+            // divergent read (0) -- only the access pattern (1 line vs many)
+            // differs. Isolates MLP/divergence from raw load-instruction count.
+            primitive.velocity_x += FARR(1,1,1)*0.5f*dt;
+            primitive.velocity_y += FARR(1,2,1)*0.5f*dt;
+            primitive.velocity_z += FARR(1,3,1)*0.5f*dt;
+#else
             primitive.velocity_x += FARR(cell_idx,1,source_idx)*0.5f*dt;
             primitive.velocity_y += FARR(cell_idx,2,source_idx)*0.5f*dt;
             primitive.velocity_z += FARR(cell_idx,3,source_idx)*0.5f*dt;
-#else
+#endif
+#elif defined(FEXP_CG_FP64)
+            // [diagnostic only] fp64 constant-gravity predictor: this single
+            // fp64-promoted term (constant_gravity is real(kind=8)) cost the
+            // ENTIRE GRAV=0<->GRAV=1 gap (~44%) on GA102's 1:64 fp64 path. Kept
+            // behind a flag to reproduce; the default below is fp32.
             primitive.velocity_x = (float)((double)primitive.velocity_x + constant_gravity[0]*0.5*(double)dt);
             primitive.velocity_y = (float)((double)primitive.velocity_y + constant_gravity[1]*0.5*(double)dt);
             primitive.velocity_z = (float)((double)primitive.velocity_z + constant_gravity[2]*0.5*(double)dt);
+#else
+            // fp32 constant-gravity predictor (cast cg to float ONCE): the whole
+            // sim is fp32, so doing this term in fp64 was pointless precision at
+            // 1:64 throughput. This is the fix that closes the GRAV=0 gap.
+            primitive.velocity_x += (float)constant_gravity[0]*0.5f*dt;
+            primitive.velocity_y += (float)constant_gravity[1]*0.5f*dt;
+            primitive.velocity_z += (float)constant_gravity[2]*0.5f*dt;
 #endif
             int q=ls.idx(i,j,k);
             ls.d[q] =__float2half(primitive.density);

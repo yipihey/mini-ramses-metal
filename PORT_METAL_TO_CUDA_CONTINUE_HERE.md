@@ -1,6 +1,16 @@
 # PORT: Fortran hydro integrator → CUDA-C kernel — CONTINUE HERE
 
-**Status:** Stages 0+1+2 DONE. **S1 (faithful scalar-load translation) PASSED — and BEATS the Fortran
+**★ BREAKTHROUGH (the GRAV=0↔1 mystery is SOLVED):** the gap was **fp64 arithmetic in the
+`constant_gravity` predictor** (`constant_gravity` is `real(kind=8)` → `v + cg*0.5_dp*dt` promotes to fp64
+→ 1:64 throughput on the A6000), NOT an L1/TEX throttle (the prior ncu reading was fp64-ALU saturation
+misread as a memory-pipe stall). Isolated with the C port's controllability: f-allocated-but-unread =
+slow (not the 1.6GB); only the predictor reads matter; **broadcast vs divergent f-read are equally fast
+(kills MLP/pacing theory)**; fp64-vs-fp32 predictor is the decider. **FIX (one line, fp32-safe): cast cg→dp.**
+Applied to BOTH kernels: CUDA-C GRAV=0 2967→~4176 (≈GRAV=1); **Fortran GRAV=0 2864→~3631 (+27%, ≈Fortran
+GRAV=1), conserve PASS** — a free production win. GRAV=0 is now the best config (GRAV=1 speed + saves 1.6GB).
+TODO: same latent fp64 bug in the GLM-MHD predictors (gpu_hydro.cuf ~2499/3420/3931) — not yet fixed/tested.
+
+**Status:** Stages 0+1+2 DONE + GRAV=0↔1 mystery solved. **S1 (faithful scalar-load translation) PASSED — and BEATS the Fortran
 ceiling**: 480³ turb warm-interleaved GRAV=1 **~4254 vs ~3560 (+19%)**, GRAV=0 **~2951 vs ~2838 (+5%)**,
 conserve_check turb 96³ rel_dmass=0/rel_dmom=0 PASS. **S2 (float4 wide loads) IMPLEMENTED + CORRECT but
 FALSIFIED as a speedup**: the load path under `#ifdef WIDELOAD` emits 5 `LDG.E.128` / 0 scalar uold loads

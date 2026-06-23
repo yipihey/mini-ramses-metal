@@ -147,6 +147,8 @@ ifeq ($(CUKERNEL),1)
    ifeq ($(WIDELOAD),1)
       CU_DEFINES += -DWIDELOAD
    endif
+   # ad-hoc pass-through for .cu experiments (e.g. CU_EXTRA="-DFEXP_PRED_OFF")
+   CU_DEFINES += $(CU_EXTRA)
 endif
 ifneq ($(NPRE),8)
    DEFINES += -DNPRE=$(NPRE)
