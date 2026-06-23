@@ -319,7 +319,11 @@ ifeq ($(COMPILER),NVHPC)
       gpu_part.o gpu_manager.o
 endif
 ifeq ($(CUKERNEL),1)
+ifeq ($(GLM),1)
+   MODOBJ += cuda_mhd_integrator_c.o cuda_mhd_integrator_f.o
+else
    MODOBJ += cuda_hydro_integrator_c.o cuda_hydro_integrator_f.o
+endif
 endif
 ifeq ($(COMPILER),METAL)
 MODOBJ += metal_bridge_iface.o metal_bridge.o metal_gravity.o
@@ -399,6 +403,14 @@ cuda_hydro_integrator_c.o: cuda_hydro_integrator.cu
 #############################################################################
 cuda_hydro_integrator_f.o: cuda_hydro_integrator.cuf cuda_hydro_integrator_c.o
 	nvfortran $(FFLAGS) -c cuda_hydro_integrator_c.o $(GPU_PATH)/cuda_hydro_integrator.cuf -o cuda_hydro_integrator_f.o
+#############################################################################
+# CUKERNEL GLM-MHD twin (cuda_mhd_integrator). Same pattern; CU_DEFINES carries
+# NSUB/GRAV/TURB (the .cu hardcodes NVAR=9, so do NOT pass -DNVAR).
+cuda_mhd_integrator_c.o: cuda_mhd_integrator.cu
+	nvcc -arch=$(CUDA_ARCH) -O3 --use_fast_math -lineinfo -Xcompiler -fPIC $(CU_DEFINES) -c $(GPU_PATH)/cuda_mhd_integrator.cu -o cuda_mhd_integrator_c.o
+#############################################################################
+cuda_mhd_integrator_f.o: cuda_mhd_integrator.cuf cuda_mhd_integrator_c.o
+	nvfortran $(FFLAGS) -c cuda_mhd_integrator_c.o $(GPU_PATH)/cuda_mhd_integrator.cuf -o cuda_mhd_integrator_f.o
 
 %.o:%.cuf
 	$(F90) $(FFLAGS) -c $< -o $@ $(LIBS)

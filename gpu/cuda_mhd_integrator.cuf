@@ -1,0 +1,41 @@
+! ============================================================================
+! cuda_mhd_integrator.cuf
+!
+! bind(c) interface to the host-launched CUDA-C GLM-MHD integrator in
+! cuda_mhd_integrator.cu (sister of cuda_hydro_integrator.{cu,cuf}). Device
+! arrays pass as type(c_devptr) by value -> C void*; scalars by value. NPRE=4
+! => real(dp)=c_float; constant_gravity & dt_out are real(kind=8)=c_double.
+! ============================================================================
+module cuda_mhd_integrator_mod
+  use iso_c_binding
+  use cudafor
+  implicit none
+
+  interface
+     subroutine launch_mhd_integrator(grid, uold, unew, f, father, nbor, &
+          & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
+          & gamma, smallr, smallc2, ch, dt, dx, slope, riemann, sw_dmin, sw_pmin, &
+          & constant_gravity, glm_fac, base_write, courant_factor, dt_out, cfl_sqrt3 &
+#ifdef TURB
+          & , afield_now, d_skip, boxlen, turb_min_rho, do_turb &
+#endif
+          & ) bind(c, name="launch_mhd_integrator")
+       use iso_c_binding
+       use cudafor
+       implicit none
+       type(c_devptr), value :: grid, uold, unew, f, father, nbor
+       type(c_devptr), value :: constant_gravity, dt_out
+       integer(c_int), value :: head_idx, num_subgrids, ngridmax
+       integer(c_int), value :: ilevel, levelmin, levelmax
+       integer(c_int), value :: slope, riemann, base_write, cfl_sqrt3
+       real(c_float),  value :: gamma, smallr, smallc2, ch, dt, dx
+       real(c_float),  value :: sw_dmin, sw_pmin, glm_fac, courant_factor
+#ifdef TURB
+       type(c_devptr), value :: afield_now, d_skip
+       real(c_float),  value :: boxlen, turb_min_rho
+       integer(c_int), value :: do_turb
+#endif
+     end subroutine launch_mhd_integrator
+  end interface
+
+end module cuda_mhd_integrator_mod
