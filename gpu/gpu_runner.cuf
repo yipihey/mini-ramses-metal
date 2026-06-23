@@ -466,6 +466,10 @@ contains
 #else
     use hydro_device, only: hydro_integrator_kernel
 #endif
+#ifdef CUKERNEL
+    use cuda_hydro_integrator_mod, only: launch_hydro_integrator
+    use iso_c_binding
+#endif
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout)::sim
     integer, intent(in)::ilevel
@@ -566,6 +570,32 @@ contains
     base_write = (sim%r%levelmin == sim%r%nlevelmax .and. sim%r%static_mesh)
     do_turb = (base_write .and. sim%r%turb)
     if (base_write) dt_reduce(1) = sim%r%courant_factor*dx/sim%r%smallc
+#ifdef CUKERNEL
+    ! Host-launched CUDA-C twin of hydro_integrator_kernel (Stage-1 port). Pass the
+    ! Fortran device arrays directly via c_devloc (S0-verified ABI). f is only
+    ! allocated #ifdef GRAV, so substitute a harmless placeholder otherwise (the
+    ! .cu kernel never reads f unless compiled -DGRAV).
+    call launch_hydro_integrator( &
+         & c_devloc(grid(1)), c_devloc(uold(1,1,1)), c_devloc(unew(1,1,1)), &
+#ifdef GRAV
+         & c_devloc(f(1,1,1)), &
+#else
+         & c_devloc(uold(1,1,1)), &
+#endif
+         & c_devloc(father(1)), c_devloc(nbor(1,1)), &
+         & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
+         & real(gamma,kind=c_float), real(smallr,kind=c_float), real(smallc2,kind=c_float), &
+         & real(dt,kind=c_float), real(dx,kind=c_float), slope, riemann, &
+         & c_devloc(constant_gravity(1)), merge(1_c_int,0_c_int,base_write), &
+         & real(sim%r%courant_factor,kind=c_float), c_devloc(dt_reduce(1)), &
+         & merge(1_c_int,0_c_int,sim%r%cfl_sqrt3) &
+#ifdef TURB
+         & , c_devloc(afield_now_d(1,0,0,0)), c_devloc(d_skip(1)), &
+         & real(sim%r%boxlen,kind=c_float), real(sim%r%turb_min_rho,kind=c_float), &
+         & merge(1_c_int,0_c_int,do_turb) &
+#endif
+         & )
+#else
     call hydro_integrator_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, f, father, nbor, &
          & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
          & gamma, smallr, smallc2, dt, dx, slope, riemann, constant_gravity, base_write, &
@@ -574,6 +604,7 @@ contains
          & , afield_now_d, d_skip, real(sim%r%boxlen,kind=dp), real(sim%r%turb_min_rho,kind=dp), do_turb &
 #endif
          & )
+#endif
 #endif
     call GPU_Error_Check(__FILE__, __LINE__)
 #ifndef PAPER

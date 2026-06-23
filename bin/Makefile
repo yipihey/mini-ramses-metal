@@ -130,6 +130,24 @@ endif
 ifdef TPRE
    DEFINES += -DTPRE=$(TPRE)
 endif
+# CUKERNEL: route the hydro godunov through the host-launched CUDA-C twin
+# (gpu/cuda_hydro_integrator.{cu,cuf}) instead of the CUDA-Fortran kernel.
+ifeq ($(CUKERNEL),1)
+   DEFINES += -DCUKERNEL
+   # Minimal define set for the .cu (NOT $(DEFINES): -DNVAR/-DNDIM would clash
+   # with the .cu's own constexpr names). The .cu only keys off NSUB/GRAV/TURB.
+   CU_DEFINES = -DNSUB=$(NSUB)
+   ifeq ($(GRAV),1)
+      CU_DEFINES += -DGRAV
+   endif
+   ifeq ($(TURB),1)
+      CU_DEFINES += -DTURB
+   endif
+   # S2: float4 wide loads in the load phase (reinterpret_cast<float4>).
+   ifeq ($(WIDELOAD),1)
+      CU_DEFINES += -DWIDELOAD
+   endif
+endif
 ifneq ($(NPRE),8)
    DEFINES += -DNPRE=$(NPRE)
 endif
@@ -298,6 +316,9 @@ ifeq ($(COMPILER),NVHPC)
       gpu_cooling.o gpu_star.o gpu_rho.o gpu_mg.o gpu_refine.o gpu_flag.o gpu_turb.o gpu_runner.o \
       gpu_part.o gpu_manager.o
 endif
+ifeq ($(CUKERNEL),1)
+   MODOBJ += cuda_hydro_integrator_c.o cuda_hydro_integrator_f.o
+endif
 ifeq ($(COMPILER),METAL)
 MODOBJ += metal_bridge_iface.o metal_bridge.o metal_gravity.o
 endif
@@ -367,6 +388,15 @@ cub_module_radix_sort_c.o: cub_module_radix_sort.h cub_module_radix_sort.cu
 #############################################################################
 cub_module_radix_sort_f.o: cub_module_radix_sort.cuf cub_module_radix_sort_c.o
 	nvfortran $(FFLAGS) -c cub_module_radix_sort_c.o $(GPU_PATH)/cub_module_radix_sort.cuf -o cub_module_radix_sort_f.o
+#############################################################################
+# CUKERNEL: host-launched CUDA-C godunov integrator (Stage-1 port). nvcc->.o,
+# then the bind(c) interface module (.cuf) compiled by nvfortran and linked.
+# -lstdc++ is already in LIBS. CU_DEFINES carries NSUB/GRAV/TURB to the .cu.
+cuda_hydro_integrator_c.o: cuda_hydro_integrator.cu
+	nvcc -arch=$(CUDA_ARCH) -O3 --use_fast_math -lineinfo -Xcompiler -fPIC $(CU_DEFINES) -c $(GPU_PATH)/cuda_hydro_integrator.cu -o cuda_hydro_integrator_c.o
+#############################################################################
+cuda_hydro_integrator_f.o: cuda_hydro_integrator.cuf cuda_hydro_integrator_c.o
+	nvfortran $(FFLAGS) -c cuda_hydro_integrator_c.o $(GPU_PATH)/cuda_hydro_integrator.cuf -o cuda_hydro_integrator_f.o
 
 %.o:%.cuf
 	$(F90) $(FFLAGS) -c $< -o $@ $(LIBS)

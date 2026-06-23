@@ -1,0 +1,45 @@
+! ============================================================================
+! cuda_hydro_integrator.cuf
+!
+! bind(c) interface to the host-launched CUDA-C godunov integrator in
+! cuda_hydro_integrator.cu (Stage-1 port; see PORT_METAL_TO_CUDA_CONTINUE_HERE.md).
+! Mirrors the cub_module_radix_sort.{cu,cuf} template: the .cu owns the kernel
+! + the extern"C" launcher; this module declares the Fortran-callable interface.
+!
+! Device arrays are passed as type(c_devptr) (from cudafor) by value -> C void*.
+! Scalars by value. NPRE=4 => real(dp)=real*4=c_float; constant_gravity & dt_out
+! are real(kind=8)=c_double on the device. Logicals are marshalled as c_int 0/1
+! at the call site (gpu_runner.cuf).
+! ============================================================================
+module cuda_hydro_integrator_mod
+  use iso_c_binding
+  use cudafor
+  implicit none
+
+  interface
+     subroutine launch_hydro_integrator(grid, uold, unew, f, father, nbor, &
+          & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
+          & gamma, smallr, smallc2, dt, dx, slope, riemann, constant_gravity, base_write, &
+          & courant_factor, dt_out, cfl_sqrt3 &
+#ifdef TURB
+          & , afield_now, d_skip, boxlen, turb_min_rho, do_turb &
+#endif
+          & ) bind(c, name="launch_hydro_integrator")
+       use iso_c_binding
+       use cudafor
+       implicit none
+       type(c_devptr), value :: grid, uold, unew, f, father, nbor
+       type(c_devptr), value :: constant_gravity, dt_out
+       integer(c_int), value :: head_idx, num_subgrids, ngridmax
+       integer(c_int), value :: ilevel, levelmin, levelmax
+       integer(c_int), value :: slope, riemann, base_write, cfl_sqrt3
+       real(c_float),  value :: gamma, smallr, smallc2, dt, dx, courant_factor
+#ifdef TURB
+       type(c_devptr), value :: afield_now, d_skip
+       real(c_float),  value :: boxlen, turb_min_rho
+       integer(c_int), value :: do_turb
+#endif
+     end subroutine launch_hydro_integrator
+  end interface
+
+end module cuda_hydro_integrator_mod
