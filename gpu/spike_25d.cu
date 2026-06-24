@@ -37,6 +37,14 @@
 // A6000. The traffic saving is real but the kernel is occupancy-pinned, not DRAM-bound, and
 // 4 blocks needs <=64 regs exactly. Likely POSITIVE on a GPU not sitting on that cliff (H200).
 //
+// -DLLF_FALLBACK (with HANCOCK1D): HLL normally, LLF (Rusanov) at faces with a reconstructed
+// interface state below floors. UNIFIED solver shares FL/FR/UL/UR and branches only on the cheap
+// combine -> STAYS at 64 regs / 4 blocks (naive bad?llf:hll blows past 64 -> 3 blocks). Cost -2%
+// (~6530), exactly conservative, HLL-level accuracy (sigma_s tracks HLL; LLF fires only at rare
+// low-rho faces, not over-diffuse pure LLF). Julia twin GLMMHDTurb riem5 Val{:fb}. The light
+// scheme is CFL/accuracy-VALIDATED on Mach~4-12 driven hydro turb: stable to CFL=1.0 (no penalty
+// vs the cube, no 1/ndim collapse), sigma_s matches; HLL already robust to Mach 12.
+//
 // build:  nvcc -arch=sm_86 -O3 --use_fast_math -o spike_25d gpu/spike_25d.cu
 //         nvcc -arch=sm_86 -O3 --use_fast_math -DMEMFLOOR -o spike_25d_mf gpu/spike_25d.cu
 
@@ -171,6 +179,39 @@ __device__ __forceinline__ Cons hll(Prim L,Prim R,int dir){
     return F;
 }
 
+// Unified HLL / LLF-fallback: share FL,FR,UL,UR (the expensive part); branch only on
+// the cheap combine. LLF (Rusanov, positivity-robust) when a reconstructed interface
+// state is below floors, else HLL. Minimizes the register delta of carrying both.
+__device__ __forceinline__ Cons riemann_fb(Prim L,Prim R,int dir){
+    float unL=dir==0?L.u:dir==1?L.v:L.w, unR=dir==0?R.u:dir==1?R.v:R.w;
+    float aL=sqrtf(GAMMA*L.p/L.r), aR=sqrtf(GAMMA*R.p/R.r);
+    Cons FL=primFlux(L,dir), FR=primFlux(R,dir), UL=toCons(L), UR=toCons(R), F;
+    if(L.r<1e-3f||L.p<1e-3f||R.r<1e-3f||R.p<1e-3f){           // LLF fallback (robust)
+        float s=fmaxf(fabsf(unL)+aL,fabsf(unR)+aR);
+        F.r =0.5f*(FL.r +FR.r )-0.5f*s*(UR.r -UL.r );
+        F.mx=0.5f*(FL.mx+FR.mx)-0.5f*s*(UR.mx-UL.mx);
+        F.my=0.5f*(FL.my+FR.my)-0.5f*s*(UR.my-UL.my);
+        F.mz=0.5f*(FL.mz+FR.mz)-0.5f*s*(UR.mz-UL.mz);
+        F.E =0.5f*(FL.E +FR.E )-0.5f*s*(UR.E -UL.E );
+        return F;
+    }
+    float sL=fminf(unL-aL,unR-aR), sR=fmaxf(unL+aL,unR+aR);   // HLL (accurate)
+    if(sL>=0.f) return FL;
+    if(sR<=0.f) return FR;
+    float inv=1.f/(sR-sL);
+    F.r =(sR*FL.r -sL*FR.r +sL*sR*(UR.r -UL.r ))*inv;
+    F.mx=(sR*FL.mx-sL*FR.mx+sL*sR*(UR.mx-UL.mx))*inv;
+    F.my=(sR*FL.my-sL*FR.my+sL*sR*(UR.my-UL.my))*inv;
+    F.mz=(sR*FL.mz-sL*FR.mz+sL*sR*(UR.mz-UL.mz))*inv;
+    F.E =(sR*FL.E -sL*FR.E +sL*sR*(UR.E -UL.E ))*inv;
+    return F;
+}
+#ifdef LLF_FALLBACK
+#define RS(L,R,d) riemann_fb(L,R,d)
+#else
+#define RS(L,R,d) hll(L,R,d)
+#endif
+
 __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
     __shared__ __half sh[NV][PLANES][GX*GY];
     const int tid = threadIdx.x;
@@ -231,8 +272,8 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
 #elif defined(HANCOCK1D)
             // normal-only 1D Hancock: 2nd order in space AND time, transverse-free (light)
             Prim mhm=hanc1d(cm1,sm1,d,DTDX,GAMMA), mh0=hanc1d(c0,s0,d,DTDX,GAMMA), mhp=hanc1d(cp1,sp1,d,DTDX,GAMMA);
-            Cons Fm = hll(edge(mhm,sm1,+1.f), edge(mh0,s0,-1.f), d);
-            Cons Fp = hll(edge(mh0,s0,+1.f),  edge(mhp,sp1,-1.f), d);
+            Cons Fm = RS(edge(mhm,sm1,+1.f), edge(mh0,s0,-1.f), d);
+            Cons Fp = RS(edge(mh0,s0,+1.f),  edge(mhp,sp1,-1.f), d);
 #elif defined(PPM1D)
             // parabolic-edge PPM (monotonized 3-pt parabola) + normal-only 1D Hancock predictor.
             // edges built from the parabola; predictor uses the parabolic slope (eR-eL).
