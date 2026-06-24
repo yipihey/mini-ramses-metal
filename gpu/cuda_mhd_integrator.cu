@@ -326,11 +326,146 @@ __device__ __forceinline__ bool strong_pjump(float a,float b,float c){
     const float tiny=1e-20f; float hi=fmaxf(a,fmaxf(b,c)), lo=fmaxf(fminf(a,fminf(b,c)),tiny); return hi/lo>2.0f;
 }
 
+// =================== PPM reconstruction (slope 10/11) =======================
+__device__ __forceinline__ void lppm_monotonize(float ql,float q0,float qr,float& lo,float& hi){
+    float dq=qr-ql, diff=(q0-0.5f*(ql+qr))*dq;
+    if ((qr-q0)*(q0-ql) <= 0.0f){ lo=q0; hi=q0; }
+    else if (diff > dq*dq/6.0f){ lo=3.0f*q0-2.0f*qr; hi=qr; }
+    else if (diff < -dq*dq/6.0f){ lo=ql; hi=3.0f*q0-2.0f*ql; }
+    else { lo=ql; hi=qr; }
+}
+__device__ __forceinline__ void lppm_edges(float qm,float q0,float qp,float& ql,float& qr){
+    float slope=0.25f*(qp-qm), curve=(qm-2.0f*q0+qp)/12.0f;
+    lppm_monotonize(q0-slope+curve, q0, q0+slope+curve, ql, qr);
+}
+// inverse of mhd_rot_to (primitive)
+__device__ __forceinline__ Prim mhd_rot_from(Prim p,int dir){
+    Prim r=p;
+    if (dir==2){ r.velocity_x=p.velocity_z; r.velocity_y=p.velocity_x; r.velocity_z=p.velocity_y; r.bx=p.bz; r.by=p.bx; r.bz=p.by; }
+    else if (dir==3){ r.velocity_x=p.velocity_y; r.velocity_y=p.velocity_z; r.velocity_z=p.velocity_x; r.bx=p.by; r.by=p.bz; r.bz=p.bx; }
+    return r;
+}
+// PPM parabolic edges of all 9 primitives
+__device__ __forceinline__ void mhd_ppm_faces(const Prim& l,const Prim& m,const Prim& r,Prim& qm,Prim& qp){
+    lppm_edges(l.density,   m.density,   r.density,   qm.density,   qp.density);
+    lppm_edges(l.velocity_x,m.velocity_x,r.velocity_x,qm.velocity_x,qp.velocity_x);
+    lppm_edges(l.velocity_y,m.velocity_y,r.velocity_y,qm.velocity_y,qp.velocity_y);
+    lppm_edges(l.velocity_z,m.velocity_z,r.velocity_z,qm.velocity_z,qp.velocity_z);
+    lppm_edges(l.pressure,  m.pressure,  r.pressure,  qm.pressure,  qp.pressure);
+    lppm_edges(l.bx,m.bx,r.bx,qm.bx,qp.bx);
+    lppm_edges(l.by,m.by,r.by,qm.by,qp.by);
+    lppm_edges(l.bz,m.bz,r.bz,qm.bz,qp.bz);
+    lppm_edges(l.psi,m.psi,r.psi,qm.psi,qp.psi);
+}
+__device__ __forceinline__ Prim mhd_face(const Prim& mh,const Prim& e,const Prim& m0){
+    Prim f;
+    f.density=mh.density+e.density-m0.density; f.velocity_x=mh.velocity_x+e.velocity_x-m0.velocity_x;
+    f.velocity_y=mh.velocity_y+e.velocity_y-m0.velocity_y; f.velocity_z=mh.velocity_z+e.velocity_z-m0.velocity_z;
+    f.pressure=mh.pressure+e.pressure-m0.pressure;
+    f.bx=mh.bx+e.bx-m0.bx; f.by=mh.by+e.by-m0.by; f.bz=mh.bz+e.bz-m0.bz; f.psi=mh.psi+e.psi-m0.psi;
+    return f;
+}
+// 7-wave characteristic PPM-MHD trace along x (Bx = normal). Faithful translation
+// of mhd_char_trace_x (Stone et al. 2008 eigensystem, Roe-Balsara normalization).
+__device__ void mhd_char_trace_x(const Prim& l,const Prim& m,const Prim& r,float gamma,float dtdx,Prim& qminus,Prim& qplus){
+    const float smallr=1e-10f, smallp=1e-30f, tiny=1e-40f;
+    float eL[7],eR[7],c0[7],ref[7],inc[7],dW[7],qs7[7],bco[7],cco[7],aa,bb;
+    lppm_edges(l.density,   m.density,   r.density,   eL[0],eR[0]); c0[0]=m.density;
+    lppm_edges(l.velocity_x,m.velocity_x,r.velocity_x,eL[1],eR[1]); c0[1]=m.velocity_x;
+    lppm_edges(l.velocity_y,m.velocity_y,r.velocity_y,eL[2],eR[2]); c0[2]=m.velocity_y;
+    lppm_edges(l.velocity_z,m.velocity_z,r.velocity_z,eL[3],eR[3]); c0[3]=m.velocity_z;
+    lppm_edges(l.pressure,  m.pressure,  r.pressure,  eL[4],eR[4]); c0[4]=m.pressure;
+    lppm_edges(l.by,        m.by,        r.by,        eL[5],eR[5]); c0[5]=m.by;
+    lppm_edges(l.bz,        m.bz,        r.bz,        eL[6],eR[6]); c0[6]=m.bz;
+    #pragma unroll
+    for (int v=0;v<7;v++){ lppm_monotonize(eL[v],c0[v],eR[v],aa,bb); eL[v]=aa; eR[v]=bb; }
+    if (eL[0]<=0.0f || eR[0]<=0.0f){ eL[0]=c0[0]; eR[0]=c0[0]; }
+    if (eL[4]<=0.0f || eR[4]<=0.0f){ eL[4]=c0[4]; eR[4]=c0[4]; }
+    #pragma unroll
+    for (int v=0;v<7;v++){ bco[v]=-4.0f*eL[v]+6.0f*c0[v]-2.0f*eR[v]; cco[v]=3.0f*(eL[v]-2.0f*c0[v]+eR[v]); }
+    float bxl,bxr,psl,psr;
+    lppm_edges(l.bx, m.bx, r.bx, bxl,bxr);
+    lppm_edges(l.psi,m.psi,r.psi,psl,psr);
+    // eigensystem at cell center
+    float d=fmaxf(m.density,smallr), id=1.0f/d, sqd=sqrtf(d), isqd=sqd*id;
+    float a2=gamma*fmaxf(m.pressure,smallp)*id, a=sqrtf(a2);
+    float ca2=m.bx*m.bx*id;
+    float b2=(m.bx*m.bx+m.by*m.by+m.bz*m.bz)*id;
+    float bt=sqrtf(m.by*m.by+m.bz*m.bz), byh, bzh;
+    if (bt>tiny){ float ibt=1.0f/bt; byh=m.by*ibt; bzh=m.bz*ibt; } else { byh=sqrtf(0.5f); bzh=sqrtf(0.5f); }
+    float q=a2+b2, disc=sqrtf(fmaxf(q*q-4.0f*a2*ca2,0.0f));
+    float cf2=0.5f*(q+disc), cs2=0.5f*(q-disc), cf=sqrtf(fmaxf(cf2,0.0f)), cs=sqrtf(fmaxf(cs2,0.0f));
+    float af,as;
+    if (cf2-cs2<=tiny){ af=1.0f; as=0.0f; }
+    else { float iden=1.0f/(cf2-cs2); float af2=fminf(fmaxf((a2-cs2)*iden,0.0f),1.0f); af=sqrtf(af2); as=sqrtf(1.0f-af2); }
+    float S=copysignf(1.0f,m.bx), inv_a2=1.0f/a2, N=0.5f*inv_a2, vx0=m.velocity_x;
+    float lam[7]={vx0-cf,vx0-ca2*0.0f,vx0-cs,vx0,vx0+cs,0.0f,vx0+cf};
+    float ca=sqrtf(ca2); lam[1]=vx0-ca; lam[5]=vx0+ca;
+    for (int side=0;side<2;side++){
+        bool rt=(side==0);
+        #pragma unroll
+        for (int v=0;v<7;v++){ ref[v]= rt? eR[v]:eL[v]; inc[v]=0.0f; }
+        for (int w=0;w<7;w++){
+            if (rt){ if (!(lam[w]>0.0f)) continue; } else { if (!(lam[w]<0.0f)) continue; }
+            float sigma=fminf(fabsf(lam[w])*dtdx,1.0f), lo,hi;
+            if (rt){ lo=1.0f-sigma; hi=1.0f; } else { lo=0.0f; hi=sigma; }
+            float P1=0.5f*(lo+hi), P2=(lo*lo+lo*hi+hi*hi)/3.0f;
+            #pragma unroll
+            for (int v=0;v<7;v++) dW[v]=eL[v]-ref[v]+bco[v]*P1+cco[v]*P2;
+            float amp,ef;
+            if (w==0 || w==6){            // fast (w=0 -> -cf, w=6 -> +cf)
+                ef=(w==6)?1.0f:-1.0f;
+                amp=N*( ef*cf*af*dW[1] - ef*cs*as*S*(byh*dW[2]+bzh*dW[3]) + (af*id)*dW[4] + a*as*isqd*(byh*dW[5]+bzh*dW[6]) );
+                inc[0]+=amp*d*af; inc[1]+=amp*ef*cf*af; inc[2]-=amp*ef*cs*as*S*byh; inc[3]-=amp*ef*cs*as*S*bzh;
+                inc[4]+=amp*d*a2*af; inc[5]+=amp*a*as*byh*sqd; inc[6]+=amp*a*as*bzh*sqd;
+            } else if (w==2 || w==4){     // slow (w=2 -> -cs, w=4 -> +cs)
+                ef=(w==4)?1.0f:-1.0f;
+                amp=N*( ef*cs*as*dW[1] + ef*cf*af*S*(byh*dW[2]+bzh*dW[3]) + (as*id)*dW[4] - a*af*isqd*(byh*dW[5]+bzh*dW[6]) );
+                inc[0]+=amp*d*as; inc[1]+=amp*ef*cs*as; inc[2]+=amp*ef*cf*af*S*byh; inc[3]+=amp*ef*cf*af*S*bzh;
+                inc[4]+=amp*d*a2*as; inc[5]-=amp*a*af*byh*sqd; inc[6]-=amp*a*af*bzh*sqd;
+            } else if (w==1 || w==5){     // Alfven (w=1 -> -ca, w=5 -> +ca)
+                ef=(w==5)?1.0f:-1.0f;
+                amp=0.5f*(-bzh*dW[2]+byh*dW[3]) + 0.5f*ef*S*isqd*(-bzh*dW[5]+byh*dW[6]);
+                inc[2]-=amp*bzh; inc[3]+=amp*byh; inc[5]-=amp*ef*S*sqd*bzh; inc[6]+=amp*ef*S*sqd*byh;
+            } else {                      // entropy (w=3)
+                amp=dW[0]-dW[4]*inv_a2; inc[0]+=amp;
+            }
+        }
+        #pragma unroll
+        for (int v=0;v<7;v++) qs7[v]=ref[v]+inc[v];
+        qs7[0]=fminf(fmaxf(qs7[0], fminf(eL[0],fminf(c0[0],eR[0]))), fmaxf(eL[0],fmaxf(c0[0],eR[0])));
+        qs7[4]=fminf(fmaxf(qs7[4], fminf(eL[4],fminf(c0[4],eR[4]))), fmaxf(eL[4],fmaxf(c0[4],eR[4])));
+        if (qs7[0]<=smallr || qs7[4]<=smallp){ for (int v=0;v<7;v++) qs7[v]=c0[v]; }
+        Prim* qo = rt? &qplus : &qminus;
+        qo->density=qs7[0]; qo->velocity_x=qs7[1]; qo->velocity_y=qs7[2]; qo->velocity_z=qs7[3];
+        qo->pressure=qs7[4]; qo->by=qs7[5]; qo->bz=qs7[6];
+        qo->bx= rt? bxr:bxl; qo->psi= rt? psr:psl;
+    }
+}
+__device__ __forceinline__ void mhd_char_faces(const Prim& lN,const Prim& m0,const Prim& rN,int dir,float gamma,float dtdx,Prim& qminus,Prim& qplus){
+    Prim qm,qp;
+    mhd_char_trace_x(mhd_rot_to(lN,dir),mhd_rot_to(m0,dir),mhd_rot_to(rN,dir),gamma,dtdx,qm,qp);
+    qminus=mhd_rot_from(qm,dir); qplus=mhd_rot_from(qp,dir);
+}
+
+// trace MODE selector
+#define TR_PLM  0
+#define TR_CHAR 1
+#define TR_PAR  2
+
 // ============================================================================
-#ifndef CUMINBLK
-#define CUMINBLK 2      // GLM-MHD PLM is shared-limited at ~2 blocks/SM
+// Templated on the reconstruction MODE so each instantiation compiles only its
+// trace and gets its own register budget (mirrors the Fortran's 3 kernels):
+//   PLM  (slope<10)  ~2 blocks/SM ;  PAR (slope=11) ~2 ;  CHAR (slope=10) 1 block
+// (the 7-wave characteristic trace is ~200 regs -> shared+reg force 1 block).
+// char-PPM is latency-bound at 1 block/SM; 2 blocks (cap 128 regs, small spill)
+// is ~45% faster for it. (The C char-PPM still trails the Fortran kernel, so the
+// production launch routes slope=10 to Fortran; this kernel stays correct+available.)
+#ifndef CHAR_MB
+#define CHAR_MB 2
 #endif
-__global__ void __launch_bounds__(256, CUMINBLK) mhd_integrator_kernel_cuda(
+template<int MODE>
+__global__ void __launch_bounds__(256, (MODE==TR_CHAR ? CHAR_MB : 2)) mhd_integrator_kernel_cuda(
     Oct* __restrict__ grid, float* __restrict__ uold, float* __restrict__ unew,
     const float* __restrict__ f, const int* __restrict__ father, const int* __restrict__ nbor,
     int head_idx, int num_subgrids, int ngridmax, int ilevel, int levelmin, int levelmax,
@@ -417,7 +552,7 @@ __global__ void __launch_bounds__(256, CUMINBLK) mhd_integrator_kernel_cuda(
         __syncthreads();
     }
 
-    // 2) trace_3d_mhd_plm : MUSCL-Hancock reconstruction ----------------------
+    // 2) trace : PLM (MODE=PLM) | par-PPM (PAR) | characteristic-PPM (CHAR) -----
     {
         const int work_size=2*NS+2;
         float smallp=smallr*smallc2;
@@ -425,22 +560,63 @@ __global__ void __launch_bounds__(256, CUMINBLK) mhd_integrator_kernel_cuda(
             int i,j,k; idx1Dto3D(work_idx,work_size,work_size,i,j,k); i+=1; j+=1; k+=1;
             Prim m0=sg_load(ls,i,j,k);
             float lrho=m0.density, lp=m0.pressure;
-            Prim sx=mhd_slope(sg_load(ls,i-1,j,k),m0,sg_load(ls,i+1,j,k),slope);
-            Prim sy=mhd_slope(sg_load(ls,i,j-1,k),m0,sg_load(ls,i,j+1,k),slope);
-            Prim sz=mhd_slope(sg_load(ls,i,j,k-1),m0,sg_load(ls,i,j,k+1),slope);
-            Cons u0=mhd_p2c(m0,gamma);
-            Cons du=mhd_hancock_dir(m0,sx,1,gamma,0.5f*dtdx);
-            du=mhd_cadd(du,mhd_hancock_dir(m0,sy,2,gamma,0.5f*dtdx));
-            du=mhd_cadd(du,mhd_hancock_dir(m0,sz,3,gamma,0.5f*dtdx));
-            Prim mh=mhd_c2p(mhd_cadd(u0,du),gamma,smallr,smallc2);
-            if (mh.density<=smallr || mh.pressure<=smallp) mh=m0;
             Prim fr,fl;
-            if (i>1 && (j>1&&j<work_size) && (k>1&&k<work_size)){ fr=mhd_padd(mh,sx,-1.0f); store_face(rx,i-2,j-2,k-2,fr,smallr,smallp,lrho,lp); }
-            if (i<work_size && (j>1&&j<work_size) && (k>1&&k<work_size)){ fl=mhd_padd(mh,sx,1.0f); store_face(lx,i-1,j-2,k-2,fl,smallr,smallp,lrho,lp); }
-            if ((i>1&&i<work_size) && j>1 && (k>1&&k<work_size)){ fr=mhd_padd(mh,sy,-1.0f); store_face(ry,i-2,j-2,k-2,fr,smallr,smallp,lrho,lp); }
-            if ((i>1&&i<work_size) && j<work_size && (k>1&&k<work_size)){ fl=mhd_padd(mh,sy,1.0f); store_face(ly,i-2,j-1,k-2,fl,smallr,smallp,lrho,lp); }
-            if ((i>1&&i<work_size) && (j>1&&j<work_size) && k>1){ fr=mhd_padd(mh,sz,-1.0f); store_face(rz,i-2,j-2,k-2,fr,smallr,smallp,lrho,lp); }
-            if ((i>1&&i<work_size) && (j>1&&j<work_size) && k<work_size){ fl=mhd_padd(mh,sz,1.0f); store_face(lz,i-2,j-2,k-1,fl,smallr,smallp,lrho,lp); }
+            if constexpr (MODE==TR_CHAR){
+                // 7-wave characteristic PPM; per-cell PLM (moncen) fallback on strong jumps.
+                bool use_ppm = !( strong_pjump(__half2float(ls.p[ls.idx(i-1,j,k)]),m0.pressure,__half2float(ls.p[ls.idx(i+1,j,k)]))
+                               || strong_pjump(__half2float(ls.p[ls.idx(i,j-1,k)]),m0.pressure,__half2float(ls.p[ls.idx(i,j+1,k)]))
+                               || strong_pjump(__half2float(ls.p[ls.idx(i,j,k-1)]),m0.pressure,__half2float(ls.p[ls.idx(i,j,k+1)])) );
+                Prim sx,sy,sz,mh;
+                if (!use_ppm){
+                    sx=mhd_slope(sg_load(ls,i-1,j,k),m0,sg_load(ls,i+1,j,k),2);
+                    sy=mhd_slope(sg_load(ls,i,j-1,k),m0,sg_load(ls,i,j+1,k),2);
+                    sz=mhd_slope(sg_load(ls,i,j,k-1),m0,sg_load(ls,i,j,k+1),2);
+                    Cons u0=mhd_p2c(m0,gamma);
+                    Cons du=mhd_hancock_dir(m0,sx,1,gamma,0.5f*dtdx);
+                    du=mhd_cadd(du,mhd_hancock_dir(m0,sy,2,gamma,0.5f*dtdx));
+                    du=mhd_cadd(du,mhd_hancock_dir(m0,sz,3,gamma,0.5f*dtdx));
+                    mh=mhd_c2p(mhd_cadd(u0,du),gamma,smallr,smallc2);
+                    if (mh.density<=smallr || mh.pressure<=smallp) mh=m0;
+                }
+                Prim pm,pp;
+                if (use_ppm) mhd_char_faces(sg_load(ls,i-1,j,k),m0,sg_load(ls,i+1,j,k),1,gamma,dtdx,pm,pp);
+                if (i>1 && (j>1&&j<work_size) && (k>1&&k<work_size)){ fr= use_ppm?pm:mhd_padd(mh,sx,-1.0f); store_face(rx,i-2,j-2,k-2,fr,smallr,smallp,lrho,lp); }
+                if (i<work_size && (j>1&&j<work_size) && (k>1&&k<work_size)){ fl= use_ppm?pp:mhd_padd(mh,sx,1.0f); store_face(lx,i-1,j-2,k-2,fl,smallr,smallp,lrho,lp); }
+                if (use_ppm) mhd_char_faces(sg_load(ls,i,j-1,k),m0,sg_load(ls,i,j+1,k),2,gamma,dtdx,pm,pp);
+                if ((i>1&&i<work_size) && j>1 && (k>1&&k<work_size)){ fr= use_ppm?pm:mhd_padd(mh,sy,-1.0f); store_face(ry,i-2,j-2,k-2,fr,smallr,smallp,lrho,lp); }
+                if ((i>1&&i<work_size) && j<work_size && (k>1&&k<work_size)){ fl= use_ppm?pp:mhd_padd(mh,sy,1.0f); store_face(ly,i-2,j-1,k-2,fl,smallr,smallp,lrho,lp); }
+                if (use_ppm) mhd_char_faces(sg_load(ls,i,j,k-1),m0,sg_load(ls,i,j,k+1),3,gamma,dtdx,pm,pp);
+                if ((i>1&&i<work_size) && (j>1&&j<work_size) && k>1){ fr= use_ppm?pm:mhd_padd(mh,sz,-1.0f); store_face(rz,i-2,j-2,k-2,fr,smallr,smallp,lrho,lp); }
+                if ((i>1&&i<work_size) && (j>1&&j<work_size) && k<work_size){ fl= use_ppm?pp:mhd_padd(mh,sz,1.0f); store_face(lz,i-2,j-2,k-1,fl,smallr,smallp,lrho,lp); }
+            } else {
+                // PLM and par-PPM share the MUSCL-Hancock predictor mh (slope=2 for PAR;
+                // runtime `slope` for PLM). PAR overlays parabolic edges where smooth.
+                const int slp = (MODE==TR_PAR) ? 2 : slope;
+                Prim sx=mhd_slope(sg_load(ls,i-1,j,k),m0,sg_load(ls,i+1,j,k),slp);
+                Prim sy=mhd_slope(sg_load(ls,i,j-1,k),m0,sg_load(ls,i,j+1,k),slp);
+                Prim sz=mhd_slope(sg_load(ls,i,j,k-1),m0,sg_load(ls,i,j,k+1),slp);
+                Cons u0=mhd_p2c(m0,gamma);
+                Cons du=mhd_hancock_dir(m0,sx,1,gamma,0.5f*dtdx);
+                du=mhd_cadd(du,mhd_hancock_dir(m0,sy,2,gamma,0.5f*dtdx));
+                du=mhd_cadd(du,mhd_hancock_dir(m0,sz,3,gamma,0.5f*dtdx));
+                Prim mh=mhd_c2p(mhd_cadd(u0,du),gamma,smallr,smallc2);
+                if (mh.density<=smallr || mh.pressure<=smallp) mh=m0;
+                bool up=false; Prim pm,pp;
+                if constexpr (MODE==TR_PAR){
+                    up = !( strong_pjump(__half2float(ls.p[ls.idx(i-1,j,k)]),m0.pressure,__half2float(ls.p[ls.idx(i+1,j,k)]))
+                         || strong_pjump(__half2float(ls.p[ls.idx(i,j-1,k)]),m0.pressure,__half2float(ls.p[ls.idx(i,j+1,k)]))
+                         || strong_pjump(__half2float(ls.p[ls.idx(i,j,k-1)]),m0.pressure,__half2float(ls.p[ls.idx(i,j,k+1)])) );
+                }
+                if (MODE==TR_PAR && up) mhd_ppm_faces(sg_load(ls,i-1,j,k),m0,sg_load(ls,i+1,j,k),pm,pp);
+                if (i>1 && (j>1&&j<work_size) && (k>1&&k<work_size)){ fr= up?mhd_face(mh,pm,m0):mhd_padd(mh,sx,-1.0f); store_face(rx,i-2,j-2,k-2,fr,smallr,smallp,lrho,lp); }
+                if (i<work_size && (j>1&&j<work_size) && (k>1&&k<work_size)){ fl= up?mhd_face(mh,pp,m0):mhd_padd(mh,sx,1.0f); store_face(lx,i-1,j-2,k-2,fl,smallr,smallp,lrho,lp); }
+                if (MODE==TR_PAR && up) mhd_ppm_faces(sg_load(ls,i,j-1,k),m0,sg_load(ls,i,j+1,k),pm,pp);
+                if ((i>1&&i<work_size) && j>1 && (k>1&&k<work_size)){ fr= up?mhd_face(mh,pm,m0):mhd_padd(mh,sy,-1.0f); store_face(ry,i-2,j-2,k-2,fr,smallr,smallp,lrho,lp); }
+                if ((i>1&&i<work_size) && j<work_size && (k>1&&k<work_size)){ fl= up?mhd_face(mh,pp,m0):mhd_padd(mh,sy,1.0f); store_face(ly,i-2,j-1,k-2,fl,smallr,smallp,lrho,lp); }
+                if (MODE==TR_PAR && up) mhd_ppm_faces(sg_load(ls,i,j,k-1),m0,sg_load(ls,i,j,k+1),pm,pp);
+                if ((i>1&&i<work_size) && (j>1&&j<work_size) && k>1){ fr= up?mhd_face(mh,pm,m0):mhd_padd(mh,sz,-1.0f); store_face(rz,i-2,j-2,k-2,fr,smallr,smallp,lrho,lp); }
+                if ((i>1&&i<work_size) && (j>1&&j<work_size) && k<work_size){ fl= up?mhd_face(mh,pp,m0):mhd_padd(mh,sz,1.0f); store_face(lz,i-2,j-2,k-1,fl,smallr,smallp,lrho,lp); }
+            }
         }
         __syncthreads();
     }
@@ -539,13 +715,22 @@ extern "C" void launch_mhd_integrator(
 ){
     int threads=256, blocks=num_subgrids;
     if (blocks<=0) return;
-    mhd_integrator_kernel_cuda<<<blocks,threads>>>(
-        (Oct*)grid,(float*)uold,(float*)unew,(const float*)f,(const int*)father,(const int*)nbor,
-        head_idx,num_subgrids,ngridmax,ilevel,levelmin,levelmax,
-        gamma,smallr,smallc2,ch,dt,dx,slope,riemann,sw_dmin,sw_pmin,
-        (const double*)constant_gravity,glm_fac,base_write,courant_factor,(double*)dt_out,cfl_sqrt3
 #ifdef TURB
-        ,(const float*)afield_now,(const float*)d_skip,boxlen,turb_min_rho,do_turb
+#define KARGS (Oct*)grid,(float*)uold,(float*)unew,(const float*)f,(const int*)father,(const int*)nbor, \
+        head_idx,num_subgrids,ngridmax,ilevel,levelmin,levelmax, \
+        gamma,smallr,smallc2,ch,dt,dx,slope,riemann,sw_dmin,sw_pmin, \
+        (const double*)constant_gravity,glm_fac,base_write,courant_factor,(double*)dt_out,cfl_sqrt3, \
+        (const float*)afield_now,(const float*)d_skip,boxlen,turb_min_rho,do_turb
+#else
+#define KARGS (Oct*)grid,(float*)uold,(float*)unew,(const float*)f,(const int*)father,(const int*)nbor, \
+        head_idx,num_subgrids,ngridmax,ilevel,levelmin,levelmax, \
+        gamma,smallr,smallc2,ch,dt,dx,slope,riemann,sw_dmin,sw_pmin, \
+        (const double*)constant_gravity,glm_fac,base_write,courant_factor,(double*)dt_out,cfl_sqrt3
 #endif
-    );
+    // Dispatch by reconstruction (mirrors the Fortran 3-kernel split): each
+    // template instantiation compiles only its trace -> PLM/par stay lean.
+    if (slope==10)      mhd_integrator_kernel_cuda<TR_CHAR><<<blocks,threads>>>(KARGS);
+    else if (slope==11) mhd_integrator_kernel_cuda<TR_PAR ><<<blocks,threads>>>(KARGS);
+    else                mhd_integrator_kernel_cuda<TR_PLM ><<<blocks,threads>>>(KARGS);
+#undef KARGS
 }
