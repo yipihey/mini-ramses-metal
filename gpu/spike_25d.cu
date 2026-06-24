@@ -81,6 +81,13 @@
 // 1.01-1.05 across k=4..90, sigma_s -6%, mass drift -0.4% (irreducible log2-rho per-step requantize;
 // mitigate by quantizing every K steps). Halves global storage+checkpoints, enables ~1216^3 on A6000.
 //
+// -DF16STATE (MEASURED): same primitive state but stored as plain f16 (rho,v,p all __half; direct
+// copy to the f16 tile, no codec). +11% over fp32 -- IDENTICAL throughput to uint16-log2-primitive
+// (both 2B, bandwidth-bound, store-side c2p divide dominates; the exp2/log2 vs direct decode is
+// hidden). BETTER accuracy: sigma_s 1.277 vs uint16-log2's 1.150 (fp32=1.233) -> less diffusive;
+// same -0.17% mass drift, same spectrum. So FOR THE HYDRO STATE f16 wins (simpler=native tile format,
+// less diffusive, equal speed); use uint16-log2 ONLY for extreme range (species 30dex; f16 spans 9).
+//
 // build:  nvcc -arch=sm_86 -O3 --use_fast_math -o spike_25d gpu/spike_25d.cu
 //         nvcc -arch=sm_86 -O3 --use_fast_math -DMEMFLOOR -o spike_25d_mf gpu/spike_25d.cu
 
@@ -142,6 +149,9 @@ struct Ptrs { float* v[NV];
 #ifdef U16STATE
     unsigned short* h[5];    // entire hydro state in uint16 (rho/E log2, momenta linear)
 #endif
+#ifdef F16STATE
+    __half* hf[5];           // entire hydro state in f16 (primitive: rho,vx,vy,vz,p)
+#endif
 };
 #if defined(U16SP) || defined(U16STATE)
 // uint16 <-> log2(value) over [-110,0] log2 units (~5e-4 dex/ULP)
@@ -191,7 +201,7 @@ __device__ __forceinline__ Prim prim_from_cons(float r,float mx,float my,float m
     return q;
 }
 #endif
-#ifdef U16STATE
+#if defined(U16STATE) || defined(F16STATE)
 __device__ __forceinline__ Prim make_prim(float r,float u,float v,float w,float p){ Prim q; q.r=fmaxf(r,SMALLR); q.u=u; q.v=v; q.w=w; q.p=fmaxf(p,SMALLP); return q; }
 #endif
 __device__ __forceinline__ float moncen(float a,float b,float c){
@@ -390,6 +400,8 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
             sh[2][s][c]=__float2half(dec_vel(q.h[2][g]));           // vy
             sh[3][s][c]=__float2half(dec_vel(q.h[3][g]));           // vz
             sh[4][s][c]=__float2half(exp2f(dec_log2s(q.h[4][g])));   // p     (log2)
+#elif defined(F16STATE)
+            sh[0][s][c]=q.hf[0][g]; sh[1][s][c]=q.hf[1][g]; sh[2][s][c]=q.hf[2][g]; sh[3][s][c]=q.hf[3][g]; sh[4][s][c]=q.hf[4][g];  // direct f16 -> primitive tile
 #else
             #pragma unroll
             for(int v=0;v<5;v++) sh[v][s][c]=__float2half(q.v[v][g]);
@@ -409,7 +421,7 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
 #define CR(di,dj,dk,v) __half2float(sh[v][ring(k+(dk))][(li+(di))+GX*(lj+(dj))])
 #ifdef SCALARS
 #define GP(di,dj,dk) prim_from_cons(CR(di,dj,dk,0),CR(di,dj,dk,1),CR(di,dj,dk,2),CR(di,dj,dk,3),CR(di,dj,dk,4),CR(di,dj,dk,5),CR(di,dj,dk,6))
-#elif defined(U16STATE)
+#elif defined(U16STATE) || defined(F16STATE)
 #define GP(di,dj,dk) make_prim(CR(di,dj,dk,0),CR(di,dj,dk,1),CR(di,dj,dk,2),CR(di,dj,dk,3),CR(di,dj,dk,4))   // tile holds primitive
 #else
 #define GP(di,dj,dk) prim_from_cons(CR(di,dj,dk,0),CR(di,dj,dk,1),CR(di,dj,dk,2),CR(di,dj,dk,3),CR(di,dj,dk,4))
@@ -492,6 +504,10 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
           o.h[0][g]=enc_log2s(log2f(fmaxf(U.r,SMALLR)));
           o.h[1][g]=enc_vel(vx); o.h[2][g]=enc_vel(vy); o.h[3][g]=enc_vel(vz);
           o.h[4][g]=enc_log2s(log2f(pp)); }
+#elif defined(F16STATE)
+        { float ir=1.f/fmaxf(U.r,SMALLR); float vx=U.mx*ir,vy=U.my*ir,vz=U.mz*ir;
+          float ke=0.5f*U.r*(vx*vx+vy*vy+vz*vz); float pp=fmaxf((GAMMA-1.f)*(U.E-ke),SMALLP);
+          o.hf[0][g]=__float2half(U.r); o.hf[1][g]=__float2half(vx); o.hf[2][g]=__float2half(vy); o.hf[3][g]=__float2half(vz); o.hf[4][g]=__float2half(pp); }
 #else
         o.v[0][g]=U.r; o.v[1][g]=U.mx; o.v[2][g]=U.my; o.v[3][g]=U.mz; o.v[4][g]=U.E;
 #endif
@@ -520,6 +536,9 @@ __global__ void init(Ptrs q){
     { float ir=1.f/rho, vx=mx*ir, vy=my*ir, vz=mz*ir;
       float ke=0.5f*rho*(vx*vx+vy*vy+vz*vz), pp=fmaxf((GAMMA-1.f)*(E-ke),SMALLP);
       q.h[0][i]=enc_log2s(log2f(rho)); q.h[1][i]=enc_vel(vx); q.h[2][i]=enc_vel(vy); q.h[3][i]=enc_vel(vz); q.h[4][i]=enc_log2s(log2f(pp)); }
+#elif defined(F16STATE)
+    { float ir=1.f/rho, vx=mx*ir, vy=my*ir, vz=mz*ir; float ke=0.5f*rho*(vx*vx+vy*vy+vz*vz), pp=fmaxf((GAMMA-1.f)*(E-ke),SMALLP);
+      q.hf[0][i]=__float2half(rho); q.hf[1][i]=__float2half(vx); q.hf[2][i]=__float2half(vy); q.hf[3][i]=__float2half(vz); q.hf[4][i]=__float2half(pp); }
 #else
     q.v[0][i]=rho; q.v[1][i]=mx; q.v[2][i]=my; q.v[3][i]=mz; q.v[4][i]=E;
 #endif
@@ -536,6 +555,8 @@ int main(){
     Ptrs q,o;
 #ifdef U16STATE
     for(int v=0;v<5;v++){ cudaMalloc(&q.h[v],n*2); cudaMalloc(&o.h[v],n*2); }
+#elif defined(F16STATE)
+    for(int v=0;v<5;v++){ cudaMalloc(&q.hf[v],n*2); cudaMalloc(&o.hf[v],n*2); }
 #elif defined(U16SP)
     for(int v=0;v<5;v++){ cudaMalloc(&q.v[v],n*4); cudaMalloc(&o.v[v],n*4); }
     for(int j=0;j<2;j++){ cudaMalloc(&q.su[j],n*2); cudaMalloc(&o.su[j],n*2); }
