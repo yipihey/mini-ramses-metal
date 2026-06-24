@@ -1,0 +1,293 @@
+// spike_25d.cu — throughput probe for a 2.5D unigrid line-march godunov scheme.
+//
+// Question: on a uniform 480^3 grid (no AMR, no Morton), does a scheme that tiles
+// x-y in shared and MARCHES z through a rolling plane-ring (z over-read = 1x, x-y
+// over-read = ~1.7x, one barrier per z-advance) beat the production oct-tile kernel?
+// Reference points (A6000, fp32, f16 shared tile, PLM, 480^3, measured):
+//   production PLM  ~4127 Mcell/s     load+store floor ~5448 Mcell/s
+//   DRAM-bandwidth ceiling (2x field, 768 GB/s) ~19200 Mcell/s
+//
+// Faithful on: SoA flat layout, coalesced x, rolling f16 plane-ring (1x z over-read),
+// 2-ghost x-y halo, single barrier per plane-advance, PLM(moncen)+HLL in 3 dirs,
+// realistic register/occupancy profile. -DMEMFLOOR skips the flux compute (2.5D mem floor).
+//
+// RESULT (A6000, 480^3): WITHOUT Hancock (default) 64 regs / 4 blocks-SM / ~7100 Mcell/s
+// (+72% over the cube's 4127) — BUT that omits the transverse half-step predictor. With
+// -DHANCOCK (faithful MUSCL-Hancock, matches the production cube) registers blow to 227,
+// occupancy collapses to 1 block/SM, and it drops to ~2020 Mcell/s — BELOW the staged cube.
+// CONCLUSION: the fused 2.5D march wins only for LIGHT kernels; the faithful godunov is
+// register-bound (slopes+mh+6 HLL held live per cell), and the cube's staged-through-shared
+// structure is register-optimal for it. The march's +72% was a no-Hancock artifact. Same
+// verdict reproduced in the Julia prototype (GLMMHDTurb integrator_hydro_march2!: 179 regs,
+// ~8x slower than the cube). cf. the earlier integrator_stream! rejection (compute-bound).
+//
+// BUT (-DHANCOCK1D): the register blow-up is ENTIRELY the TRANSVERSE coupling, not 2nd-order-
+// in-time. A normal-only 1D Hancock half-step (uses only the already-computed direction slope,
+// no transverse, no shared mh) is 2nd-order in space AND time at **64 regs / 4 blocks-SM /
+// ~6680 Mcell/s = +63% over the cube, 87% of the 7649 memfloor**. So a LIGHT 2nd-order fused
+// march DOES reach full throughput. OPEN CAVEAT: transverse-free unsplit MUSCL-Hancock has a
+// reduced multi-D stability limit (~CFL 1/ndim ≈ 0.33-0.5 in 3D vs the cube's 0.7) and larger
+// transverse-error constants — must validate max-stable-CFL + turb statistics before claiming a
+// NET win (if CFL>=~0.5 holds it wins; at 0.33 the extra steps ~cancel the throughput gain).
+//
+// build:  nvcc -arch=sm_86 -O3 --use_fast_math -o spike_25d gpu/spike_25d.cu
+//         nvcc -arch=sm_86 -O3 --use_fast_math -DMEMFLOOR -o spike_25d_mf gpu/spike_25d.cu
+
+#include <cstdio>
+#include <cuda_fp16.h>
+#include <cuda_runtime.h>
+
+#define NX 480
+#define NY 480
+#define NZ 480
+#define NV 5
+
+#define OX 32          // owned cells per block in x  (== blockDim.x lane group)
+#define OY 8           // owned cells per block in y
+#define GX (OX+4)      // 2-ghost halo each side
+#define GY (OY+4)
+#define PLANES 5       // rolling ring k-2..k+2
+#define THREADS 256    // OX*OY
+
+__device__ __forceinline__ size_t gidx(int i,int j,int k){
+    return (size_t)i + (size_t)NX*((size_t)j + (size_t)NY*(size_t)k);
+}
+__device__ __forceinline__ int wrap(int i,int N){ int m=i%N; return m<0?m+N:m; }
+__device__ __forceinline__ int ring(int m){ int r=m%PLANES; return r<0?r+PLANES:r; }
+
+struct Ptrs { float* v[NV]; };
+struct Prim { float r,u,v,w,p; };
+struct Cons { float r,mx,my,mz,E; };
+
+__constant__ float GAMMA=1.4f, DTDX=0.05f, SMALLR=1e-6f, SMALLP=1e-6f;
+
+__device__ __forceinline__ Prim prim_from_cons(float r,float mx,float my,float mz,float E){
+    float ir = 1.f/fmaxf(r,SMALLR);
+    Prim q; q.r=fmaxf(r,SMALLR); q.u=mx*ir; q.v=my*ir; q.w=mz*ir;
+    float ke=0.5f*q.r*(q.u*q.u+q.v*q.v+q.w*q.w);
+    q.p=fmaxf((GAMMA-1.f)*(E-ke),SMALLP);
+    return q;
+}
+__device__ __forceinline__ float moncen(float a,float b,float c){
+    // monotonized central slope (slope_type=2)
+    float dl=b-a, dr=c-b, dc=0.5f*(c-a);
+    if(dl*dr<=0.f) return 0.f;
+    float s = dl>0.f?1.f:-1.f;
+    return s*fminf(fabsf(dc),fminf(2.f*fabsf(dl),2.f*fabsf(dr)));
+}
+__device__ __forceinline__ Prim slopeP(Prim a,Prim b,Prim c){
+    Prim s; s.r=moncen(a.r,b.r,c.r); s.u=moncen(a.u,b.u,c.u); s.v=moncen(a.v,b.v,c.v);
+    s.w=moncen(a.w,b.w,c.w); s.p=moncen(a.p,b.p,c.p); return s;
+}
+__device__ __forceinline__ Prim edge(Prim b,Prim s,float sign){
+    Prim e; e.r=b.r+sign*0.5f*s.r; e.u=b.u+sign*0.5f*s.u; e.v=b.v+sign*0.5f*s.v;
+    e.w=b.w+sign*0.5f*s.w; e.p=b.p+sign*0.5f*s.p;
+    e.r=fmaxf(e.r,SMALLR); e.p=fmaxf(e.p,SMALLP); return e;
+}
+__device__ __forceinline__ Cons primFlux(Prim q,int dir){
+    float un = dir==0?q.u: dir==1?q.v: q.w;
+    float E = q.p/(GAMMA-1.f)+0.5f*q.r*(q.u*q.u+q.v*q.v+q.w*q.w);
+    Cons f;
+    f.r  = q.r*un;
+    f.mx = q.r*q.u*un + (dir==0?q.p:0.f);
+    f.my = q.r*q.v*un + (dir==1?q.p:0.f);
+    f.mz = q.r*q.w*un + (dir==2?q.p:0.f);
+    f.E  = (E+q.p)*un;
+    return f;
+}
+__device__ __forceinline__ Cons toCons(Prim q){
+    Cons c; c.r=q.r; c.mx=q.r*q.u; c.my=q.r*q.v; c.mz=q.r*q.w;
+    c.E=q.p/(GAMMA-1.f)+0.5f*q.r*(q.u*q.u+q.v*q.v+q.w*q.w); return c;
+}
+// transverse Hancock half-step predictor (matches integrator_hydro!'s hancock5): mh = m0 + dt/2*src
+__device__ __forceinline__ Prim hanc(Prim m0,Prim xm,Prim xp,Prim ym,Prim yp,Prim zm,Prim zp,float dtdx,float g){
+    Prim sx,sy,sz;
+    sx.r=moncen(xm.r,m0.r,xp.r);sx.u=moncen(xm.u,m0.u,xp.u);sx.v=moncen(xm.v,m0.v,xp.v);sx.w=moncen(xm.w,m0.w,xp.w);sx.p=moncen(xm.p,m0.p,xp.p);
+    sy.r=moncen(ym.r,m0.r,yp.r);sy.u=moncen(ym.u,m0.u,yp.u);sy.v=moncen(ym.v,m0.v,yp.v);sy.w=moncen(ym.w,m0.w,yp.w);sy.p=moncen(ym.p,m0.p,yp.p);
+    sz.r=moncen(zm.r,m0.r,zp.r);sz.u=moncen(zm.u,m0.u,zp.u);sz.v=moncen(zm.v,m0.v,zp.v);sz.w=moncen(zm.w,m0.w,zp.w);sz.p=moncen(zm.p,m0.p,zp.p);
+    float dv=sx.u+sy.v+sz.w; float ir=1.f/m0.r; Prim mh;
+    mh.r=m0.r+dtdx*0.5f*(-m0.u*sx.r-m0.v*sy.r-m0.w*sz.r-dv*m0.r);
+    mh.u=m0.u+dtdx*0.5f*(-m0.u*sx.u-m0.v*sy.u-m0.w*sz.u-sx.p*ir);
+    mh.v=m0.v+dtdx*0.5f*(-m0.u*sx.v-m0.v*sy.v-m0.w*sz.v-sy.p*ir);
+    mh.w=m0.w+dtdx*0.5f*(-m0.u*sx.w-m0.v*sy.w-m0.w*sz.w-sz.p*ir);
+    mh.p=m0.p+dtdx*0.5f*(-m0.u*sx.p-m0.v*sy.p-m0.w*sz.p-dv*g*m0.p);
+    return mh;
+}
+// monotonized single-zone parabolic interface value (CW84), one component.
+// sgn>0 -> +face, sgn<0 -> -face. 3-point stencil (qm,q0,qp): parabola + monotonize.
+__device__ __forceinline__ float ppm1(float qm,float q0,float qp,float sgn){
+    float d=0.25f*(qp-qm), cu=(qm-2.f*q0+qp)*(1.f/6.f);
+    float qr=q0+d-cu, ql=q0-d-cu;
+    if((qr-q0)*(q0-ql)<=0.f){ qr=q0; ql=q0; }
+    else { float dqe=qr-ql, d6=6.f*(q0-0.5f*(ql+qr));
+        if(dqe*d6 >  dqe*dqe) ql=3.f*q0-2.f*qr;
+        if(dqe*d6 < -dqe*dqe) qr=3.f*q0-2.f*ql; }
+    return sgn>0.f?qr:ql;
+}
+__device__ __forceinline__ Prim ppm_edge(Prim a,Prim b,Prim c,float sgn){
+    Prim e; e.r=ppm1(a.r,b.r,c.r,sgn); e.u=ppm1(a.u,b.u,c.u,sgn); e.v=ppm1(a.v,b.v,c.v,sgn);
+    e.w=ppm1(a.w,b.w,c.w,sgn); e.p=ppm1(a.p,b.p,c.p,sgn); return e;
+}
+// NORMAL-only 1D Hancock half-step predictor for direction dir: uses ONLY the
+// already-computed direction-dir slope s (no transverse slopes, no cross-dir state).
+// Primitive quasilinear A_dir*s; 2nd order in time per direction, transverse-free.
+__device__ __forceinline__ Prim hanc1d(Prim m,Prim s,int dir,float dtdx,float g){
+    float un = dir==0?m.u : dir==1?m.v : m.w;
+    float sn = dir==0?s.u : dir==1?s.v : s.w;
+    float ir = 1.f/m.r; float h=0.5f*dtdx;
+    Prim mh;
+    mh.r = m.r - h*(un*s.r + m.r*sn);
+    mh.u = m.u - h*(un*s.u + (dir==0? s.p*ir:0.f));
+    mh.v = m.v - h*(un*s.v + (dir==1? s.p*ir:0.f));
+    mh.w = m.w - h*(un*s.w + (dir==2? s.p*ir:0.f));
+    mh.p = m.p - h*(un*s.p + g*m.p*sn);
+    return mh;
+}
+__device__ __forceinline__ Cons hll(Prim L,Prim R,int dir){
+    float unL=dir==0?L.u:dir==1?L.v:L.w, unR=dir==0?R.u:dir==1?R.v:R.w;
+    float aL=sqrtf(GAMMA*L.p/L.r), aR=sqrtf(GAMMA*R.p/R.r);
+    float sL=fminf(unL-aL,unR-aR), sR=fmaxf(unL+aL,unR+aR);
+    Cons FL=primFlux(L,dir), FR=primFlux(R,dir), UL=toCons(L), UR=toCons(R), F;
+    if(sL>=0.f) return FL;
+    if(sR<=0.f) return FR;
+    float inv=1.f/(sR-sL);
+    F.r =(sR*FL.r -sL*FR.r +sL*sR*(UR.r -UL.r ))*inv;
+    F.mx=(sR*FL.mx-sL*FR.mx+sL*sR*(UR.mx-UL.mx))*inv;
+    F.my=(sR*FL.my-sL*FR.my+sL*sR*(UR.my-UL.my))*inv;
+    F.mz=(sR*FL.mz-sL*FR.mz+sL*sR*(UR.mz-UL.mz))*inv;
+    F.E =(sR*FL.E -sL*FR.E +sL*sR*(UR.E -UL.E ))*inv;
+    return F;
+}
+
+__global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
+    __shared__ __half sh[NV][PLANES][GX*GY];
+    const int tid = threadIdx.x;
+    const int tx = tid % OX, ty = tid / OX;     // owned column (0..OX,0..OY)
+    const int x0 = blockIdx.x*OX, y0 = blockIdx.y*OY;
+    const int li = tx+2, lj = ty+2;             // local shared coords of owned cell
+
+    // load plane at absolute k into ring slot ring(k)
+    auto loadPlane = [&](int k){
+        int s = ring(k), gk = wrap(k,NZ);
+        for(int c=tid; c<GX*GY; c+=THREADS){
+            int lx=c%GX, ly=c/GX;
+            int gi=wrap(x0-2+lx,NX), gj=wrap(y0-2+ly,NY);
+            size_t g=gidx(gi,gj,gk);
+            #pragma unroll
+            for(int v=0;v<NV;v++) sh[v][s][c]=__float2half(q.v[v][g]);
+        }
+    };
+    // prime ring k=-2..2
+    for(int k=-2;k<=2;k++) loadPlane(k);
+    __syncthreads();
+
+#define CR(di,dj,dk,v) __half2float(sh[v][ring(k+(dk))][(li+(di))+GX*(lj+(dj))])
+#define GP(di,dj,dk) prim_from_cons(CR(di,dj,dk,0),CR(di,dj,dk,1),CR(di,dj,dk,2),CR(di,dj,dk,3),CR(di,dj,dk,4))
+
+    for(int k=0;k<NZ;k++){
+        Prim c0 = GP(0,0,0);
+        Cons U = toCons(c0);
+#ifndef MEMFLOOR
+        Cons div={0,0,0,0,0};
+        #pragma unroll
+        for(int d=0; d<3; d++){
+            int ox=(d==0), oy=(d==1), oz=(d==2);
+            Prim cm2=GP(-2*ox,-2*oy,-2*oz), cm1=GP(-ox,-oy,-oz),
+                 cp1=GP(ox,oy,oz),          cp2=GP(2*ox,2*oy,2*oz);
+            Prim sm1=slopeP(cm2,cm1,c0), s0=slopeP(cm1,c0,cp1), sp1=slopeP(c0,cp1,cp2);
+#ifdef HANCOCK
+            // transverse-Hancock edges: mh(cell) +/- 0.5*slope_d  (faithful MUSCL-Hancock, like the cube)
+            #define MH(ai,aj,ak) hanc(GP(ai,aj,ak),GP((ai)-1,aj,ak),GP((ai)+1,aj,ak),GP(ai,(aj)-1,ak),GP(ai,(aj)+1,ak),GP(ai,aj,(ak)-1),GP(ai,aj,(ak)+1),DTDX,GAMMA)
+            Prim mhm=MH(-ox,-oy,-oz), mh0=MH(0,0,0), mhp=MH(ox,oy,oz);
+            #undef MH
+            Cons Fm = hll(edge(mhm,sm1,+1.f), edge(mh0,s0,-1.f), d);
+            Cons Fp = hll(edge(mh0,s0,+1.f),  edge(mhp,sp1,-1.f), d);
+#elif defined(HANCOCK1D)
+            // normal-only 1D Hancock: 2nd order in space AND time, transverse-free (light)
+            Prim mhm=hanc1d(cm1,sm1,d,DTDX,GAMMA), mh0=hanc1d(c0,s0,d,DTDX,GAMMA), mhp=hanc1d(cp1,sp1,d,DTDX,GAMMA);
+            Cons Fm = hll(edge(mhm,sm1,+1.f), edge(mh0,s0,-1.f), d);
+            Cons Fp = hll(edge(mh0,s0,+1.f),  edge(mhp,sp1,-1.f), d);
+#elif defined(PPM1D)
+            // parabolic-edge PPM (monotonized 3-pt parabola) + normal-only 1D Hancock predictor.
+            // edges built from the parabola; predictor uses the parabolic slope (eR-eL).
+            Prim eRm=ppm_edge(cm2,cm1,c0,+1.f);                 // +face of cm1
+            Prim eLc=ppm_edge(cm1,c0,cp1,-1.f), eRc=ppm_edge(cm1,c0,cp1,+1.f);  // -/+ faces of c0
+            Prim eLp=ppm_edge(c0,cp1,cp2,-1.f);                 // -face of cp1
+            // cheap normal-only 1D Hancock predictor correction added to the parabolic edges
+            Prim mhm=hanc1d(cm1,sm1,d,DTDX,GAMMA), mh0=hanc1d(c0,s0,d,DTDX,GAMMA), mhp=hanc1d(cp1,sp1,d,DTDX,GAMMA);
+            Prim Lm={eRm.r+mhm.r-cm1.r,eRm.u+mhm.u-cm1.u,eRm.v+mhm.v-cm1.v,eRm.w+mhm.w-cm1.w,eRm.p+mhm.p-cm1.p};
+            Prim Lc={eLc.r+mh0.r-c0.r,eLc.u+mh0.u-c0.u,eLc.v+mh0.v-c0.v,eLc.w+mh0.w-c0.w,eLc.p+mh0.p-c0.p};
+            Prim Rc={eRc.r+mh0.r-c0.r,eRc.u+mh0.u-c0.u,eRc.v+mh0.v-c0.v,eRc.w+mh0.w-c0.w,eRc.p+mh0.p-c0.p};
+            Prim Rp={eLp.r+mhp.r-cp1.r,eLp.u+mhp.u-cp1.u,eLp.v+mhp.v-cp1.v,eLp.w+mhp.w-cp1.w,eLp.p+mhp.p-cp1.p};
+            Cons Fm = hll(Lm, Lc, d);
+            Cons Fp = hll(Rc, Rp, d);
+#else
+            Cons Fm = hll(edge(cm1,sm1,+1.f), edge(c0,s0,-1.f), d);   // face k-1/2
+            Cons Fp = hll(edge(c0,s0,+1.f),   edge(cp1,sp1,-1.f), d); // face k+1/2
+#endif
+            div.r+=Fp.r-Fm.r; div.mx+=Fp.mx-Fm.mx; div.my+=Fp.my-Fm.my;
+            div.mz+=Fp.mz-Fm.mz; div.E+=Fp.E-Fm.E;
+        }
+        U.r-=DTDX*div.r; U.mx-=DTDX*div.mx; U.my-=DTDX*div.my; U.mz-=DTDX*div.mz; U.E-=DTDX*div.E;
+#endif
+        // write owned cell
+        size_t g=gidx(x0+tx,y0+ty,k);
+        o.v[0][g]=U.r; o.v[1][g]=U.mx; o.v[2][g]=U.my; o.v[3][g]=U.mz; o.v[4][g]=U.E;
+
+        // advance ring: load plane k+3 (overwrites k-2 slot), barrier
+        loadPlane(k+3);
+        __syncthreads();
+    }
+#undef CR
+#undef GP
+}
+
+__global__ void init(Ptrs q){
+    size_t n=(size_t)NX*NY*NZ, i=(size_t)blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=n) return;
+    float ph = 0.001f*(float)(i%911);
+    q.v[0][i]=1.f+0.3f*ph; q.v[1][i]=0.1f*ph; q.v[2][i]=-0.1f*ph; q.v[3][i]=0.05f*ph;
+    q.v[4][i]=2.5f+0.5f*ph;
+}
+
+int main(){
+    size_t n=(size_t)NX*NY*NZ;
+    Ptrs q,o;
+    for(int v=0;v<NV;v++){ cudaMalloc(&q.v[v],n*4); cudaMalloc(&o.v[v],n*4); }
+    init<<<(n+255)/256,256>>>(q); init<<<(n+255)/256,256>>>(o); cudaDeviceSynchronize();
+
+    dim3 grid(NX/OX, NY/OY);
+    size_t shmem = sizeof(__half)*NV*PLANES*GX*GY;
+    int nblk=0; cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nblk, march, THREADS, 0);
+    cudaFuncAttributes fa; cudaFuncGetAttributes(&fa, march);
+
+    // warmup
+    for(int it=0;it<3;it++){ march<<<grid,THREADS>>>(q,o); Ptrs t=q;q=o;o=t; }
+    cudaDeviceSynchronize();
+    cudaError_t e=cudaGetLastError();
+    if(e!=cudaSuccess){ printf("CUDA error: %s\n", cudaGetErrorString(e)); return 1; }
+
+    int iters=30;
+    cudaEvent_t t0,t1; cudaEventCreate(&t0); cudaEventCreate(&t1);
+    cudaEventRecord(t0);
+    for(int it=0;it<iters;it++){ march<<<grid,THREADS>>>(q,o); Ptrs t=q;q=o;o=t; }
+    cudaEventRecord(t1); cudaEventSynchronize(t1);
+    float ms=0; cudaEventElapsedTime(&ms,t0,t1);
+
+    double cells=(double)n*iters;
+    double mcs = cells/ (ms*1e-3) /1e6;
+    double gbs = cells*(NV*4.0*2.0)/(ms*1e-3)/1e9;   // 2x field essential traffic
+#ifdef MEMFLOOR
+    const char* mode="MEMFLOOR (load+store, no flux)";
+#else
+    const char* mode="FULL (PLM moncen + HLL x3)";
+#endif
+    printf("2.5D march  %s\n", mode);
+    printf("  grid 480^3  tile %dx%d owned (x-y over-read %.2fx)  ring %d planes\n",
+           OX,OY,(double)(GX*GY)/(OX*OY),PLANES);
+    printf("  regs=%d  shmem=%zuB (%.1fKB)  blocks/SM=%d\n", fa.numRegs, shmem, shmem/1024.0, nblk);
+    printf("  %.2f ms / %d iters  =>  %.0f Mcell/s   %.0f GB/s  (%.0f%% of 768 peak)\n",
+           ms/iters, iters, mcs, gbs, gbs/768.0*100.0);
+    printf("  vs production PLM 4127 / floor 5448 Mcell/s\n");
+    return 0;
+}
