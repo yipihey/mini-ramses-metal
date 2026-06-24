@@ -87,9 +87,15 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#ifndef NX
 #define NX 480
+#endif
+#ifndef NY
 #define NY 480
+#endif
+#ifndef NZ
 #define NZ 480
+#endif
 #ifdef U16SP                 // uint16 log2-encoded species fractions (implies the scalar machinery)
 #ifndef SCALARS
 #define SCALARS
@@ -104,8 +110,12 @@
 #define NV 5
 #endif
 
+#ifndef OX
 #define OX 32          // owned cells per block in x  (== blockDim.x lane group)
+#endif
+#ifndef OY
 #define OY 8           // owned cells per block in y
+#endif
 #ifdef DONOR
 #define GHOST 1        // donor-cell at x/y block seams -> 1-ghost x-y tile
 #else
@@ -114,7 +124,9 @@
 #define GX (OX+2*GHOST)
 #define GY (OY+2*GHOST)
 #define PLANES 5       // rolling ring k-2..k+2 (z always 2nd order, no seam)
-#define THREADS 256    // OX*OY
+#ifndef THREADS
+#define THREADS (OX*OY)   // one thread per owned column
+#endif
 
 __device__ __forceinline__ size_t gidx(int i,int j,int k){
     return (size_t)i + (size_t)NX*((size_t)j + (size_t)NY*(size_t)k);
