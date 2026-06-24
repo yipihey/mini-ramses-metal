@@ -76,9 +76,12 @@
 // fp32 (and +94% over the cube), at the SAME 64 regs / 4 blocks. Much bigger than the species
 // uint16 (+5%) because the 5-var kernel stays at 4 blocks (67% occ) = bandwidth-sensitive, so
 // halving the global traffic lands nearly fully; the exp2/log2 decode is hidden. Halves global
-// storage + checkpoints. Accuracy (per-step quantization breaks exact conservation; momenta=linear
-// lose precision at low |rho v|; E=log2 amplifies the c2p cancellation at high Mach) NOT yet
-// checked -- mitigate by keeping the persistent state encoded and NOT re-quantizing every step.
+// storage + checkpoints. *** ACCURACY (tested in Julia, driven Mach-3.4 turb): THIS CONSERVED-state
+// encoding is WRONG -- linear momenta DESTROY the turbulence (spectrum blows up 1714x at k=90, -2%
+// mass). The +19% throughput is real but to be ACCURATE you must store PRIMITIVE: rho/p as log2,
+// VELOCITY linear in a TIGHT [-8,8] range (bounded by Mach, not rho*v). Primitive validated: spectrum
+// matches fp32 to 1.01-1.05 across k=4..90, mass drift -0.4% (irreducible log2-rho requantization).
+// TODO: redo this path as primitive (the lmarch tile already holds primitive). ***
 //
 // build:  nvcc -arch=sm_86 -O3 --use_fast_math -o spike_25d gpu/spike_25d.cu
 //         nvcc -arch=sm_86 -O3 --use_fast_math -DMEMFLOOR -o spike_25d_mf gpu/spike_25d.cu
