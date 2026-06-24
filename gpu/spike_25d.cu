@@ -45,6 +45,12 @@
 // scheme is CFL/accuracy-VALIDATED on Mach~4-12 driven hydro turb: stable to CFL=1.0 (no penalty
 // vs the cube, no 1/ndim collapse), sigma_s matches; HLL already robust to Mach 12.
 //
+// -DSCALARS (with HANCOCK1D): +2 passive scalars (7-var, advected as rho*s). regs 64->80,
+// shared 21.6->30.2KB, occupancy 4->3 blocks -> -27% (6700->4885 Mcell/s, still +19% over the
+// 5-var cube). The cost is ENTIRELY the +40% data: per-VARIABLE throughput is flat (~+0%), the
+// scalar advection compute is free. ~-14%/scalar; the 4->3 occupancy drop is the A6000 cliff
+// (H200 would hold higher occupancy -> closer to the pure -29% data floor).
+//
 // build:  nvcc -arch=sm_86 -O3 --use_fast_math -o spike_25d gpu/spike_25d.cu
 //         nvcc -arch=sm_86 -O3 --use_fast_math -DMEMFLOOR -o spike_25d_mf gpu/spike_25d.cu
 
@@ -55,7 +61,11 @@
 #define NX 480
 #define NY 480
 #define NZ 480
+#ifdef SCALARS
+#define NV 7           // 5 hydro + 2 passive scalars (advected, conserved as rho*s)
+#else
 #define NV 5
+#endif
 
 #define OX 32          // owned cells per block in x  (== blockDim.x lane group)
 #define OY 8           // owned cells per block in y
@@ -76,11 +86,29 @@ __device__ __forceinline__ int wrap(int i,int N){ int m=i%N; return m<0?m+N:m; }
 __device__ __forceinline__ int ring(int m){ int r=m%PLANES; return r<0?r+PLANES:r; }
 
 struct Ptrs { float* v[NV]; };
-struct Prim { float r,u,v,w,p; };
-struct Cons { float r,mx,my,mz,E; };
+struct Prim { float r,u,v,w,p;
+#ifdef SCALARS
+    float s0,s1;
+#endif
+};
+struct Cons { float r,mx,my,mz,E;
+#ifdef SCALARS
+    float c0,c1;
+#endif
+};
 
 __constant__ float GAMMA=1.4f, DTDX=0.05f, SMALLR=1e-6f, SMALLP=1e-6f;
 
+#ifdef SCALARS
+__device__ __forceinline__ Prim prim_from_cons(float r,float mx,float my,float mz,float E,float cs0,float cs1){
+    float ir = 1.f/fmaxf(r,SMALLR);
+    Prim q; q.r=fmaxf(r,SMALLR); q.u=mx*ir; q.v=my*ir; q.w=mz*ir;
+    float ke=0.5f*q.r*(q.u*q.u+q.v*q.v+q.w*q.w);
+    q.p=fmaxf((GAMMA-1.f)*(E-ke),SMALLP);
+    q.s0=cs0*ir; q.s1=cs1*ir;
+    return q;
+}
+#else
 __device__ __forceinline__ Prim prim_from_cons(float r,float mx,float my,float mz,float E){
     float ir = 1.f/fmaxf(r,SMALLR);
     Prim q; q.r=fmaxf(r,SMALLR); q.u=mx*ir; q.v=my*ir; q.w=mz*ir;
@@ -88,6 +116,7 @@ __device__ __forceinline__ Prim prim_from_cons(float r,float mx,float my,float m
     q.p=fmaxf((GAMMA-1.f)*(E-ke),SMALLP);
     return q;
 }
+#endif
 __device__ __forceinline__ float moncen(float a,float b,float c){
     // monotonized central slope (slope_type=2)
     float dl=b-a, dr=c-b, dc=0.5f*(c-a);
@@ -97,12 +126,20 @@ __device__ __forceinline__ float moncen(float a,float b,float c){
 }
 __device__ __forceinline__ Prim slopeP(Prim a,Prim b,Prim c){
     Prim s; s.r=moncen(a.r,b.r,c.r); s.u=moncen(a.u,b.u,c.u); s.v=moncen(a.v,b.v,c.v);
-    s.w=moncen(a.w,b.w,c.w); s.p=moncen(a.p,b.p,c.p); return s;
+    s.w=moncen(a.w,b.w,c.w); s.p=moncen(a.p,b.p,c.p);
+#ifdef SCALARS
+    s.s0=moncen(a.s0,b.s0,c.s0); s.s1=moncen(a.s1,b.s1,c.s1);
+#endif
+    return s;
 }
 __device__ __forceinline__ Prim edge(Prim b,Prim s,float sign){
     Prim e; e.r=b.r+sign*0.5f*s.r; e.u=b.u+sign*0.5f*s.u; e.v=b.v+sign*0.5f*s.v;
     e.w=b.w+sign*0.5f*s.w; e.p=b.p+sign*0.5f*s.p;
-    e.r=fmaxf(e.r,SMALLR); e.p=fmaxf(e.p,SMALLP); return e;
+    e.r=fmaxf(e.r,SMALLR); e.p=fmaxf(e.p,SMALLP);
+#ifdef SCALARS
+    e.s0=b.s0+sign*0.5f*s.s0; e.s1=b.s1+sign*0.5f*s.s1;
+#endif
+    return e;
 }
 __device__ __forceinline__ Cons primFlux(Prim q,int dir){
     float un = dir==0?q.u: dir==1?q.v: q.w;
@@ -113,11 +150,18 @@ __device__ __forceinline__ Cons primFlux(Prim q,int dir){
     f.my = q.r*q.v*un + (dir==1?q.p:0.f);
     f.mz = q.r*q.w*un + (dir==2?q.p:0.f);
     f.E  = (E+q.p)*un;
+#ifdef SCALARS
+    f.c0 = q.r*un*q.s0; f.c1 = q.r*un*q.s1;   // passive scalar flux = mass flux * s
+#endif
     return f;
 }
 __device__ __forceinline__ Cons toCons(Prim q){
     Cons c; c.r=q.r; c.mx=q.r*q.u; c.my=q.r*q.v; c.mz=q.r*q.w;
-    c.E=q.p/(GAMMA-1.f)+0.5f*q.r*(q.u*q.u+q.v*q.v+q.w*q.w); return c;
+    c.E=q.p/(GAMMA-1.f)+0.5f*q.r*(q.u*q.u+q.v*q.v+q.w*q.w);
+#ifdef SCALARS
+    c.c0=q.r*q.s0; c.c1=q.r*q.s1;
+#endif
+    return c;
 }
 // transverse Hancock half-step predictor (matches integrator_hydro!'s hancock5): mh = m0 + dt/2*src
 __device__ __forceinline__ Prim hanc(Prim m0,Prim xm,Prim xp,Prim ym,Prim yp,Prim zm,Prim zp,float dtdx,float g){
@@ -161,6 +205,9 @@ __device__ __forceinline__ Prim hanc1d(Prim m,Prim s,int dir,float dtdx,float g)
     mh.v = m.v - h*(un*s.v + (dir==1? s.p*ir:0.f));
     mh.w = m.w - h*(un*s.w + (dir==2? s.p*ir:0.f));
     mh.p = m.p - h*(un*s.p + g*m.p*sn);
+#ifdef SCALARS
+    mh.s0 = m.s0 - h*un*s.s0; mh.s1 = m.s1 - h*un*s.s1;   // passive advection
+#endif
     return mh;
 }
 __device__ __forceinline__ Cons hll(Prim L,Prim R,int dir){
@@ -176,6 +223,10 @@ __device__ __forceinline__ Cons hll(Prim L,Prim R,int dir){
     F.my=(sR*FL.my-sL*FR.my+sL*sR*(UR.my-UL.my))*inv;
     F.mz=(sR*FL.mz-sL*FR.mz+sL*sR*(UR.mz-UL.mz))*inv;
     F.E =(sR*FL.E -sL*FR.E +sL*sR*(UR.E -UL.E ))*inv;
+#ifdef SCALARS
+    F.c0=(sR*FL.c0-sL*FR.c0+sL*sR*(UR.c0-UL.c0))*inv;
+    F.c1=(sR*FL.c1-sL*FR.c1+sL*sR*(UR.c1-UL.c1))*inv;
+#endif
     return F;
 }
 
@@ -193,6 +244,10 @@ __device__ __forceinline__ Cons riemann_fb(Prim L,Prim R,int dir){
         F.my=0.5f*(FL.my+FR.my)-0.5f*s*(UR.my-UL.my);
         F.mz=0.5f*(FL.mz+FR.mz)-0.5f*s*(UR.mz-UL.mz);
         F.E =0.5f*(FL.E +FR.E )-0.5f*s*(UR.E -UL.E );
+#ifdef SCALARS
+        F.c0=0.5f*(FL.c0+FR.c0)-0.5f*s*(UR.c0-UL.c0);
+        F.c1=0.5f*(FL.c1+FR.c1)-0.5f*s*(UR.c1-UL.c1);
+#endif
         return F;
     }
     float sL=fminf(unL-aL,unR-aR), sR=fmaxf(unL+aL,unR+aR);   // HLL (accurate)
@@ -204,6 +259,10 @@ __device__ __forceinline__ Cons riemann_fb(Prim L,Prim R,int dir){
     F.my=(sR*FL.my-sL*FR.my+sL*sR*(UR.my-UL.my))*inv;
     F.mz=(sR*FL.mz-sL*FR.mz+sL*sR*(UR.mz-UL.mz))*inv;
     F.E =(sR*FL.E -sL*FR.E +sL*sR*(UR.E -UL.E ))*inv;
+#ifdef SCALARS
+    F.c0=(sR*FL.c0-sL*FR.c0+sL*sR*(UR.c0-UL.c0))*inv;
+    F.c1=(sR*FL.c1-sL*FR.c1+sL*sR*(UR.c1-UL.c1))*inv;
+#endif
     return F;
 }
 #ifdef LLF_FALLBACK
@@ -235,7 +294,11 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
     __syncthreads();
 
 #define CR(di,dj,dk,v) __half2float(sh[v][ring(k+(dk))][(li+(di))+GX*(lj+(dj))])
+#ifdef SCALARS
+#define GP(di,dj,dk) prim_from_cons(CR(di,dj,dk,0),CR(di,dj,dk,1),CR(di,dj,dk,2),CR(di,dj,dk,3),CR(di,dj,dk,4),CR(di,dj,dk,5),CR(di,dj,dk,6))
+#else
 #define GP(di,dj,dk) prim_from_cons(CR(di,dj,dk,0),CR(di,dj,dk,1),CR(di,dj,dk,2),CR(di,dj,dk,3),CR(di,dj,dk,4))
+#endif
 
     for(int k=0;k<NZ;k++){
         Prim c0 = GP(0,0,0);
@@ -295,12 +358,21 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
 #endif // DONOR
             div.r+=Fp.r-Fm.r; div.mx+=Fp.mx-Fm.mx; div.my+=Fp.my-Fm.my;
             div.mz+=Fp.mz-Fm.mz; div.E+=Fp.E-Fm.E;
+#ifdef SCALARS
+            div.c0+=Fp.c0-Fm.c0; div.c1+=Fp.c1-Fm.c1;
+#endif
         }
         U.r-=DTDX*div.r; U.mx-=DTDX*div.mx; U.my-=DTDX*div.my; U.mz-=DTDX*div.mz; U.E-=DTDX*div.E;
+#ifdef SCALARS
+        U.c0-=DTDX*div.c0; U.c1-=DTDX*div.c1;
+#endif
 #endif
         // write owned cell
         size_t g=gidx(x0+tx,y0+ty,k);
         o.v[0][g]=U.r; o.v[1][g]=U.mx; o.v[2][g]=U.my; o.v[3][g]=U.mz; o.v[4][g]=U.E;
+#ifdef SCALARS
+        o.v[5][g]=U.c0; o.v[6][g]=U.c1;
+#endif
 
         // advance ring: load plane k+3 (overwrites k-2 slot), barrier
         loadPlane(k+3);
@@ -316,6 +388,9 @@ __global__ void init(Ptrs q){
     float ph = 0.001f*(float)(i%911);
     q.v[0][i]=1.f+0.3f*ph; q.v[1][i]=0.1f*ph; q.v[2][i]=-0.1f*ph; q.v[3][i]=0.05f*ph;
     q.v[4][i]=2.5f+0.5f*ph;
+#ifdef SCALARS
+    float rho=1.f+0.3f*ph; q.v[5][i]=rho*(0.2f+0.5f*ph); q.v[6][i]=rho*(0.7f-0.3f*ph); // rho*s
+#endif
 }
 
 int main(){
