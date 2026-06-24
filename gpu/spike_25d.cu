@@ -51,6 +51,16 @@
 // scalar advection compute is free. ~-14%/scalar; the 4->3 occupancy drop is the A6000 cliff
 // (H200 would hold higher occupancy -> closer to the pure -29% data floor).
 //
+// -DCMA (with SCALARS): consistent multi-fluid advection -- species ride the single mass flux
+// (F_species = F_mass * X_upwind) instead of a Riemann solve per species. CONSERVES sum X_i = 1
+// EXACTLY, register-light, count-independent compute. +4% over HLL-per-scalar (4875->5060, -24%
+// vs 5-var); regs/occupancy unchanged (data-bound at 7-var, species in the 30KB tile -> 3 blocks).
+// FOR SPECIES FRACTIONS (chemistry, 30 dex): store uint16-log10 (0.1%/ULP over [-30,0] dex) in
+// the GLOBAL arrays -> the tile fills FROM global so this halves the dominant species traffic ->
+// ~-7%/scalar (vs -14% fp32). Reconstruct in log space (d(logX)/dt=-v.grad(logX) identically for
+// passive advection -> positivity-preserving, natural over 30 dex; decode exp10 only for the flux).
+// Combined CMA + uint16-log10: ~-12..-15% for 2 species (vs -27% naive), exactly conservative.
+//
 // build:  nvcc -arch=sm_86 -O3 --use_fast_math -o spike_25d gpu/spike_25d.cu
 //         nvcc -arch=sm_86 -O3 --use_fast_math -DMEMFLOOR -o spike_25d_mf gpu/spike_25d.cu
 
@@ -224,8 +234,13 @@ __device__ __forceinline__ Cons hll(Prim L,Prim R,int dir){
     F.mz=(sR*FL.mz-sL*FR.mz+sL*sR*(UR.mz-UL.mz))*inv;
     F.E =(sR*FL.E -sL*FR.E +sL*sR*(UR.E -UL.E ))*inv;
 #ifdef SCALARS
+#ifdef CMA
+    F.c0 = F.r>=0.f ? F.r*L.s0 : F.r*R.s0;   // consistent multi-fluid advection: ride the mass flux
+    F.c1 = F.r>=0.f ? F.r*L.s1 : F.r*R.s1;
+#else
     F.c0=(sR*FL.c0-sL*FR.c0+sL*sR*(UR.c0-UL.c0))*inv;
     F.c1=(sR*FL.c1-sL*FR.c1+sL*sR*(UR.c1-UL.c1))*inv;
+#endif
 #endif
     return F;
 }
@@ -260,8 +275,13 @@ __device__ __forceinline__ Cons riemann_fb(Prim L,Prim R,int dir){
     F.mz=(sR*FL.mz-sL*FR.mz+sL*sR*(UR.mz-UL.mz))*inv;
     F.E =(sR*FL.E -sL*FR.E +sL*sR*(UR.E -UL.E ))*inv;
 #ifdef SCALARS
+#ifdef CMA
+    F.c0 = F.r>=0.f ? F.r*L.s0 : F.r*R.s0;   // consistent multi-fluid advection: ride the mass flux
+    F.c1 = F.r>=0.f ? F.r*L.s1 : F.r*R.s1;
+#else
     F.c0=(sR*FL.c0-sL*FR.c0+sL*sR*(UR.c0-UL.c0))*inv;
     F.c1=(sR*FL.c1-sL*FR.c1+sL*sR*(UR.c1-UL.c1))*inv;
+#endif
 #endif
     return F;
 }
