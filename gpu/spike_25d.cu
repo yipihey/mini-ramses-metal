@@ -30,6 +30,13 @@
 // transverse-error constants — must validate max-stable-CFL + turb statistics before claiming a
 // NET win (if CFL>=~0.5 holds it wins; at 0.33 the extra steps ~cancel the throughput gain).
 //
+// -DDONOR (with HANCOCK1D): donor-cell flux at the x/y block seams -> 1-ghost x-y tile
+// (z always 2nd order, no seam). EXACTLY CONSERVATIVE (consistent flux both sides; Julia
+// GLMMHDTurb integrator_hydro_lmarch! GH=1 gives rel-dmass=0). Shrinks shared 21.6->17.0 KB
+// (-21% over-read) BUT regs 64->72 -> 3 blocks/SM (off the 4-block cliff) -> NET -5% on the
+// A6000. The traffic saving is real but the kernel is occupancy-pinned, not DRAM-bound, and
+// 4 blocks needs <=64 regs exactly. Likely POSITIVE on a GPU not sitting on that cliff (H200).
+//
 // build:  nvcc -arch=sm_86 -O3 --use_fast_math -o spike_25d gpu/spike_25d.cu
 //         nvcc -arch=sm_86 -O3 --use_fast_math -DMEMFLOOR -o spike_25d_mf gpu/spike_25d.cu
 
@@ -44,9 +51,14 @@
 
 #define OX 32          // owned cells per block in x  (== blockDim.x lane group)
 #define OY 8           // owned cells per block in y
-#define GX (OX+4)      // 2-ghost halo each side
-#define GY (OY+4)
-#define PLANES 5       // rolling ring k-2..k+2
+#ifdef DONOR
+#define GHOST 1        // donor-cell at x/y block seams -> 1-ghost x-y tile
+#else
+#define GHOST 2        // full 2nd-order -> 2-ghost x-y tile
+#endif
+#define GX (OX+2*GHOST)
+#define GY (OY+2*GHOST)
+#define PLANES 5       // rolling ring k-2..k+2 (z always 2nd order, no seam)
 #define THREADS 256    // OX*OY
 
 __device__ __forceinline__ size_t gidx(int i,int j,int k){
@@ -164,14 +176,14 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
     const int tid = threadIdx.x;
     const int tx = tid % OX, ty = tid / OX;     // owned column (0..OX,0..OY)
     const int x0 = blockIdx.x*OX, y0 = blockIdx.y*OY;
-    const int li = tx+2, lj = ty+2;             // local shared coords of owned cell
+    const int li = tx+GHOST, lj = ty+GHOST;     // local shared coords of owned cell
 
     // load plane at absolute k into ring slot ring(k)
     auto loadPlane = [&](int k){
         int s = ring(k), gk = wrap(k,NZ);
         for(int c=tid; c<GX*GY; c+=THREADS){
             int lx=c%GX, ly=c/GX;
-            int gi=wrap(x0-2+lx,NX), gj=wrap(y0-2+ly,NY);
+            int gi=wrap(x0-GHOST+lx,NX), gj=wrap(y0-GHOST+ly,NY);
             size_t g=gidx(gi,gj,gk);
             #pragma unroll
             for(int v=0;v<NV;v++) sh[v][s][c]=__float2half(q.v[v][g]);
@@ -192,6 +204,20 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
         #pragma unroll
         for(int d=0; d<3; d++){
             int ox=(d==0), oy=(d==1), oz=(d==2);
+#ifdef DONOR
+            // 1-ghost x-y tile: donor-cell flux at x/y block seams (1st order, both sides
+            // -> consistent -> conserved), 2nd-order 1D-Hancock interior + all of z.
+            int lob=(d==0&&tx==0)||(d==1&&ty==0);          // low face is a block seam
+            int hib=(d==0&&tx==OX-1)||(d==1&&ty==OY-1);    // high face is a block seam
+            Prim cm1=GP(-ox,-oy,-oz), cp1=GP(ox,oy,oz);
+            Prim cm2= lob ? c0 : GP(-2*ox,-2*oy,-2*oz);    // ternary skips the OOB read at the seam
+            Prim cp2= hib ? c0 : GP(2*ox,2*oy,2*oz);
+            Prim sm1=slopeP(cm2,cm1,c0), s0=slopeP(cm1,c0,cp1), sp1=slopeP(c0,cp1,cp2);
+            Cons Fm = lob ? hll(cm1,c0,d)
+                          : hll(edge(hanc1d(cm1,sm1,d,DTDX,GAMMA),sm1,+1.f), edge(hanc1d(c0,s0,d,DTDX,GAMMA),s0,-1.f), d);
+            Cons Fp = hib ? hll(c0,cp1,d)
+                          : hll(edge(hanc1d(c0,s0,d,DTDX,GAMMA),s0,+1.f), edge(hanc1d(cp1,sp1,d,DTDX,GAMMA),sp1,-1.f), d);
+#else
             Prim cm2=GP(-2*ox,-2*oy,-2*oz), cm1=GP(-ox,-oy,-oz),
                  cp1=GP(ox,oy,oz),          cp2=GP(2*ox,2*oy,2*oz);
             Prim sm1=slopeP(cm2,cm1,c0), s0=slopeP(cm1,c0,cp1), sp1=slopeP(c0,cp1,cp2);
@@ -225,6 +251,7 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
             Cons Fm = hll(edge(cm1,sm1,+1.f), edge(c0,s0,-1.f), d);   // face k-1/2
             Cons Fp = hll(edge(c0,s0,+1.f),   edge(cp1,sp1,-1.f), d); // face k+1/2
 #endif
+#endif // DONOR
             div.r+=Fp.r-Fm.r; div.mx+=Fp.mx-Fm.mx; div.my+=Fp.my-Fm.my;
             div.mz+=Fp.mz-Fm.mz; div.E+=Fp.E-Fm.E;
         }
