@@ -71,17 +71,15 @@
 // CORRECT option AND +5% AND half the checkpoint size. On H200 (holds 4 blocks at 7-var ->
 // bandwidth-bound) the -14% traffic saving would translate much closer to fully.
 //
-// -DU16STATE (MEASURED): the ENTIRE hydro state in uint16 -- rho/E as log2, the 3 signed momenta
-// as linear over [-MOMMAX,MOMMAX]; decode on tile-fill, encode on store. 7960 Mcell/s = +19% over
-// fp32 (and +94% over the cube), at the SAME 64 regs / 4 blocks. Much bigger than the species
-// uint16 (+5%) because the 5-var kernel stays at 4 blocks (67% occ) = bandwidth-sensitive, so
-// halving the global traffic lands nearly fully; the exp2/log2 decode is hidden. Halves global
-// storage + checkpoints. *** ACCURACY (tested in Julia, driven Mach-3.4 turb): THIS CONSERVED-state
-// encoding is WRONG -- linear momenta DESTROY the turbulence (spectrum blows up 1714x at k=90, -2%
-// mass). The +19% throughput is real but to be ACCURATE you must store PRIMITIVE: rho/p as log2,
-// VELOCITY linear in a TIGHT [-8,8] range (bounded by Mach, not rho*v). Primitive validated: spectrum
-// matches fp32 to 1.01-1.05 across k=4..90, mass drift -0.4% (irreducible log2-rho requantization).
-// TODO: redo this path as primitive (the lmarch tile already holds primitive). ***
+// -DU16STATE (MEASURED + ACCURACY-VALIDATED): the entire hydro state in uint16, stored as PRIMITIVE
+// (rho/p as log2 over [-32,32]; velocity linear over [-8,8], bounded by Mach NOT rho*v). Tile holds
+// primitive directly (GP=make_prim, no per-read c2p); store does c2p->encode. 7410 Mcell/s = +11%
+// over fp32 (+81% over cube), 64 regs / 4 blocks. [The earlier +19% used CONSERVED momenta-linear,
+// which is +8% faster (no store-side c2p divide) but PHYSICALLY BROKEN: linear momenta destroy the
+// turbulence -- spectrum blew up 1714x at k=90, -2% mass. So the accurate version pays ~8% for the
+// c2p.] Accuracy (Julia quantization-roundtrip, driven Mach-3.4 turb): spectrum matches fp32 to
+// 1.01-1.05 across k=4..90, sigma_s -6%, mass drift -0.4% (irreducible log2-rho per-step requantize;
+// mitigate by quantizing every K steps). Halves global storage+checkpoints, enables ~1216^3 on A6000.
 //
 // build:  nvcc -arch=sm_86 -O3 --use_fast_math -o spike_25d gpu/spike_25d.cu
 //         nvcc -arch=sm_86 -O3 --use_fast_math -DMEMFLOOR -o spike_25d_mf gpu/spike_25d.cu
@@ -151,9 +149,12 @@ __device__ __forceinline__ float dec_log2(unsigned short u){ return -110.f + (fl
 __device__ __forceinline__ unsigned short enc_log2(float l2){ float t=(l2+110.f)*(65535.f/110.f); t=fminf(fmaxf(t,0.f),65535.f); return (unsigned short)(t+0.5f); }
 #endif
 #ifdef U16STATE
-#define MOMMAX 1024.f       // linear uint16 range for the signed momenta
-__device__ __forceinline__ float dec_lin(unsigned short u){ return -MOMMAX + (float)u*(2.f*MOMMAX/65535.f); }
-__device__ __forceinline__ unsigned short enc_lin(float x){ float t=(fminf(fmaxf(x,-MOMMAX),MOMMAX)+MOMMAX)*(65535.f/(2.f*MOMMAX)); return (unsigned short)(t+0.5f); }
+#define VMAX 8.f            // linear uint16 range for the signed VELOCITY (bounded by Mach, not rho*v)
+__device__ __forceinline__ float dec_vel(unsigned short u){ return -VMAX + (float)u*(2.f*VMAX/65535.f); }
+__device__ __forceinline__ unsigned short enc_vel(float x){ float t=(fminf(fmaxf(x,-VMAX),VMAX)+VMAX)*(65535.f/(2.f*VMAX)); return (unsigned short)(t+0.5f); }
+// log2 codec for rho/p over [-32,+32] log2 (can exceed 1, unlike species fractions); ~3e-4 dex/ULP
+__device__ __forceinline__ float dec_log2s(unsigned short u){ return -32.f + (float)u*(64.f/65535.f); }
+__device__ __forceinline__ unsigned short enc_log2s(float l2){ float t=(l2+32.f)*(65535.f/64.f); t=fminf(fmaxf(t,0.f),65535.f); return (unsigned short)(t+0.5f); }
 #endif
 struct Prim { float r,u,v,w,p;
 #ifdef SCALARS
@@ -189,6 +190,9 @@ __device__ __forceinline__ Prim prim_from_cons(float r,float mx,float my,float m
     q.p=fmaxf((GAMMA-1.f)*(E-ke),SMALLP);
     return q;
 }
+#endif
+#ifdef U16STATE
+__device__ __forceinline__ Prim make_prim(float r,float u,float v,float w,float p){ Prim q; q.r=fmaxf(r,SMALLR); q.u=u; q.v=v; q.w=w; q.p=fmaxf(p,SMALLP); return q; }
 #endif
 __device__ __forceinline__ float moncen(float a,float b,float c){
     // monotonized central slope (slope_type=2)
@@ -381,11 +385,11 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
             int gi=wrap(x0-GHOST+lx,NX), gj=wrap(y0-GHOST+ly,NY);
             size_t g=gidx(gi,gj,gk);
 #ifdef U16STATE
-            sh[0][s][c]=__float2half(exp2f(dec_log2(q.h[0][g])));   // rho (log2)
-            sh[1][s][c]=__float2half(dec_lin(q.h[1][g]));           // momenta (linear)
-            sh[2][s][c]=__float2half(dec_lin(q.h[2][g]));
-            sh[3][s][c]=__float2half(dec_lin(q.h[3][g]));
-            sh[4][s][c]=__float2half(exp2f(dec_log2(q.h[4][g])));   // E (log2)
+            sh[0][s][c]=__float2half(exp2f(dec_log2s(q.h[0][g])));   // rho   (log2) -> tile holds PRIMITIVE
+            sh[1][s][c]=__float2half(dec_vel(q.h[1][g]));           // vx    (linear, tight)
+            sh[2][s][c]=__float2half(dec_vel(q.h[2][g]));           // vy
+            sh[3][s][c]=__float2half(dec_vel(q.h[3][g]));           // vz
+            sh[4][s][c]=__float2half(exp2f(dec_log2s(q.h[4][g])));   // p     (log2)
 #else
             #pragma unroll
             for(int v=0;v<5;v++) sh[v][s][c]=__float2half(q.v[v][g]);
@@ -405,6 +409,8 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
 #define CR(di,dj,dk,v) __half2float(sh[v][ring(k+(dk))][(li+(di))+GX*(lj+(dj))])
 #ifdef SCALARS
 #define GP(di,dj,dk) prim_from_cons(CR(di,dj,dk,0),CR(di,dj,dk,1),CR(di,dj,dk,2),CR(di,dj,dk,3),CR(di,dj,dk,4),CR(di,dj,dk,5),CR(di,dj,dk,6))
+#elif defined(U16STATE)
+#define GP(di,dj,dk) make_prim(CR(di,dj,dk,0),CR(di,dj,dk,1),CR(di,dj,dk,2),CR(di,dj,dk,3),CR(di,dj,dk,4))   // tile holds primitive
 #else
 #define GP(di,dj,dk) prim_from_cons(CR(di,dj,dk,0),CR(di,dj,dk,1),CR(di,dj,dk,2),CR(di,dj,dk,3),CR(di,dj,dk,4))
 #endif
@@ -479,9 +485,13 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
         // write owned cell
         size_t g=gidx(x0+tx,y0+ty,k);
 #ifdef U16STATE
-        o.h[0][g]=enc_log2(log2f(fmaxf(U.r,SMALLR)));
-        o.h[1][g]=enc_lin(U.mx); o.h[2][g]=enc_lin(U.my); o.h[3][g]=enc_lin(U.mz);
-        o.h[4][g]=enc_log2(log2f(fmaxf(U.E,SMALLR)));
+        { float ir=1.f/fmaxf(U.r,SMALLR);                          // c2p -> store PRIMITIVE
+          float vx=U.mx*ir, vy=U.my*ir, vz=U.mz*ir;
+          float ke=0.5f*U.r*(vx*vx+vy*vy+vz*vz);
+          float pp=fmaxf((GAMMA-1.f)*(U.E-ke),SMALLP);
+          o.h[0][g]=enc_log2s(log2f(fmaxf(U.r,SMALLR)));
+          o.h[1][g]=enc_vel(vx); o.h[2][g]=enc_vel(vy); o.h[3][g]=enc_vel(vz);
+          o.h[4][g]=enc_log2s(log2f(pp)); }
 #else
         o.v[0][g]=U.r; o.v[1][g]=U.mx; o.v[2][g]=U.my; o.v[3][g]=U.mz; o.v[4][g]=U.E;
 #endif
@@ -507,7 +517,9 @@ __global__ void init(Ptrs q){
     float ph = 0.001f*(float)(i%911);
     float rho=1.f+0.3f*ph, mx=0.1f*ph, my=-0.1f*ph, mz=0.05f*ph, E=2.5f+0.5f*ph;
 #ifdef U16STATE
-    q.h[0][i]=enc_log2(log2f(rho)); q.h[1][i]=enc_lin(mx); q.h[2][i]=enc_lin(my); q.h[3][i]=enc_lin(mz); q.h[4][i]=enc_log2(log2f(E));
+    { float ir=1.f/rho, vx=mx*ir, vy=my*ir, vz=mz*ir;
+      float ke=0.5f*rho*(vx*vx+vy*vy+vz*vz), pp=fmaxf((GAMMA-1.f)*(E-ke),SMALLP);
+      q.h[0][i]=enc_log2s(log2f(rho)); q.h[1][i]=enc_vel(vx); q.h[2][i]=enc_vel(vy); q.h[3][i]=enc_vel(vz); q.h[4][i]=enc_log2s(log2f(pp)); }
 #else
     q.v[0][i]=rho; q.v[1][i]=mx; q.v[2][i]=my; q.v[3][i]=mz; q.v[4][i]=E;
 #endif
