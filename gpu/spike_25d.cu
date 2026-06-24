@@ -71,6 +71,15 @@
 // CORRECT option AND +5% AND half the checkpoint size. On H200 (holds 4 blocks at 7-var ->
 // bandwidth-bound) the -14% traffic saving would translate much closer to fully.
 //
+// -DU16STATE (MEASURED): the ENTIRE hydro state in uint16 -- rho/E as log2, the 3 signed momenta
+// as linear over [-MOMMAX,MOMMAX]; decode on tile-fill, encode on store. 7960 Mcell/s = +19% over
+// fp32 (and +94% over the cube), at the SAME 64 regs / 4 blocks. Much bigger than the species
+// uint16 (+5%) because the 5-var kernel stays at 4 blocks (67% occ) = bandwidth-sensitive, so
+// halving the global traffic lands nearly fully; the exp2/log2 decode is hidden. Halves global
+// storage + checkpoints. Accuracy (per-step quantization breaks exact conservation; momenta=linear
+// lose precision at low |rho v|; E=log2 amplifies the c2p cancellation at high Mach) NOT yet
+// checked -- mitigate by keeping the persistent state encoded and NOT re-quantizing every step.
+//
 // build:  nvcc -arch=sm_86 -O3 --use_fast_math -o spike_25d gpu/spike_25d.cu
 //         nvcc -arch=sm_86 -O3 --use_fast_math -DMEMFLOOR -o spike_25d_mf gpu/spike_25d.cu
 
@@ -117,11 +126,19 @@ struct Ptrs { float* v[NV];
 #ifdef U16SP
     unsigned short* su[2];   // species fractions, uint16 log2-encoded global storage (2B vs 4B)
 #endif
+#ifdef U16STATE
+    unsigned short* h[5];    // entire hydro state in uint16 (rho/E log2, momenta linear)
+#endif
 };
-#ifdef U16SP
-// uint16 <-> log2(fraction) over [-110,0] log2 units (covers ~2^-110 ~ 1e-33; ~5e-4 dex/ULP)
+#if defined(U16SP) || defined(U16STATE)
+// uint16 <-> log2(value) over [-110,0] log2 units (~5e-4 dex/ULP)
 __device__ __forceinline__ float dec_log2(unsigned short u){ return -110.f + (float)u*(110.f/65535.f); }
 __device__ __forceinline__ unsigned short enc_log2(float l2){ float t=(l2+110.f)*(65535.f/110.f); t=fminf(fmaxf(t,0.f),65535.f); return (unsigned short)(t+0.5f); }
+#endif
+#ifdef U16STATE
+#define MOMMAX 1024.f       // linear uint16 range for the signed momenta
+__device__ __forceinline__ float dec_lin(unsigned short u){ return -MOMMAX + (float)u*(2.f*MOMMAX/65535.f); }
+__device__ __forceinline__ unsigned short enc_lin(float x){ float t=(fminf(fmaxf(x,-MOMMAX),MOMMAX)+MOMMAX)*(65535.f/(2.f*MOMMAX)); return (unsigned short)(t+0.5f); }
 #endif
 struct Prim { float r,u,v,w,p;
 #ifdef SCALARS
@@ -348,8 +365,16 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
             int lx=c%GX, ly=c/GX;
             int gi=wrap(x0-GHOST+lx,NX), gj=wrap(y0-GHOST+ly,NY);
             size_t g=gidx(gi,gj,gk);
+#ifdef U16STATE
+            sh[0][s][c]=__float2half(exp2f(dec_log2(q.h[0][g])));   // rho (log2)
+            sh[1][s][c]=__float2half(dec_lin(q.h[1][g]));           // momenta (linear)
+            sh[2][s][c]=__float2half(dec_lin(q.h[2][g]));
+            sh[3][s][c]=__float2half(dec_lin(q.h[3][g]));
+            sh[4][s][c]=__float2half(exp2f(dec_log2(q.h[4][g])));   // E (log2)
+#else
             #pragma unroll
             for(int v=0;v<5;v++) sh[v][s][c]=__float2half(q.v[v][g]);
+#endif
 #ifdef U16SP
             sh[5][s][c]=__float2half(dec_log2(q.su[0][g]));   // uint16 -> log2(X) in tile
             sh[6][s][c]=__float2half(dec_log2(q.su[1][g]));
@@ -438,7 +463,13 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
 #endif
         // write owned cell
         size_t g=gidx(x0+tx,y0+ty,k);
+#ifdef U16STATE
+        o.h[0][g]=enc_log2(log2f(fmaxf(U.r,SMALLR)));
+        o.h[1][g]=enc_lin(U.mx); o.h[2][g]=enc_lin(U.my); o.h[3][g]=enc_lin(U.mz);
+        o.h[4][g]=enc_log2(log2f(fmaxf(U.E,SMALLR)));
+#else
         o.v[0][g]=U.r; o.v[1][g]=U.mx; o.v[2][g]=U.my; o.v[3][g]=U.mz; o.v[4][g]=U.E;
+#endif
 #ifdef U16SP
         float rinv=1.f/fmaxf(U.r,SMALLR);                       // X_new = (rho*X)_new / rho_new -> log2 -> uint16
         o.su[0][g]=enc_log2(log2f(fmaxf(U.c0*rinv,7.7e-34f)));
@@ -459,8 +490,12 @@ __global__ void init(Ptrs q){
     size_t n=(size_t)NX*NY*NZ, i=(size_t)blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n) return;
     float ph = 0.001f*(float)(i%911);
-    q.v[0][i]=1.f+0.3f*ph; q.v[1][i]=0.1f*ph; q.v[2][i]=-0.1f*ph; q.v[3][i]=0.05f*ph;
-    q.v[4][i]=2.5f+0.5f*ph;
+    float rho=1.f+0.3f*ph, mx=0.1f*ph, my=-0.1f*ph, mz=0.05f*ph, E=2.5f+0.5f*ph;
+#ifdef U16STATE
+    q.h[0][i]=enc_log2(log2f(rho)); q.h[1][i]=enc_lin(mx); q.h[2][i]=enc_lin(my); q.h[3][i]=enc_lin(mz); q.h[4][i]=enc_log2(log2f(E));
+#else
+    q.v[0][i]=rho; q.v[1][i]=mx; q.v[2][i]=my; q.v[3][i]=mz; q.v[4][i]=E;
+#endif
 #ifdef U16SP
     q.su[0][i]=enc_log2(log2f(0.3f+0.2f*ph));            // ~O(0.3) fraction
     q.su[1][i]=enc_log2(log2f(1e-20f*(1.f+0.5f*ph)));    // trace species, exercises 30-dex range
@@ -472,7 +507,9 @@ __global__ void init(Ptrs q){
 int main(){
     size_t n=(size_t)NX*NY*NZ;
     Ptrs q,o;
-#ifdef U16SP
+#ifdef U16STATE
+    for(int v=0;v<5;v++){ cudaMalloc(&q.h[v],n*2); cudaMalloc(&o.h[v],n*2); }
+#elif defined(U16SP)
     for(int v=0;v<5;v++){ cudaMalloc(&q.v[v],n*4); cudaMalloc(&o.v[v],n*4); }
     for(int j=0;j<2;j++){ cudaMalloc(&q.su[j],n*2); cudaMalloc(&o.su[j],n*2); }
 #else
