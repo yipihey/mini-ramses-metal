@@ -57,6 +57,13 @@ static constexpr int TURB_GS = 64;
 
 typedef __half thalf;   // tp / TPRE kind for the shared tile
 
+// Dynamic shared-memory footprint: the f16 tile (5 prim + refined) + 6 face tiles
+// (5 prim each). At ns3 = 26376 B (fits the 48KB static cap); at ns4 = 53568 B
+// (exceeds it) -> we use DYNAMIC shared (opt-in to 100KB) so ns4's lower halo is
+// reachable. The block_reduce svalues(32) stays separate static shared.
+static constexpr int SMEM_BYTES =
+    (int)((5*TILE + 10*IX_SZ + 10*IY_SZ + 10*IZ_SZ)*sizeof(thalf) + TILE*sizeof(unsigned char));
+
 // ---- f-read isolation experiment (GRAV builds only) ------------------------
 // The ONLY code difference between GRAV=1 (fast) and GRAV=0 (slow) is the 6
 // divergent f reads/cell (3 in the dt-fold, 3 in the velocity predictor) vs the
@@ -478,15 +485,19 @@ __global__ void __launch_bounds__(256, CUMINBLK) hydro_integrator_kernel_cuda(
     float boxlen, float turb_min_rho, int do_turb
 #endif
 ){
-    // ---- shared scratch (faithful tile layout) ----------------------------
-    __shared__ thalf ls_d[TILE], ls_vx[TILE], ls_vy[TILE], ls_vz[TILE], ls_p[TILE];
-    __shared__ unsigned char ls_ref[TILE];
-    __shared__ thalf lix_d[IX_SZ],lix_vx[IX_SZ],lix_vy[IX_SZ],lix_vz[IX_SZ],lix_p[IX_SZ];
-    __shared__ thalf rix_d[IX_SZ],rix_vx[IX_SZ],rix_vy[IX_SZ],rix_vz[IX_SZ],rix_p[IX_SZ];
-    __shared__ thalf liy_d[IY_SZ],liy_vx[IY_SZ],liy_vy[IY_SZ],liy_vz[IY_SZ],liy_p[IY_SZ];
-    __shared__ thalf riy_d[IY_SZ],riy_vx[IY_SZ],riy_vy[IY_SZ],riy_vz[IY_SZ],riy_p[IY_SZ];
-    __shared__ thalf liz_d[IZ_SZ],liz_vx[IZ_SZ],liz_vy[IZ_SZ],liz_vz[IZ_SZ],liz_p[IZ_SZ];
-    __shared__ thalf riz_d[IZ_SZ],riz_vx[IZ_SZ],riz_vy[IZ_SZ],riz_vz[IZ_SZ],riz_p[IZ_SZ];
+    // ---- shared scratch: DYNAMIC shared (all thalf arrays first for alignment,
+    // refined uchar last). Lets the ns4 tile exceed the 48KB static cap.
+    extern __shared__ char smem[];
+    thalf* sp = (thalf*)smem;
+    thalf* ls_d=sp; thalf* ls_vx=sp+TILE; thalf* ls_vy=sp+2*TILE; thalf* ls_vz=sp+3*TILE; thalf* ls_p=sp+4*TILE;
+    thalf* fp = sp + 5*TILE;
+    thalf *lix_d=fp,*lix_vx=fp+IX_SZ,*lix_vy=fp+2*IX_SZ,*lix_vz=fp+3*IX_SZ,*lix_p=fp+4*IX_SZ; fp+=5*IX_SZ;
+    thalf *rix_d=fp,*rix_vx=fp+IX_SZ,*rix_vy=fp+2*IX_SZ,*rix_vz=fp+3*IX_SZ,*rix_p=fp+4*IX_SZ; fp+=5*IX_SZ;
+    thalf *liy_d=fp,*liy_vx=fp+IY_SZ,*liy_vy=fp+2*IY_SZ,*liy_vz=fp+3*IY_SZ,*liy_p=fp+4*IY_SZ; fp+=5*IY_SZ;
+    thalf *riy_d=fp,*riy_vx=fp+IY_SZ,*riy_vy=fp+2*IY_SZ,*riy_vz=fp+3*IY_SZ,*riy_p=fp+4*IY_SZ; fp+=5*IY_SZ;
+    thalf *liz_d=fp,*liz_vx=fp+IZ_SZ,*liz_vy=fp+2*IZ_SZ,*liz_vz=fp+3*IZ_SZ,*liz_p=fp+4*IZ_SZ; fp+=5*IZ_SZ;
+    thalf *riz_d=fp,*riz_vx=fp+IZ_SZ,*riz_vy=fp+2*IZ_SZ,*riz_vz=fp+3*IZ_SZ,*riz_p=fp+4*IZ_SZ; fp+=5*IZ_SZ;
+    unsigned char* ls_ref=(unsigned char*)fp;
 
     Tile ls{ls_d,ls_vx,ls_vy,ls_vz,ls_p,ls_ref};
     Face lix{lix_d,lix_vx,lix_vy,lix_vz,lix_p,IX_NX,IX_NY};
@@ -704,6 +715,7 @@ __global__ void __launch_bounds__(256, CUMINBLK) hydro_integrator_kernel_cuda(
 #endif // WIDELOAD
     }
 
+#ifndef PERF_MEMFLOOR   // diagnostic: skip trace+riemann (+2 barriers, interface-tile traffic)
     // ========================================================================
     // 2) trace_3d : MUSCL-Hancock / Local-PPM reconstruction over the tile
     // ========================================================================
@@ -889,6 +901,7 @@ __global__ void __launch_bounds__(256, CUMINBLK) hydro_integrator_kernel_cuda(
         }
         __syncthreads();
     }
+#endif // PERF_MEMFLOOR
 
     // ========================================================================
     // 4) zero_fine_fluxes (only when finer level exists)
@@ -932,6 +945,9 @@ __global__ void __launch_bounds__(256, CUMINBLK) hydro_integrator_kernel_cuda(
             i += 2*(isg-1); j += 2*(jsg-1); k += 2*(ksg-1);
 
             Cons up;
+#ifdef PERF_MEMFLOOR
+            up.density=0.f; up.momentum_x=0.f; up.momentum_y=0.f; up.momentum_z=0.f; up.energy=0.f;
+#else
             up.density   =(__half2float(lix.d[lix.idx(i,j,k)]) -__half2float(lix.d[lix.idx(i+1,j,k)]) )*dtdx;
             up.momentum_x=(__half2float(lix.vx[lix.idx(i,j,k)])-__half2float(lix.vx[lix.idx(i+1,j,k)]))*dtdx;
             up.momentum_y=(__half2float(lix.vy[lix.idx(i,j,k)])-__half2float(lix.vy[lix.idx(i+1,j,k)]))*dtdx;
@@ -949,6 +965,7 @@ __global__ void __launch_bounds__(256, CUMINBLK) hydro_integrator_kernel_cuda(
             up.momentum_y+=(__half2float(liz.vy[liz.idx(i,j,k)])-__half2float(liz.vy[liz.idx(i,j,k+1)]))*dtdx;
             up.momentum_z+=(__half2float(liz.vz[liz.idx(i,j,k)])-__half2float(liz.vz[liz.idx(i,j,k+1)]))*dtdx;
             up.energy    +=(__half2float(liz.p[liz.idx(i,j,k)]) -__half2float(liz.p[liz.idx(i,j,k+1)]) )*dtdx;
+#endif
 
             float b1,b2,b3,b4,b5;
             if (base_write){
@@ -1106,7 +1123,13 @@ extern "C" void launch_hydro_integrator(
     int threads = 256;
     int blocks = num_subgrids;
     if (blocks <= 0) return;
-    hydro_integrator_kernel_cuda<<<blocks, threads>>>(
+    // Opt into >48KB dynamic shared (needed at ns4); harmless at ns3. Set once.
+    static bool attr_set = false;
+    if (!attr_set){
+        cudaFuncSetAttribute(hydro_integrator_kernel_cuda, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES);
+        attr_set = true;
+    }
+    hydro_integrator_kernel_cuda<<<blocks, threads, SMEM_BYTES>>>(
         (Oct*)grid, (float*)uold, (float*)unew, (const float*)f, (const int*)father, (const int*)nbor,
         head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax,
         gamma, smallr, smallc2, dt, dx,
