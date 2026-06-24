@@ -61,6 +61,16 @@
 // passive advection -> positivity-preserving, natural over 30 dex; decode exp10 only for the flux).
 // Combined CMA + uint16-log10: ~-12..-15% for 2 species (vs -27% naive), exactly conservative.
 //
+// -DU16SP (MEASURED): species as uint16 log2(X) in GLOBAL, decoded to log2 in the f16 tile,
+// CMA flux with exp2f decode, re-encoded on store. 2 species: 5340 Mcell/s = -20% vs 5-var
+// (vs fp32-CMA -24%, fp32-HLL -27%) -> +5% over fp32, ~-10%/scalar. The traffic saving (-14%
+// bytes) only partly lands because we're pinned at 3 blocks/SM (50% occ) -> latency- not
+// bandwidth-limited, and exp2/log2 cost a little. THE REAL POINT IS CORRECTNESS: a linear
+// fraction of 1e-20 UNDERFLOWS the f16 tile to 0 (trace species vanish) -- storing log2 is
+// REQUIRED for 30-dex fractions, not optional; exp2f only at the flux. uint16-log2 is the only
+// CORRECT option AND +5% AND half the checkpoint size. On H200 (holds 4 blocks at 7-var ->
+// bandwidth-bound) the -14% traffic saving would translate much closer to fully.
+//
 // build:  nvcc -arch=sm_86 -O3 --use_fast_math -o spike_25d gpu/spike_25d.cu
 //         nvcc -arch=sm_86 -O3 --use_fast_math -DMEMFLOOR -o spike_25d_mf gpu/spike_25d.cu
 
@@ -71,6 +81,14 @@
 #define NX 480
 #define NY 480
 #define NZ 480
+#ifdef U16SP                 // uint16 log2-encoded species fractions (implies the scalar machinery)
+#ifndef SCALARS
+#define SCALARS
+#endif
+#ifndef CMA
+#define CMA                  // species fractions -> consistent multi-fluid advection
+#endif
+#endif
 #ifdef SCALARS
 #define NV 7           // 5 hydro + 2 passive scalars (advected, conserved as rho*s)
 #else
@@ -95,7 +113,16 @@ __device__ __forceinline__ size_t gidx(int i,int j,int k){
 __device__ __forceinline__ int wrap(int i,int N){ int m=i%N; return m<0?m+N:m; }
 __device__ __forceinline__ int ring(int m){ int r=m%PLANES; return r<0?r+PLANES:r; }
 
-struct Ptrs { float* v[NV]; };
+struct Ptrs { float* v[NV];
+#ifdef U16SP
+    unsigned short* su[2];   // species fractions, uint16 log2-encoded global storage (2B vs 4B)
+#endif
+};
+#ifdef U16SP
+// uint16 <-> log2(fraction) over [-110,0] log2 units (covers ~2^-110 ~ 1e-33; ~5e-4 dex/ULP)
+__device__ __forceinline__ float dec_log2(unsigned short u){ return -110.f + (float)u*(110.f/65535.f); }
+__device__ __forceinline__ unsigned short enc_log2(float l2){ float t=(l2+110.f)*(65535.f/110.f); t=fminf(fmaxf(t,0.f),65535.f); return (unsigned short)(t+0.5f); }
+#endif
 struct Prim { float r,u,v,w,p;
 #ifdef SCALARS
     float s0,s1;
@@ -115,7 +142,11 @@ __device__ __forceinline__ Prim prim_from_cons(float r,float mx,float my,float m
     Prim q; q.r=fmaxf(r,SMALLR); q.u=mx*ir; q.v=my*ir; q.w=mz*ir;
     float ke=0.5f*q.r*(q.u*q.u+q.v*q.v+q.w*q.w);
     q.p=fmaxf((GAMMA-1.f)*(E-ke),SMALLP);
+#ifdef U16SP
+    q.s0=cs0; q.s1=cs1;          // tile holds log2(X) directly (intensive, reconstructed in log)
+#else
     q.s0=cs0*ir; q.s1=cs1*ir;
+#endif
     return q;
 }
 #else
@@ -168,7 +199,9 @@ __device__ __forceinline__ Cons primFlux(Prim q,int dir){
 __device__ __forceinline__ Cons toCons(Prim q){
     Cons c; c.r=q.r; c.mx=q.r*q.u; c.my=q.r*q.v; c.mz=q.r*q.w;
     c.E=q.p/(GAMMA-1.f)+0.5f*q.r*(q.u*q.u+q.v*q.v+q.w*q.w);
-#ifdef SCALARS
+#ifdef U16SP
+    c.c0=q.r*exp2f(q.s0); c.c1=q.r*exp2f(q.s1);   // conserved rho*X from log2(X)
+#elif defined(SCALARS)
     c.c0=q.r*q.s0; c.c1=q.r*q.s1;
 #endif
     return c;
@@ -235,8 +268,13 @@ __device__ __forceinline__ Cons hll(Prim L,Prim R,int dir){
     F.E =(sR*FL.E -sL*FR.E +sL*sR*(UR.E -UL.E ))*inv;
 #ifdef SCALARS
 #ifdef CMA
+#ifdef U16SP
+    F.c0 = F.r>=0.f ? F.r*exp2f(L.s0) : F.r*exp2f(R.s0);   // decode log2-edge -> ride mass flux
+    F.c1 = F.r>=0.f ? F.r*exp2f(L.s1) : F.r*exp2f(R.s1);
+#else
     F.c0 = F.r>=0.f ? F.r*L.s0 : F.r*R.s0;   // consistent multi-fluid advection: ride the mass flux
     F.c1 = F.r>=0.f ? F.r*L.s1 : F.r*R.s1;
+#endif
 #else
     F.c0=(sR*FL.c0-sL*FR.c0+sL*sR*(UR.c0-UL.c0))*inv;
     F.c1=(sR*FL.c1-sL*FR.c1+sL*sR*(UR.c1-UL.c1))*inv;
@@ -276,8 +314,13 @@ __device__ __forceinline__ Cons riemann_fb(Prim L,Prim R,int dir){
     F.E =(sR*FL.E -sL*FR.E +sL*sR*(UR.E -UL.E ))*inv;
 #ifdef SCALARS
 #ifdef CMA
+#ifdef U16SP
+    F.c0 = F.r>=0.f ? F.r*exp2f(L.s0) : F.r*exp2f(R.s0);   // decode log2-edge -> ride mass flux
+    F.c1 = F.r>=0.f ? F.r*exp2f(L.s1) : F.r*exp2f(R.s1);
+#else
     F.c0 = F.r>=0.f ? F.r*L.s0 : F.r*R.s0;   // consistent multi-fluid advection: ride the mass flux
     F.c1 = F.r>=0.f ? F.r*L.s1 : F.r*R.s1;
+#endif
 #else
     F.c0=(sR*FL.c0-sL*FR.c0+sL*sR*(UR.c0-UL.c0))*inv;
     F.c1=(sR*FL.c1-sL*FR.c1+sL*sR*(UR.c1-UL.c1))*inv;
@@ -306,7 +349,13 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
             int gi=wrap(x0-GHOST+lx,NX), gj=wrap(y0-GHOST+ly,NY);
             size_t g=gidx(gi,gj,gk);
             #pragma unroll
-            for(int v=0;v<NV;v++) sh[v][s][c]=__float2half(q.v[v][g]);
+            for(int v=0;v<5;v++) sh[v][s][c]=__float2half(q.v[v][g]);
+#ifdef U16SP
+            sh[5][s][c]=__float2half(dec_log2(q.su[0][g]));   // uint16 -> log2(X) in tile
+            sh[6][s][c]=__float2half(dec_log2(q.su[1][g]));
+#elif defined(SCALARS)
+            sh[5][s][c]=__float2half(q.v[5][g]); sh[6][s][c]=__float2half(q.v[6][g]);
+#endif
         }
     };
     // prime ring k=-2..2
@@ -390,7 +439,11 @@ __global__ void __launch_bounds__(THREADS) march(Ptrs q, Ptrs o){
         // write owned cell
         size_t g=gidx(x0+tx,y0+ty,k);
         o.v[0][g]=U.r; o.v[1][g]=U.mx; o.v[2][g]=U.my; o.v[3][g]=U.mz; o.v[4][g]=U.E;
-#ifdef SCALARS
+#ifdef U16SP
+        float rinv=1.f/fmaxf(U.r,SMALLR);                       // X_new = (rho*X)_new / rho_new -> log2 -> uint16
+        o.su[0][g]=enc_log2(log2f(fmaxf(U.c0*rinv,7.7e-34f)));
+        o.su[1][g]=enc_log2(log2f(fmaxf(U.c1*rinv,7.7e-34f)));
+#elif defined(SCALARS)
         o.v[5][g]=U.c0; o.v[6][g]=U.c1;
 #endif
 
@@ -408,7 +461,10 @@ __global__ void init(Ptrs q){
     float ph = 0.001f*(float)(i%911);
     q.v[0][i]=1.f+0.3f*ph; q.v[1][i]=0.1f*ph; q.v[2][i]=-0.1f*ph; q.v[3][i]=0.05f*ph;
     q.v[4][i]=2.5f+0.5f*ph;
-#ifdef SCALARS
+#ifdef U16SP
+    q.su[0][i]=enc_log2(log2f(0.3f+0.2f*ph));            // ~O(0.3) fraction
+    q.su[1][i]=enc_log2(log2f(1e-20f*(1.f+0.5f*ph)));    // trace species, exercises 30-dex range
+#elif defined(SCALARS)
     float rho=1.f+0.3f*ph; q.v[5][i]=rho*(0.2f+0.5f*ph); q.v[6][i]=rho*(0.7f-0.3f*ph); // rho*s
 #endif
 }
@@ -416,7 +472,12 @@ __global__ void init(Ptrs q){
 int main(){
     size_t n=(size_t)NX*NY*NZ;
     Ptrs q,o;
+#ifdef U16SP
+    for(int v=0;v<5;v++){ cudaMalloc(&q.v[v],n*4); cudaMalloc(&o.v[v],n*4); }
+    for(int j=0;j<2;j++){ cudaMalloc(&q.su[j],n*2); cudaMalloc(&o.su[j],n*2); }
+#else
     for(int v=0;v<NV;v++){ cudaMalloc(&q.v[v],n*4); cudaMalloc(&o.v[v],n*4); }
+#endif
     init<<<(n+255)/256,256>>>(q); init<<<(n+255)/256,256>>>(o); cudaDeviceSynchronize();
 
     dim3 grid(NX/OX, NY/OY);
