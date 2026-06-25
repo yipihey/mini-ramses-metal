@@ -546,10 +546,37 @@ __global__ void init(Ptrs q){
     q.su[0][i]=enc_log2(log2f(0.3f+0.2f*ph));            // ~O(0.3) fraction
     q.su[1][i]=enc_log2(log2f(1e-20f*(1.f+0.5f*ph)));    // trace species, exercises 30-dex range
 #elif defined(SCALARS)
-    float rho=1.f+0.3f*ph; q.v[5][i]=rho*(0.2f+0.5f*ph); q.v[6][i]=rho*(0.7f-0.3f*ph); // rho*s
+    q.v[5][i]=rho*(0.2f+0.5f*ph); q.v[6][i]=rho*(0.7f-0.3f*ph); // rho*s (rho from above)
 #endif
 }
 
+#ifdef AS_LIB
+// --- Julia bridge: drive the nvcc march kernel from CUDA.jl over shared device memory. ---
+// Default fp32-conserved build only (the 64-reg HANCOCK1D reference path). qv/ov are arrays
+// of NV device pointers (one CuArray plane per conserved variable, SoA: rho,mx,my,mz,E[,s0,s1]).
+// Runs nsteps periodic marches; result always left in qv (a final D2D copy if nsteps is odd).
+// Returns elapsed kernel time in ms (events; excludes any host/device transfer).
+extern "C" {
+int march_nv(){ return NV; }
+int march_nx(){ return NX; }
+void march_set_dtdx(float v){ cudaMemcpyToSymbol(DTDX, &v, sizeof(float)); }
+double march_run_dev(float* const* qv, float* const* ov, int nsteps){
+    size_t n=(size_t)NX*NY*NZ;
+    Ptrs q,o;
+    for(int v=0;v<NV;v++){ q.v[v]=qv[v]; o.v[v]=ov[v]; }
+    dim3 grid(NX/OX, NY/OY);
+    cudaEvent_t t0,t1; cudaEventCreate(&t0); cudaEventCreate(&t1);
+    cudaEventRecord(t0);
+    for(int it=0;it<nsteps;it++){ march<<<grid,THREADS>>>(q,o); Ptrs t=q;q=o;o=t; }
+    cudaEventRecord(t1); cudaEventSynchronize(t1);
+    float ms=0; cudaEventElapsedTime(&ms,t0,t1);
+    if(q.v[0]!=qv[0]) for(int v=0;v<NV;v++) cudaMemcpy(qv[v], q.v[v], n*4, cudaMemcpyDeviceToDevice);
+    return (double)ms;
+}
+} // extern "C"
+#endif
+
+#ifndef AS_LIB
 int main(){
     size_t n=(size_t)NX*NY*NZ;
     Ptrs q,o;
@@ -600,3 +627,4 @@ int main(){
     printf("  vs production PLM 4127 / floor 5448 Mcell/s\n");
     return 0;
 }
+#endif
