@@ -2382,10 +2382,10 @@ contains
        call nvtxStartRange("GPU cmp_residual", color=1)!blue
        if (ifine == ilevel) then
           call cmp_residual<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(phi, f, nbor, &
-               & head_idx, num_octs, fourpi, offset, oneoverdx2, sim%m%ngridmax)
+               & head_idx, num_octs, fourpi, offset, oneoverdx2, sim%m%ngridmax, nsubgrid, subgridsize)
        else
           call cmp_residual<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(phi_mg, f_mg, nbor_mg, &
-               & head_idx, num_octs, fourpi, offset, oneoverdx2, sim%m_mg%ngridmax)
+               & head_idx, num_octs, fourpi, offset, oneoverdx2, sim%m_mg%ngridmax, 1, threetondim)
        endif
        call nvtxEndRange()
     endif
@@ -2433,10 +2433,10 @@ contains
        call nvtxStartRange("GPU gauss_seidel", color=1)!blue
        if (ifine == ilevel) then
           call gauss_seidel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(phi, f, nbor, &
-               & head_idx, num_octs, dx2, safe, redstep, sim%m%ngridmax)
+               & head_idx, num_octs, dx2, safe, redstep, sim%m%ngridmax, nsubgrid, subgridsize)
        else
           call gauss_seidel<<<num_blocks, dim3(threadsX_per_block,threadsY_per_block,1)>>>(phi_mg, f_mg, nbor_mg, &
-               & head_idx, num_octs, dx2, safe, redstep, sim%m_mg%ngridmax)
+               & head_idx, num_octs, dx2, safe, redstep, sim%m_mg%ngridmax, 1, threetondim)
        endif
        call nvtxEndRange()
     end if
