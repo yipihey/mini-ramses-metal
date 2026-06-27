@@ -212,6 +212,15 @@ contains
     do i = 1, s%p%npart
        s%p%vp(i,1:ndim) = s%p%vp(i,1:ndim) + vb(1:ndim)
     end do
+#ifdef _CUDA
+    ! Apply the boost to the device-resident particles too (the host edit above is on the
+    ! stale host vp and is clobbered by the next D->H sync).  Add it IN PLACE on the device
+    ! (uniform → order-independent); do NOT copy host xp/vp over the SORTED device arrays.
+    block
+      use gpu_manager, only: gpu_boost_part_device
+      call gpu_boost_part_device(s%p%npart, vx, vy, vz)
+    end block
+#endif
   end subroutine ramses_boost_particles
 
   ! Set the multigrid/CG convergence tolerance r%epsilon (CPU solve).  Used by

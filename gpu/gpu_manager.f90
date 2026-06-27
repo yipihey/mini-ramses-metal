@@ -119,8 +119,37 @@ subroutine set_uold_device(pst)
   use ramses_commons, only: pst_t
   implicit none
   type(pst_t)::pst
+#ifdef HYDRO
   call gpu_upload_uold(pst%s%m%uold)   ! host -> device (current buffer, via .cuf helper)
+#endif
 end subroutine set_uold_device
+!###########################################################
+! Add a UNIFORM velocity boost directly to the device-resident particle vp, IN PLACE
+! (for ramses_boost_particles imposing a Galilean DM stream in the baryon-rest frame).
+! Must NOT copy the host xp/vp over the device arrays: the device particles are
+! Peano-Hilbert SORTED (cub_sort_part) while the host arrays are in original order, so a
+! host->device copy clobbers the sorted device positions → illegal memory access at the
+! next device step.  A uniform boost is order-independent, so we just add it on device.
+!###########################################################
+#ifdef _CUDA
+subroutine gpu_boost_part_device(npart, vx, vy, vz)
+  implicit none
+  integer, intent(in) :: npart
+  real(kind=8), intent(in) :: vx, vy, vz
+  integer :: i
+  if (.not. allocated(vp)) return
+  if (npart < 1) return
+  ! explicit CUF kernel: in-place per-particle update (vp on both sides is fine here, each
+  ! thread touches its own element — unlike a whole-array assignment, which nvfortran rejects).
+  !$cuf kernel do(1) <<<*,*>>>
+  do i = 1, npart
+     vp(i,1) = vp(i,1) + vx
+     vp(i,2) = vp(i,2) + vy
+     vp(i,3) = vp(i,3) + vz
+  end do
+  call GPU_Error_Check(__FILE__, __LINE__)
+end subroutine gpu_boost_part_device
+#endif
 !###########################################################
 !###########################################################
 !###########################################################
